@@ -70,25 +70,34 @@ LOGIN_HTML = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>登录 · Tongtong Monitor</title>
 <style>
-  body { margin:0; background:#0f1420; color:#dbe4f4; display:flex;
-         align-items:center; justify-content:center; min-height:100vh;
-         font:14px/1.5 "Segoe UI","Microsoft YaHei",system-ui,sans-serif; }
-  .box { background:#1a2233; border:1px solid #2a3550; border-radius:12px;
-         padding:32px 36px; width:320px; }
-  h1 { font-size:17px; margin:0 0 20px; text-align:center; }
-  input { width:100%; box-sizing:border-box; padding:10px 12px; border-radius:6px;
-          border:1px solid #2a3550; background:#0f1420; color:#dbe4f4;
-          font-size:14px; margin-bottom:14px; }
-  input:focus { outline:none; border-color:#4d9fff; }
-  button { width:100%; padding:10px; border:0; border-radius:6px; background:#4d9fff;
-           color:#fff; font-size:14px; cursor:pointer; }
-  button:hover { background:#3b8ae0; }
-  .error { color:#ff5c6c; text-align:center; margin-bottom:12px; font-size:13px; }
+  :root { --ink:#18334b; --muted:#6d8395; --blue:#2d8cf0; --blue-deep:#1773d6;
+          --line:#dceaf2; --card:rgba(255,255,255,.9); }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+         color:var(--ink); font:14px/1.5 "Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+         background:radial-gradient(circle at 14% 16%, #d6f7ef 0, transparent 28rem),
+                    radial-gradient(circle at 88% 84%, #dceeff 0, transparent 32rem), #f6fbfd; }
+  .box { width:min(360px, calc(100vw - 36px)); padding:34px 36px 30px; border:1px solid rgba(255,255,255,.9);
+         border-radius:22px; background:var(--card); box-shadow:0 20px 55px rgba(47,105,137,.16);
+         backdrop-filter:blur(10px); }
+  .eyebrow { margin:0 0 6px; color:#47a89a; font-size:12px; font-weight:700; letter-spacing:.12em; text-align:center; }
+  h1 { margin:0 0 7px; color:#17364d; font-size:24px; letter-spacing:-.02em; text-align:center; }
+  .sub { margin:0 0 23px; color:var(--muted); font-size:13px; text-align:center; }
+  input { width:100%; padding:11px 13px; margin-bottom:14px; border:1px solid var(--line); border-radius:10px;
+          background:#fbfeff; color:var(--ink); font-size:14px; transition:border-color .2s, box-shadow .2s; }
+  input:focus { outline:none; border-color:#76b8f7; box-shadow:0 0 0 4px rgba(45,140,240,.12); }
+  button { width:100%; padding:11px; border:0; border-radius:10px; color:#fff; font-size:14px; font-weight:700;
+           cursor:pointer; background:linear-gradient(135deg, #39b8a6, #2d8cf0); box-shadow:0 8px 16px rgba(45,140,240,.22);
+           transition:transform .18s, box-shadow .18s; }
+  button:hover { transform:translateY(-1px); box-shadow:0 11px 20px rgba(45,140,240,.28); }
+  .error { margin-bottom:12px; color:#d9435b; font-size:13px; text-align:center; }
 </style>
 </head>
 <body>
 <div class="box">
-  <h1>🐘 Tongtong Monitor</h1>
+  <p class="eyebrow">TONGTONG · CONTROL CENTER</p>
+  <h1>童童监控中心</h1>
+  <p class="sub">欢迎回来，连接你的语音助手</p>
   <!--ERROR-->
   <form method="post" action="/login">
     <input type="password" name="password" placeholder="访问口令" autofocus required>
@@ -110,64 +119,79 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Tongtong Backend Monitor</title>
 <style>
-  :root { --bg:#0f1420; --card:#1a2233; --line:#2a3550; --fg:#dbe4f4;
-          --muted:#8fa0c0; --ok:#37d67a; --warn:#f5b942; --bad:#ff5c6c; --acc:#4d9fff; }
+  :root { --bg:#f4fafc; --card:rgba(255,255,255,.92); --line:#dceaf2; --fg:#18334b;
+          --muted:#708596; --ok:#27a97e; --warn:#dc9a2e; --bad:#dc5b6c; --acc:#2d8cf0;
+          --mint:#39b8a6; --soft-blue:#eaf5ff; --soft-mint:#e6f8f2; }
   * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg);
-         font:14px/1.55 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
-  header { padding:16px 24px; border-bottom:1px solid var(--line);
-           display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
-  header h1 { font-size:18px; margin:0; }
+  body { min-height:100vh; margin:0; color:var(--fg); font:14px/1.55 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+         background:radial-gradient(circle at 5% 0, #daf7ef 0, transparent 24rem),
+                    radial-gradient(circle at 96% 8%, #ddecff 0, transparent 30rem), var(--bg); }
+  header { min-height:82px; padding:14px clamp(18px, 4vw, 48px); display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+           border-bottom:1px solid rgba(220,234,242,.9); background:rgba(255,255,255,.76); backdrop-filter:blur(12px);
+           position:sticky; top:0; z-index:10; }
+  .brand { display:flex; align-items:center; gap:11px; }
+  .brand-mark { display:grid; place-items:center; width:38px; height:38px; border-radius:13px; color:#fff; font-size:12px; font-weight:800;
+                letter-spacing:.04em; background:linear-gradient(135deg, var(--mint), var(--acc)); box-shadow:0 7px 14px rgba(45,140,240,.22); }
+  .brand-kicker { display:block; margin-bottom:1px; color:#51a99c; font-size:10px; font-weight:800; letter-spacing:.12em; }
+  header h1 { margin:0; font-size:18px; letter-spacing:-.01em; }
+  .header-spacer { flex:1; }
   .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; }
-  .dot.ok { background:var(--ok); box-shadow:0 0 6px var(--ok); }
-  .dot.bad { background:var(--bad); box-shadow:0 0 6px var(--bad); }
-  main { padding:24px; display:grid; gap:20px; grid-template-columns:repeat(12, 1fr); }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:10px;
-          padding:16px 18px; grid-column:span 6; }
+  .dot.ok { background:var(--ok); box-shadow:0 0 0 4px rgba(39,169,126,.12); }
+  .dot.bad { background:var(--bad); box-shadow:0 0 0 4px rgba(220,91,108,.12); }
+  main { max-width:1500px; margin:0 auto; padding:26px clamp(18px, 4vw, 48px) 44px; display:grid; gap:18px; grid-template-columns:repeat(12, 1fr); }
+  .card { grid-column:span 6; padding:19px 20px; border:1px solid rgba(220,234,242,.95); border-radius:18px; background:var(--card);
+          box-shadow:0 9px 24px rgba(46,103,137,.07); transition:transform .2s, box-shadow .2s; }
+  .card:hover { transform:translateY(-2px); box-shadow:0 13px 29px rgba(46,103,137,.11); }
   .card.full { grid-column:span 12; }
-  .card h2 { font-size:14px; margin:0 0 12px; color:var(--muted); font-weight:600;
-             letter-spacing:.5px; text-transform:uppercase; }
+  .card h2 { margin:0 0 14px; color:#3c596d; font-size:14px; font-weight:800; letter-spacing:.025em; }
   table { width:100%; border-collapse:collapse; }
-  th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); font-size:13px; }
-  th { color:var(--muted); font-weight:500; }
+  th,td { padding:9px 10px; border-bottom:1px solid #edf4f7; font-size:13px; text-align:left; }
+  tr:last-child td { border-bottom:0; } th { color:var(--muted); font-weight:700; }
   td.mono { font-family:Consolas, monospace; font-size:12px; }
-  .tag { display:inline-block; padding:2px 8px; border-radius:20px; font-size:11px; }
-  .tag.online { background:rgba(55,214,122,.15); color:var(--ok); }
-  .tag.offline { background:rgba(255,92,108,.15); color:var(--bad); }
-  .tag.listen { background:rgba(77,159,255,.15); color:var(--acc); }
+  .tag { display:inline-block; padding:3px 9px; border-radius:20px; font-size:11px; font-weight:700; }
+  .tag.online { background:var(--soft-mint); color:#178164; } .tag.offline { background:#fff0f2; color:#c04d61; }
+  .tag.listen { background:var(--soft-blue); color:#2879c9; }
   .kv { display:grid; grid-template-columns:auto 1fr; gap:6px 16px; font-size:13px; }
   .kv dt { color:var(--muted); } .kv dd { margin:0; word-break:break-all; }
-  #logs { height:320px; overflow:auto; background:#0a0e18; border:1px solid var(--line);
-          border-radius:8px; padding:10px 12px; font-family:Consolas, monospace;
+  #logs { height:320px; overflow:auto; padding:11px 13px; border:1px solid #dceaf2; border-radius:12px; background:#f7fbfd;
+          color:#3b5265; font-family:Consolas, monospace;
           font-size:12px; line-height:1.5; white-space:pre-wrap; }
-  .log-info { color:#9ecbff; } .log-warning { color:var(--warn); }
+  .log-info { color:#3475a7; } .log-warning { color:#ae771b; }
   .log-error, .log-critical { color:var(--bad); }
-  .log-debug { color:#7a8aa8; }
-  .btn { background:var(--acc); color:#fff; border:0; border-radius:6px; padding:8px 16px;
-         cursor:pointer; font-size:13px; }
+  .log-debug { color:#91a2ae; }
+  .btn { padding:8px 15px; border:0; border-radius:9px; color:#fff; cursor:pointer; font-size:13px; font-weight:700;
+         background:linear-gradient(135deg, var(--mint), var(--acc)); box-shadow:0 5px 12px rgba(45,140,240,.18); transition:transform .18s, box-shadow .18s; }
+  .btn:hover { transform:translateY(-1px); box-shadow:0 8px 16px rgba(45,140,240,.24); }
   .btn:disabled { opacity:.45; cursor:not-allowed; }
-  .btn.warn { background:var(--warn); color:#1a1a1a; }
+  .btn.warn { background:linear-gradient(135deg, #f6bd58, #df9630); color:#fff; }
   .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
   .muted { color:var(--muted); font-size:12px; }
   .empty { color:var(--muted); font-size:13px; padding:8px 0; }
   .hint { font-size:12px; color:var(--muted); margin-top:8px; }
-  .badge { background:var(--line); color:var(--muted); border-radius:4px; padding:2px 8px; font-size:11px; }
+  .badge { padding:3px 9px; border-radius:20px; color:#527087; font-size:11px; background:#e8f3f8; }
+  input:not([type="checkbox"]), select, textarea { border:1px solid #d5e6ef !important; border-radius:9px !important; background:#fbfeff !important;
+          color:var(--fg) !important; box-shadow:none; transition:border-color .18s, box-shadow .18s; }
+  input:not([type="checkbox"]):focus, select:focus, textarea:focus { outline:none; border-color:#72b7f4 !important; box-shadow:0 0 0 3px rgba(45,140,240,.11) !important; }
   #toast { position:fixed; bottom:28px; left:50%; transform:translateX(-50%);
-           background:#1a2233; border:1px solid var(--line); color:var(--fg);
-           padding:10px 20px; border-radius:8px; font-size:13px; z-index:999;
-           box-shadow:0 4px 20px rgba(0,0,0,.5); opacity:0; pointer-events:none;
+           padding:10px 20px; border:1px solid var(--line); border-radius:11px; color:var(--fg); background:#fff;
+           font-size:13px; z-index:999; box-shadow:0 10px 30px rgba(32,83,112,.18); opacity:0; pointer-events:none;
            transition:opacity .25s; max-width:90%; text-align:center; }
   #toast.show { opacity:1; }
   #toast.ok { border-color:var(--ok); color:var(--ok); }
   #toast.err { border-color:var(--bad); color:var(--bad); }
+  @media (max-width:760px) { header { align-items:flex-start; } .header-spacer { display:none; } main { grid-template-columns:1fr; padding-top:18px; }
+    .card, .card.full { grid-column:1; } .card:hover { transform:none; } #card-devices { overflow-x:auto; } }
 </style>
 </head>
 <body>
 <header>
-  <h1>🐘 Tongtong Backend Monitor</h1>
+  <div class="brand">
+    <span class="brand-mark">TT</span>
+    <div><span class="brand-kicker">TONGTONG · CONTROL CENTER</span><h1>童童监控中心</h1></div>
+  </div>
   <span id="health"><span class="dot bad"></span>检查中…</span>
   <span class="badge" id="uptime">—</span>
-  <span class="muted" style="flex:1"></span>
+  <span class="header-spacer"></span>
   <label class="muted"><input type="checkbox" id="autorefresh" checked> 自动刷新</label>
   <button class="btn" onclick="refresh()">刷新</button>
 </header>
