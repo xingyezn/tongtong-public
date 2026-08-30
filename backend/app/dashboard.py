@@ -173,12 +173,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           color:var(--fg) !important; box-shadow:none; transition:border-color .18s, box-shadow .18s; }
   input:not([type="checkbox"]):focus, select:focus, textarea:focus { outline:none; border-color:#72b7f4 !important; box-shadow:0 0 0 3px rgba(45,140,240,.11) !important; }
   #toast { position:fixed; bottom:28px; left:50%; transform:translateX(-50%);
-           padding:10px 20px; border:1px solid var(--line); border-radius:11px; color:var(--fg); background:#fff;
-           font-size:13px; z-index:999; box-shadow:0 10px 30px rgba(32,83,112,.18); opacity:0; pointer-events:none;
-           transition:opacity .25s; max-width:90%; text-align:center; }
-  #toast.show { opacity:1; }
-  #toast.ok { border-color:var(--ok); color:var(--ok); }
-  #toast.err { border-color:var(--bad); color:var(--bad); }
+           display:flex; align-items:center; gap:10px; min-width:250px; max-width:min(420px, 90vw); padding:13px 17px;
+           border:1px solid var(--line); border-radius:14px; color:var(--fg); background:#fff; font-size:14px; font-weight:700;
+           z-index:999; box-shadow:0 14px 36px rgba(32,83,112,.22); opacity:0; pointer-events:none;
+           transition:opacity .25s, transform .25s; text-align:left; }
+  #toast.show { opacity:1; transform:translateX(-50%) translateY(-8px); }
+  #toast.ok { border-color:#95dfcb; color:#167e63; background:#f1fcf8; }
+  #toast.err { border-color:#f0a8b2; color:#c4475a; background:#fff6f7; }
+  .toast-icon { display:grid; place-items:center; flex:0 0 26px; width:26px; height:26px; border-radius:50%; color:#fff; font-size:15px; }
+  #toast.ok .toast-icon { background:var(--ok); } #toast.err .toast-icon { background:var(--bad); }
   @media (max-width:760px) { header { align-items:flex-start; } .header-spacer { display:none; } main { grid-template-columns:1fr; padding-top:18px; }
     .card, .card.full { grid-column:1; } .card:hover { transform:none; } #card-devices { overflow-x:auto; } }
 </style>
@@ -319,7 +322,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <input type="number" id="cfg-out-rate" min="8000" max="48000" step="8000" value="24000" style="flex:1;max-width:140px;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4">
     </div>
     <div class="row">
-      <button class="btn" onclick="saveModel()">保存模型 / 音色 / 设定</button>
+      <button class="btn" id="save-model-btn" onclick="saveModel()">保存模型 / 音色 / 设定</button>
       <span class="muted" id="model-status"></span>
     </div>
     <div class="hint">
@@ -351,7 +354,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
   </div>
 </main>
-<div id="toast"></div>
+<div id="toast" role="status" aria-live="polite"></div>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -365,6 +368,17 @@ function fmtDur(sec) {
   if (h) return h + "时" + m + "分";
   if (m) return m + "分" + s + "秒";
   return s + "秒";
+}
+
+let toastTimer = null;
+function showToast(message, kind) {
+  const toast = $("toast");
+  const isError = kind === "err";
+  toast.className = (isError ? "err" : "ok") + " show";
+  toast.innerHTML = '<span class="toast-icon">' + (isError ? "!" : "✓") +
+    '</span><span>' + message + '</span>';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toast.classList.remove("show"); }, 4200);
 }
 
 async function refresh() {
@@ -602,18 +616,28 @@ async function saveModel() {
     $("model-status").style.color = "var(--bad)";
     return;
   }
+  const saveButton = $("save-model-btn");
+  const normalText = saveButton.textContent;
+  saveButton.disabled = true;
+  saveButton.textContent = "保存中…";
   try {
     const r = await fetch("/api/model", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+    if (!r.ok) throw new Error("save failed");
     const d = await r.json();
     $("model-status").textContent = "已保存: " + d.model + " / " + d.voice;
     $("model-status").style.color = "var(--ok)";
+    showToast("模型设置已保存 · " + d.model + " / " + d.voice, "ok");
   } catch (e) {
     $("model-status").textContent = "保存失败";
     $("model-status").style.color = "var(--bad)";
+    showToast("保存失败，请检查服务连接后重试", "err");
+  } finally {
+    saveButton.disabled = false;
+    saveButton.textContent = normalText;
   }
 }
 
