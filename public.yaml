@@ -1,0 +1,10 @@
+# Team-shared, non-secret deployment endpoints.
+# Local secrets, passwords, device tokens, and optional per-developer overrides
+# belong in private/local.yaml and must not be committed.
+
+firmware:
+  ota_url: "http://120.48.107.230:8080/ota"
+
+backend:
+  server:
+    public_ws_url: "ws://120.48.107.230:8080/ws"

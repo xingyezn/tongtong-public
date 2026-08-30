@@ -8,24 +8,27 @@ web monitoring page.
 
 - `firmware/` — ESP32 firmware based on xiaozhi-esp32.
 - `backend/` — aiohttp WebSocket/HTTP server, audio bridge, MCP bridge, and monitor.
-- `private/local.example.yaml` — the single template for deployment-specific settings.
-- `scripts/configure_local.py` — writes the ignored backend runtime config and firmware OTA override.
+- `public.yaml` — team-shared, non-secret OTA and WebSocket endpoints.
+- `private/local.example.yaml` — template for credentials, passwords, tokens, and optional local overrides.
+- `scripts/configure_local.py` — merges shared and local settings, then writes ignored runtime files.
 
 Generated files, compiled firmware, credentials, deployment hosts, device tokens,
 and local tutorials are intentionally not tracked.
 
 ## Configure a local deployment
 
-1. Copy `private/local.example.yaml` to `private/local.yaml`.
-2. Fill in the OTA URL, public WebSocket URL, dashboard password, and any service settings.
-3. Install the backend requirements, then generate runtime configuration:
+1. Review the team-wide endpoints in `public.yaml`.
+2. Copy `private/local.example.yaml` to `private/local.yaml`.
+3. Fill in the dashboard password, credentials, and any local service settings. Local values can intentionally override the shared endpoints.
+4. Install the backend requirements, then generate runtime configuration:
 
    ```bash
    python -m pip install -r backend/requirements.txt
    python scripts/configure_local.py
    ```
 
-`private/local.yaml` and `backend/config.yaml` are ignored by Git. Use
+`private/local.yaml` and `backend/config.yaml` are ignored by Git. `public.yaml`
+is tracked and must contain endpoints only—never credentials or passwords. Use
 `DASHSCOPE_API_KEY` through the service environment rather than committing an API key.
 
 ## Run the backend
