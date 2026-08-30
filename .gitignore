@@ -1,0 +1,33 @@
+# Private deployment configuration. Copy the example, then keep real values local.
+/private/local.yaml
+/backend/config.yaml
+
+# ESP-IDF generated files and local dependencies
+/firmware/build/
+/firmware/managed_components/
+/firmware/components/
+/firmware/sdkconfig
+/firmware/sdkconfig.old
+/firmware/sdkconfig.defaults.*.local
+/firmware/sdkconfig.defaults.private
+/firmware/dependencies.lock
+/firmware/.cache/
+
+# Python environments, caches, and test artifacts
+/backend/__pycache__/
+/backend/**/*.py[cod]
+/backend/.venv/
+/backend/venv/
+/backend/env/
+/backend/*.log
+/backend/tools/*.wav
+/backend/tools/*.opus
+/scripts/__pycache__/
+*.py[cod]
+
+# Local-only notes and large materials, deliberately not published
+/firmware/docs/BUILD_NOTES.md
+/tutorials/
+*.elf
+*.map
+*.bin

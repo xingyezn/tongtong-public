@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 部署/环境
+*.log
+/tmp/
+deploy/xiaozhi-omni.env
+
+# 密钥与配置
+config.yaml.bak
+*.key
+*.pem
+
+# 编辑器
+.idea/
+.vscode/
+.DS_Store
+
+# 本地测试产物
+tools/*.wav
+tools/*.opus

@@ -1,0 +1,36 @@
+# Public-safe backend configuration example.
+# Use private/local.example.yaml plus scripts/configure_local.py for real values.
+server:
+  host: "0.0.0.0"
+  port: 8080
+  public_ws_url: "wss://your-server.example/ws"
+
+dashscope:
+  api_key: ""
+  model: "qwen3.5-omni-flash-realtime"
+  workspace_id: ""
+  realtime_url: "wss://{workspace}.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime"
+  voice: "Ethan"
+  instructions: "You are Tongtong, a friendly voice assistant. Reply briefly in natural Chinese."
+  output_sample_rate: 24000
+  input_sample_rate: 16000
+
+audio:
+  opus_frame_ms: 60
+  omni_input_format: "wav"
+  omni_output_format: "wav"
+
+devices:
+  enabled: false
+  tokens: {}
+
+logging:
+  level: "INFO"
+
+vad:
+  silence_duration_ms: 400
+  energy_threshold: 100.0
+
+dashboard:
+  password: "change-me-before-production"
+  session_ttl: 86400
