@@ -8,18 +8,18 @@ web monitoring page.
 
 - `firmware/` — ESP32 firmware based on xiaozhi-esp32.
 - `backend/` — aiohttp WebSocket/HTTP server, audio bridge, MCP bridge, and monitor.
-- `public.yaml` — team-shared, non-secret OTA and WebSocket endpoints.
-- `private/local.example.yaml` — template for credentials, passwords, tokens, and optional local overrides.
-- `scripts/configure_local.py` — merges shared and local settings, then writes ignored runtime files.
+- `public.yaml` — tracked redacted endpoint placeholders; it contains no deployment data.
+- `private/local.example.yaml` — template for real endpoints, credentials, passwords, and tokens.
+- `scripts/configure_local.py` — merges the public-safe defaults and ignored local settings, then writes ignored runtime files.
 
-Generated files, compiled firmware, credentials, deployment hosts, device tokens,
+Generated files, compiled firmware, credentials, deployment hosts and endpoints, device tokens,
 and local tutorials are intentionally not tracked.
 
 ## Configure a local deployment
 
-1. Review the team-wide endpoints in `public.yaml`.
+1. Keep the redacted endpoint placeholders in `public.yaml` unchanged.
 2. Copy `private/local.example.yaml` to `private/local.yaml`.
-3. Fill in the dashboard password, credentials, and any local service settings. Local values can intentionally override the shared endpoints.
+3. Fill in the real OTA/WS endpoints, dashboard password, credentials, and any local service settings.
 4. Install the backend requirements, then generate runtime configuration:
 
    ```bash
@@ -28,8 +28,12 @@ and local tutorials are intentionally not tracked.
    ```
 
 `private/local.yaml` and `backend/config.yaml` are ignored by Git. `public.yaml`
-is tracked and must contain endpoints only—never credentials or passwords. Use
+is tracked but must retain its redacted examples—never real endpoints, credentials,
+or passwords. Use
 `DASHSCOPE_API_KEY` through the service environment rather than committing an API key.
+
+For the complete local-build, production-deployment, and public-artifact policy,
+read [docs/CONFIGURATION_WORKFLOW.md](docs/CONFIGURATION_WORKFLOW.md).
 
 ## Run the backend
 
@@ -58,7 +62,8 @@ are ignored and must not be committed.
 ## Sharing policy
 
 This repository is intended to be safe to push to a shared remote. Before each
-push, run the secret scan documented in [docs/SHARING.md](docs/SHARING.md).
+push, follow [docs/CONFIGURATION_WORKFLOW.md](docs/CONFIGURATION_WORKFLOW.md)
+and run the secret scan documented in [docs/SHARING.md](docs/SHARING.md).
 
 The firmware retains its upstream license at `firmware/LICENSE`. Confirm the
 license you want for the backend before publishing it as open source.

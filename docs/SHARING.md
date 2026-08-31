@@ -1,8 +1,11 @@
 # Safe sharing checklist
 
-This repository deliberately tracks firmware, backend source, and the approved
-team-shared endpoints in `public.yaml`, while excluding private deployment
+This repository deliberately tracks firmware, backend source, and only redacted
+endpoint placeholders in `public.yaml`, while excluding all deployment
 information and generated artifacts.
+
+For the complete distinction between shareable source, local firmware builds,
+and private server runtime settings, read [CONFIGURATION_WORKFLOW.md](CONFIGURATION_WORKFLOW.md).
 
 Before committing or pushing:
 
@@ -14,9 +17,8 @@ rg -n -i "api[_-]?key|password|secret|private[_-]?key|credential" \
 ```
 
 Review each search result: source code may legitimately refer to configuration
-keys, and `public.yaml` may contain the approved team endpoint. No credential,
-server login, device token, password, or other private endpoint should be
-included.
+keys, but no real endpoint, credential, server login, device token, or password
+should be included. `public.yaml` must retain its `your-server.example` values.
 
 Do not add build directories, firmware binaries, device dumps, recordings,
 private tutorials, or editor/virtual-environment files. Use releases or a

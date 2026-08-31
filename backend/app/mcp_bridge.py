@@ -69,6 +69,39 @@ class McpBridge:
             req["call_id"] = call_id  # 自定义字段，关联 Omni tool_call id
         return req
 
+    def make_omni_tools(self) -> list:
+        """Convert the device MCP tools/list result to Realtime function tools.
+
+        The ESP32 is the source of truth for capabilities.  Keeping this
+        conversion here prevents the model schema from drifting from the
+        device's JSON Schema as boards add or remove tools.
+        """
+        result = []
+        for tool in self.tools:
+            if not isinstance(tool, dict):
+                continue
+            name = tool.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            annotations = tool.get("annotations") or {}
+            if annotations.get("audience") == ["user"]:
+                continue
+            parameters = tool.get("inputSchema") or {
+                "type": "object",
+                "properties": {},
+            }
+            if not isinstance(parameters, dict):
+                continue
+            result.append({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": tool.get("description") or name,
+                    "parameters": parameters,
+                },
+            })
+        return result
+
     # ---- 处理设备返回的 MCP 消息 ----
     def on_device_mcp(self, payload: dict):
         """设备回传的 mcp payload（jsonrpc 2.0 result/error）"""

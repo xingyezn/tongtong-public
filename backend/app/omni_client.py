@@ -72,10 +72,15 @@ class OmniClient:
     # 设备端已经用 VAD 判断了说话结束，这里把整段 PCM 发给模型，
     # 等模型返回完整音频后结束。
     # ------------------------------------------------------------------
-    async def chat_stream(self, pcm: bytes):
+    async def chat_stream(self, pcm: bytes, tools=None, tool_handler=None):
         """把一段 16k PCM 语音发给模型，流式产出音频/文本。
 
         pcm: 设备上传的 16k 单声道 PCM 字节
+        tools: OpenAI-compatible function definitions derived from the ESP32
+            MCP tools/list response.
+        tool_handler: async callback that executes one device MCP call and
+            returns its JSON-serialised result.
+
         yield 事件:
           {"type":"audio", "audio_b64": "...", "sample_rate": 24000}
           {"type":"text", "text": "..."}
@@ -103,15 +108,21 @@ class OmniClient:
                 # 1. 会话配置：手动模式（客户端控制 VAD 结束），音频+文本输出
                 # 注意: 必须显式 turn_detection=null 关闭服务端VAD，
                 # 否则服务端自行管理音频缓冲，手动 commit 会报 "buffer too small"
+                session_config = {
+                    "modalities": ["text", "audio"],
+                    "voice": self.voice,
+                    "turn_detection": None,
+                    "instructions": self.instructions,
+                    "input_audio_format": "pcm",
+                    "output_audio_format": "pcm",
+                }
+                if tools:
+                    session_config["tools"] = tools
+
                 await ws.send_json({
                     "event_id": "evt-sess",
                     "type": "session.update",
-                    "session": {
-                        "modalities": ["text", "audio"],
-                        "voice": self.voice,
-                        "turn_detection": None,
-                        "instructions": self.instructions,
-                    },
+                    "session": session_config,
                 })
 
                 # 等 session.updated 就绪
@@ -149,7 +160,12 @@ class OmniClient:
                 await ws.send_json({"event_id": "evt-resp", "type": "response.create"})
                 log.info("omni: sent %d bytes audio, waiting response", len(pcm))
 
-                # 4. 收响应：音频 delta / 文本 delta
+                # 4. 收响应：音频 delta / 文本 delta / function call。
+                # 一个初始响应可以要求多个工具。先等待 response.done，再把
+                # 所有结果写回并触发一次后续推理，避免多个 response.create 重叠。
+                pending_tool_calls = []
+                completed_call_ids = set()
+                tool_round = 0
                 while True:
                     msg = await asyncio.wait_for(ws.receive(), timeout=60)
                     if msg.type == aiohttp.WSMsgType.TEXT:
@@ -158,9 +174,45 @@ class OmniClient:
                         if t == "response.audio.delta":
                             yield {"type": "audio", "audio_b64": obj.get("delta", ""),
                                    "sample_rate": self.output_rate}
-                        elif t == "response.audio_transcript.delta":
+                        elif t in ("response.audio_transcript.delta", "response.text.delta"):
                             yield {"type": "text", "text": obj.get("delta", "")}
+                        elif t == "response.function_call_arguments.done":
+                            call_id = obj.get("call_id")
+                            if call_id and call_id not in completed_call_ids:
+                                pending_tool_calls.append({
+                                    "type": "tool_call",
+                                    "id": call_id,
+                                    "name": obj.get("name", ""),
+                                    "arguments": self._parse_arguments(obj.get("arguments", "{}")),
+                                })
+                                completed_call_ids.add(call_id)
                         elif t == "response.done":
+                            # Some compatible gateways include function calls
+                            # only in response.done. Accept that representation
+                            # as a fallback while preferring the dedicated event.
+                            for item in obj.get("response", {}).get("output", []):
+                                if item.get("type") != "function_call":
+                                    continue
+                                call_id = item.get("call_id")
+                                if call_id and call_id not in completed_call_ids:
+                                    pending_tool_calls.append({
+                                        "type": "tool_call",
+                                        "id": call_id,
+                                        "name": item.get("name", ""),
+                                        "arguments": self._parse_arguments(item.get("arguments", "{}")),
+                                    })
+                                    completed_call_ids.add(call_id)
+
+                            if pending_tool_calls:
+                                await self._complete_tool_calls(ws, pending_tool_calls, tool_handler)
+                                pending_tool_calls = []
+                                tool_round += 1
+                                await ws.send_json({
+                                    "event_id": "evt-tool-response-{}".format(tool_round),
+                                    "type": "response.create",
+                                    "response": {"modalities": ["text", "audio"]},
+                                })
+                                continue
                             yield {"type": "done"}
                             break
                         elif t == "error":
@@ -175,3 +227,41 @@ class OmniClient:
         except Exception as e:
             log.error("omni ws error: %s", e)
             yield {"type": "error", "message": str(e)}
+
+    @staticmethod
+    def _parse_arguments(arguments):
+        if isinstance(arguments, dict):
+            return arguments
+        if not arguments:
+            return {}
+        try:
+            value = json.loads(arguments)
+        except (TypeError, ValueError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    async def _complete_tool_calls(self, ws, calls, tool_handler):
+        """Execute device tools, return each result, then let the model reply."""
+        for call in calls:
+            if not call.get("name"):
+                result = json.dumps({"error": "missing function name"})
+            elif tool_handler is None:
+                result = json.dumps({"error": "device tools unavailable"})
+            else:
+                try:
+                    result = await tool_handler(call)
+                except Exception as exc:
+                    log.exception("device tool handler failed: %s", call.get("name"))
+                    result = json.dumps({"error": str(exc)})
+            if result is None:
+                result = json.dumps({"error": "device tool did not return a result"})
+            if not isinstance(result, str):
+                result = json.dumps(result, ensure_ascii=False)
+            await ws.send_json({
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "function_call_output",
+                    "call_id": call["id"],
+                    "output": result,
+                },
+            })

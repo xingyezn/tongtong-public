@@ -46,7 +46,7 @@ def merge_mappings(base, overrides):
 
 
 def validate_public_config(data):
-    """Keep the tracked file limited to explicitly non-secret endpoints."""
+    """Keep the tracked file limited to explicitly redacted endpoints."""
     allowed = {
         "firmware": {"ota_url"},
         "backend": {"server": {"public_ws_url"}},
@@ -66,6 +66,32 @@ def validate_public_config(data):
                         ("backend.server.public_ws_url", server.get("public_ws_url"))):
         if not isinstance(value, str) or not value:
             raise ValueError("{} must be a non-empty string".format(name))
+    if firmware["ota_url"] != "https://your-server.example/ota":
+        raise ValueError("public.yaml firmware.ota_url must use the redacted example endpoint")
+    if server["public_ws_url"] != "wss://your-server.example/ws":
+        raise ValueError("public.yaml backend.server.public_ws_url must use the redacted example endpoint")
+
+
+def migrate_public_endpoints(public_data, private_data):
+    """Move legacy tracked endpoints to the ignored local configuration."""
+    firmware = require_mapping(public_data, "firmware")
+    backend = require_mapping(public_data, "backend")
+    server = require_mapping(backend, "server")
+    private_firmware = private_data.setdefault("firmware", {})
+    private_backend = private_data.setdefault("backend", {})
+    if not isinstance(private_firmware, dict) or not isinstance(private_backend, dict):
+        raise ValueError("private configuration firmware/backend must be mappings")
+    private_server = private_backend.setdefault("server", {})
+    if not isinstance(private_server, dict):
+        raise ValueError("private configuration backend.server must be a mapping")
+    private_firmware["ota_url"] = firmware.get("ota_url", "")
+    private_server["public_ws_url"] = server.get("public_ws_url", "")
+    return private_data
+
+
+def write_yaml(path, data):
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        yaml.safe_dump(data, handle, allow_unicode=True, sort_keys=False)
 
 
 def update_firmware_ota_url(ota_url):
@@ -82,14 +108,15 @@ def update_firmware_ota_url(ota_url):
 def write_backend_config(backend):
     for section in ("server", "dashscope", "audio", "devices", "logging", "vad", "dashboard"):
         require_mapping(backend, section)
-    with BACKEND_CONFIG.open("w", encoding="utf-8", newline="\n") as handle:
-        yaml.safe_dump(backend, handle, allow_unicode=True, sort_keys=False)
+    write_yaml(BACKEND_CONFIG, backend)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Apply ignored private configuration")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--public-config", type=Path, default=DEFAULT_PUBLIC_CONFIG)
+    parser.add_argument("--migrate-public-endpoints", action="store_true",
+                        help="copy legacy public.yaml endpoints to ignored local.yaml and exit")
     args = parser.parse_args()
 
     config_path = args.config.resolve()
@@ -102,8 +129,13 @@ def main():
         )
 
     public_data = read_config(public_config_path, "public")
-    validate_public_config(public_data)
     private_data = read_config(config_path, "private")
+    if args.migrate_public_endpoints:
+        migrated = migrate_public_endpoints(public_data, private_data)
+        write_yaml(config_path, migrated)
+        print("Copied public endpoints into ignored private/local.yaml")
+        return
+    validate_public_config(public_data)
     data = merge_mappings(public_data, private_data)
     firmware = require_mapping(data, "firmware")
     backend = require_mapping(data, "backend")

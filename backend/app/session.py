@@ -302,41 +302,29 @@ class Session:
 
         log.info("omni turn: %d bytes PCM (%.1fs)", len(pcm), len(pcm) / DEVICE_SAMPLE_RATE / 2)
 
-        # 累积模型返回的所有音频块（response.audio.delta 分片），拼接后一次性下发，
-        # 避免每块单独发 tts start/stop 导致播放断续
-        audio_chunks = []
+        # 音频增量直接切成设备需要的 60ms Opus 帧下发。不要等待
+        # response.done，否则首句语音会被整段模型生成时间拖慢。
+        stream_state = {"pcm": bytearray(), "started": False}
         text_parts = []
 
-        async for evt in self.omni.chat_stream(pcm):
+        tools = self._mcp.make_omni_tools() if self._mcp else []
+        async for evt in self.omni.chat_stream(
+                pcm, tools=tools, tool_handler=self._handle_tool_call):
             et = evt.get("type")
             if et == "error":
                 log.error("omni error: %s", evt.get("message"))
-                await self.send_json({"type": "tts", "state": "stop"})
-                return
+                break
             elif et == "text":
                 text_parts.append(evt.get("text", ""))
             elif et == "audio":
-                audio_chunks.append(evt.get("audio_b64", ""))
+                await self._stream_omni_audio(evt, stream_state)
             elif et == "done":
                 break
 
         if text_parts:
             log.info("omni reply: %s", "".join(text_parts))
-
-        if audio_chunks:
-            import base64 as b64
-            # 拼接所有音频块
-            combined = b"".join(b64.b64decode(c) for c in audio_chunks if c)
-            log.info("omni audio: %d bytes total", len(combined))
-            if combined:
-                await self._deliver_audio({"audio_b64": b64.b64encode(combined).decode(),
-                                           "sample_rate": self.server_sample_rate})
-                await self.send_json({"type": "tts", "state": "stop"})
-                log.info("omni turn done, audio delivered")
-                return
-
-        await self.send_json({"type": "tts", "state": "stop"})
-        log.info("omni turn done, no audio")
+        await self._finish_omni_audio(stream_state)
+        log.info("omni turn done, streamed=%s", stream_state["started"])
 
     async def _echo_mode(self, pcm: bytes):
         """回环模式：把设备上传的音频原样回放，模拟模型输入/输出。
@@ -362,6 +350,7 @@ class Session:
 
         # 2) 回放音频（16k -> 24k -> opus 下发）
         await self.send_json({"type": "tts", "state": "start"})
+        self.speaking = True
         if pcm:
             pcm24 = resample_pcm(pcm, DEVICE_SAMPLE_RATE, self.server_sample_rate)
             frame_bytes = self.server_sample_rate * DEVICE_FRAME_MS // 1000 * 2
@@ -375,9 +364,11 @@ class Session:
                 # 按帧节奏发送，给设备解码/播放时间，避免瞬间灌入导致被 tts stop 清空
                 await asyncio.sleep(frame_dur)
         await self.send_json({"type": "tts", "state": "stop"})
+        self.speaking = False
         log.info("=== ECHO 结束 ===")
-    async def _deliver_audio(self, evt: dict):
-        """把 Omni 返回的音频（base64, sample_rate）转成 24k opus 发设备。"""
+
+    async def _stream_omni_audio(self, evt: dict, state: dict):
+        """Append one Realtime PCM delta and immediately send complete frames."""
         import base64 as b64
         audio_b64 = evt.get("audio_b64")
         if not audio_b64:
@@ -389,8 +380,6 @@ class Session:
             return
 
         sample_rate = evt.get("sample_rate", self.server_sample_rate)
-        # TODO: 解析百炼音频格式（wav/pcm/opus）——按实际返回处理
-        # 这里按 wav 解析
         pcm = raw
         rate = sample_rate
         if raw[:4] == b"RIFF":
@@ -400,21 +389,36 @@ class Session:
             except Exception as e:
                 log.warning("wav parse err: %s, treat as pcm", e)
 
-        if rate != DEVICE_SAMPLE_RATE:
+        if rate != self.server_sample_rate:
             pcm = resample_pcm(pcm, rate, self.server_sample_rate)
 
-        # 按 60ms 帧切分编码下发，先发 tts start
-        await self.send_json({"type": "tts", "state": "start"})
+        state["pcm"].extend(pcm)
         frame_bytes = self.server_sample_rate * DEVICE_FRAME_MS // 1000 * 2
-        frame_dur = DEVICE_FRAME_MS / 1000.0
-        for i in range(0, len(pcm), frame_bytes):
-            chunk = pcm[i:i + frame_bytes]
-            if len(chunk) < frame_bytes:
-                # 不足一帧补零
-                chunk = chunk + b"\x00" * (frame_bytes - len(chunk))
+        while len(state["pcm"]) >= frame_bytes:
+            chunk = bytes(state["pcm"][:frame_bytes])
+            del state["pcm"][:frame_bytes]
+            if not state["started"]:
+                await self.send_json({"type": "tts", "state": "start"})
+                state["started"] = True
+                self.speaking = True
             opus = self.device_encoder.encode(chunk, DEVICE_FRAME_MS)
             await self.send_audio_opus(opus)
-            await asyncio.sleep(frame_dur)  # 按帧节奏，给设备解码/播放时间
+
+    async def _finish_omni_audio(self, state: dict):
+        """Flush a partial PCM frame and stop device playback exactly once."""
+        pcm = state["pcm"]
+        if pcm:
+            frame_bytes = self.server_sample_rate * DEVICE_FRAME_MS // 1000 * 2
+            chunk = bytes(pcm) + b"\x00" * (frame_bytes - len(pcm))
+            if not state["started"]:
+                await self.send_json({"type": "tts", "state": "start"})
+                state["started"] = True
+                self.speaking = True
+            opus = self.device_encoder.encode(chunk, DEVICE_FRAME_MS)
+            await self.send_audio_opus(opus)
+            pcm.clear()
+        await self.send_json({"type": "tts", "state": "stop"})
+        self.speaking = False
 
     async def _play_sound_pcm_if_needed(self, pcm):
         """（预留）播放系统提示音"""

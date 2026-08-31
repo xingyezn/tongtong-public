@@ -1,12 +1,15 @@
 # Copy this file to private/local.yaml and fill in your deployment values.
-# private/local.yaml is ignored by Git and is the only place for credentials,
-# optional per-developer overrides, and device-specific settings. Team-wide
-# OTA and WebSocket endpoints are tracked in ../public.yaml.
+# private/local.yaml is ignored by Git and is the only place for real endpoints,
+# credentials, optional per-developer overrides, and device-specific settings.
+
+firmware:
+  ota_url: "https://your-server.example/ota"
 
 backend:
   server:
     host: "0.0.0.0"
     port: 8080
+    public_ws_url: "wss://your-server.example/ws"
 
   dashscope:
     # Prefer DASHSCOPE_API_KEY in the service environment. Leave this blank
