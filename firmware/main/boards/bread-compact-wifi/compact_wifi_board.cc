@@ -6,6 +6,7 @@
 #include "button.h"
 #include "config.h"
 #include "mcp_server.h"
+#include "dual_motor_controller.h"
 #include "lamp_controller.h"
 #include "led/single_led.h"
 #include "assets/lang_config.h"
@@ -150,6 +151,10 @@ private:
     // 物联网初始化，逐步迁移到 MCP 协议
     void InitializeTools() {
         static LampController lamp(LAMP_GPIO);
+        static DualMotorController chassis(
+            MOTOR_AIN1_GPIO, MOTOR_AIN2_GPIO, MOTOR_PWMA_GPIO,
+            MOTOR_BIN1_GPIO, MOTOR_BIN2_GPIO, MOTOR_PWMB_GPIO,
+            MOTOR_STBY_GPIO, MOTOR_LEFT_REVERSED, MOTOR_RIGHT_REVERSED);
     }
 
 public:
