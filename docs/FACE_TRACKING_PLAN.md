@@ -14,7 +14,7 @@
 - 视场角：约 65°
 - 物距：约 5～20cm，第一版定位为近距离跟随
 - 云台舵机：2× SG90
-- 主控：ESP32-S3，当前固件目标为 `bread-compact-wifi`
+- 主控：ESP32-S3-DevKitC / WROOM，`N16R8`（16MB Flash + 8MB PSRAM），当前固件目标为 `bread-compact-wifi`
 
 板卡资料说明 Type-C 原生 USB 支持 OTG，但要让 USB 口对外给摄像头供电，必须短接背面的 `USB-OTG` 跳线。CH343 USB 转串口接口与原生 USB 接口分开；摄像头应接原生 USB 口，烧录和串口调试使用 UART/CH343 口。
 
