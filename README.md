@@ -65,6 +65,8 @@ For deterministic network tests that bypass microphone and model input, read
 [docs/MCP_BENCH_TESTING.md](docs/MCP_BENCH_TESTING.md).
 For automated voice-to-model-to-MCP regression tests, read
 [docs/E2E_VOICE_TESTING.md](docs/E2E_VOICE_TESTING.md).
+For the planned USB camera and SG90 face-tracking feature, read
+[docs/FACE_TRACKING_PLAN.md](docs/FACE_TRACKING_PLAN.md).
 
 ## Sharing policy
 
