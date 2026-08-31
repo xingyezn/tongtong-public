@@ -37,3 +37,15 @@ python tools/e2e_voice_test.py --base-url https://your-server.example \
 ```
 
 Dashboard 日志中应依次出现 `listen state=start`、`auto stop by server VAD`、`omni turn`、`MCP tools/call -> device`、`设备 tools/call 回执` 与 `E2E voice test completed`。
+## New-feature test standard
+
+Every new user-facing capability should add a repeatable test case following the same chain:
+
+1. Register the device MCP tool with a stable name, input schema, bounds, and deterministic JSON result. Document the command and safety limits.
+2. Add or generate a short speech fixture representing the user utterance.
+3. Run `tools/e2e_voice_test.py` with the expected tool name. Use `--allow-motion` only for explicitly supervised physical-action tests.
+4. Verify backend evidence for listen start, server VAD stop, model turn, model-selected tool call, device JSON-RPC callback, and E2E completion with `matched: true`.
+5. Test invalid/bounded arguments and the safe stop or recovery path where applicable. Physical actions must finish stopped/idle.
+6. Run backend regression tests and firmware build before committing. Keep fixtures and private endpoints out of the shared repository; record the command and result in change notes.
+
+For non-audio diagnosis, use `MCP_BENCH_TESTING.md` to isolate the device MCP/callback half, then run this E2E test before declaring a feature complete.
