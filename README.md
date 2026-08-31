@@ -67,6 +67,8 @@ For automated voice-to-model-to-MCP regression tests, read
 [docs/E2E_VOICE_TESTING.md](docs/E2E_VOICE_TESTING.md).
 For the planned USB camera and SG90 face-tracking feature, read
 [docs/FACE_TRACKING_PLAN.md](docs/FACE_TRACKING_PLAN.md).
+For the planned 1.28-inch GC9A01 round TFT, read
+[docs/ROUND_TFT_PLAN.md](docs/ROUND_TFT_PLAN.md).
 
 ## Sharing policy
 
