@@ -282,6 +282,15 @@
 #define DISPLAY_SPI_MODE 0
 #endif
 
+// DRV8833 dual DC motor driver (same mapping as bread-compact-wifi).
+// These pins are independent from the GC9A01 SPI display pins above.
+#define MOTOR_AIN1_GPIO GPIO_NUM_8
+#define MOTOR_AIN2_GPIO GPIO_NUM_9
+#define MOTOR_BIN1_GPIO GPIO_NUM_10
+#define MOTOR_BIN2_GPIO GPIO_NUM_11
+#define MOTOR_STBY_GPIO GPIO_NUM_12
+#define MOTOR_LEFT_REVERSED  false
+#define MOTOR_RIGHT_REVERSED false
 
 // A MCP Test: Control a lamp
 #define LAMP_GPIO GPIO_NUM_18

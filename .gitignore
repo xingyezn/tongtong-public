@@ -14,6 +14,7 @@
 /firmware/.cache/
 
 # Python environments, caches, and test artifacts
+/build/
 /backend/__pycache__/
 /backend/**/*.py[cod]
 /backend/.venv/

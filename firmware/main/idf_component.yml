@@ -53,6 +53,9 @@ dependencies:
     - if: target in [esp32s3]
   espressif/adc_battery_estimation: ^0.2.0
   espressif/esp_new_jpeg: ^0.6.1
+  # ESP-DL human face detection (ESP32-S3 inference backend)
+  espressif/esp-dl: ==3.1.5
+  espressif/human_face_detect: ==0.2.3
 
   # SenseCAP Watcher Board
   wvirgil123/sscma_client:

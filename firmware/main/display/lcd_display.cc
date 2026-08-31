@@ -17,6 +17,14 @@
 
 #define TAG "LcdDisplay"
 
+// GC9A01 is physically circular. Keep text and status widgets inside the
+// central safe area; the panel driver and animation assets remain unchanged.
+#if defined(CONFIG_LCD_GC9A01_240X240)
+#define UI_SAFE_WIDTH 180
+#else
+#define UI_SAFE_WIDTH LV_HOR_RES
+#endif
+
 LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
 LV_FONT_DECLARE(BUILTIN_ICON_FONT);
 LV_FONT_DECLARE(font_awesome_30_4);
@@ -382,7 +390,10 @@ void LcdDisplay::SetupUI() {
 
     /* Layer 1: Top bar - for status icons */
     top_bar_ = lv_obj_create(container_);
-    lv_obj_set_size(top_bar_, LV_HOR_RES, LV_SIZE_CONTENT);
+    lv_obj_set_size(top_bar_, UI_SAFE_WIDTH, LV_SIZE_CONTENT);
+#if defined(CONFIG_LCD_GC9A01_240X240)
+    lv_obj_align(top_bar_, LV_ALIGN_TOP_MID, 0, 0);
+#endif
     lv_obj_set_style_radius(top_bar_, 0, 0);
     lv_obj_set_style_bg_opa(top_bar_, LV_OPA_50, 0);  // 50% opacity background
     lv_obj_set_style_bg_color(top_bar_, lvgl_theme->background_color(), 0);
@@ -424,7 +435,7 @@ void LcdDisplay::SetupUI() {
 
     /* Layer 2: Status bar - for center text labels */
     status_bar_ = lv_obj_create(screen);
-    lv_obj_set_size(status_bar_, LV_HOR_RES, LV_SIZE_CONTENT);
+    lv_obj_set_size(status_bar_, UI_SAFE_WIDTH, LV_SIZE_CONTENT);
     lv_obj_set_style_radius(status_bar_, 0, 0);
     lv_obj_set_style_bg_opa(status_bar_, LV_OPA_TRANSP, 0);  // Transparent background
     lv_obj_set_style_border_width(status_bar_, 0, 0);
@@ -436,7 +447,7 @@ void LcdDisplay::SetupUI() {
     lv_obj_align(status_bar_, LV_ALIGN_TOP_MID, 0, 0);  // Overlap with top_bar_
 
     notification_label_ = lv_label_create(status_bar_);
-    lv_obj_set_width(notification_label_, LV_HOR_RES * 0.8);
+    lv_obj_set_width(notification_label_, UI_SAFE_WIDTH * 0.8);
     lv_obj_set_style_text_align(notification_label_, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(notification_label_, lvgl_theme->text_color(), 0);
     lv_label_set_text(notification_label_, "");
@@ -444,7 +455,7 @@ void LcdDisplay::SetupUI() {
     lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
 
     status_label_ = lv_label_create(status_bar_);
-    lv_obj_set_width(status_label_, LV_HOR_RES * 0.8);
+    lv_obj_set_width(status_label_, UI_SAFE_WIDTH * 0.8);
     lv_label_set_long_mode(status_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_set_style_text_align(status_label_, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(status_label_, lvgl_theme->text_color(), 0);
@@ -454,7 +465,10 @@ void LcdDisplay::SetupUI() {
     /* Content - Chat area */
     content_ = lv_obj_create(container_);
     lv_obj_set_style_radius(content_, 0, 0);
-    lv_obj_set_width(content_, LV_HOR_RES);
+    lv_obj_set_width(content_, UI_SAFE_WIDTH);
+#if defined(CONFIG_LCD_GC9A01_240X240)
+    lv_obj_align(content_, LV_ALIGN_TOP_MID, 0, 0);
+#endif
     lv_obj_set_flex_grow(content_, 1);
     lv_obj_set_style_pad_all(content_, lvgl_theme->spacing(4), 0);
     lv_obj_set_style_border_width(content_, 0, 0);
@@ -474,7 +488,7 @@ void LcdDisplay::SetupUI() {
 
     low_battery_popup_ = lv_obj_create(screen);
     lv_obj_set_scrollbar_mode(low_battery_popup_, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_set_size(low_battery_popup_, LV_HOR_RES * 0.9, text_font->line_height * 2);
+    lv_obj_set_size(low_battery_popup_, UI_SAFE_WIDTH * 0.9, text_font->line_height * 2);
     lv_obj_align(low_battery_popup_, LV_ALIGN_BOTTOM_MID, 0, -lvgl_theme->spacing(4));
     lv_obj_set_style_bg_color(low_battery_popup_, lvgl_theme->low_battery_color(), 0);
     lv_obj_set_style_radius(low_battery_popup_, lvgl_theme->spacing(4), 0);
@@ -566,7 +580,7 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
     lv_coord_t text_width = lv_txt_get_width(content, strlen(content), text_font, 0);
 
     // Calculate bubble width
-    lv_coord_t max_width = LV_HOR_RES * 85 / 100 - 16;  // 85% of screen width
+    lv_coord_t max_width = UI_SAFE_WIDTH * 85 / 100 - 16;  // Keep bubbles inside round-screen safe area
     lv_coord_t min_width = 20;  
     lv_coord_t bubble_width;
     
@@ -645,7 +659,7 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
     if (strcmp(role, "user") == 0) {
         // Create a full-width container
         lv_obj_t* container = lv_obj_create(content_);
-        lv_obj_set_width(container, LV_HOR_RES);
+        lv_obj_set_width(container, UI_SAFE_WIDTH);
         lv_obj_set_height(container, LV_SIZE_CONTENT);
         
         // Make container transparent and borderless
@@ -664,7 +678,7 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
     } else if (strcmp(role, "system") == 0) {
         // Create full-width container for system messages to ensure center alignment
         lv_obj_t* container = lv_obj_create(content_);
-        lv_obj_set_width(container, LV_HOR_RES);
+        lv_obj_set_width(container, UI_SAFE_WIDTH);
         lv_obj_set_height(container, LV_SIZE_CONTENT);
         
         lv_obj_set_style_bg_opa(container, LV_OPA_TRANSP, 0);
@@ -716,7 +730,7 @@ void LcdDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {
     lv_obj_t* preview_image = lv_image_create(img_bubble);
     
     // Calculate appropriate size for the image
-    lv_coord_t max_width = LV_HOR_RES * 70 / 100;  // 70% of screen width
+    lv_coord_t max_width = UI_SAFE_WIDTH * 70 / 100;  // Keep image bubbles inside round-screen safe area
     lv_coord_t max_height = LV_VER_RES * 50 / 100; // 50% of screen height
     
     // Calculate zoom factor to fit within maximum dimensions
@@ -817,7 +831,7 @@ void LcdDisplay::SetupUI() {
 
     /* Layer 1: Top bar - for status icons */
     top_bar_ = lv_obj_create(screen);
-    lv_obj_set_size(top_bar_, LV_HOR_RES, LV_SIZE_CONTENT);
+    lv_obj_set_size(top_bar_, UI_SAFE_WIDTH, LV_SIZE_CONTENT);
     lv_obj_set_style_radius(top_bar_, 0, 0);
     lv_obj_set_style_bg_opa(top_bar_, LV_OPA_50, 0);  // 50% opacity background
     lv_obj_set_style_bg_color(top_bar_, lvgl_theme->background_color(), 0);
@@ -860,7 +874,7 @@ void LcdDisplay::SetupUI() {
 
     /* Layer 2: Status bar - for center text labels */
     status_bar_ = lv_obj_create(screen);
-    lv_obj_set_size(status_bar_, LV_HOR_RES, LV_SIZE_CONTENT);
+    lv_obj_set_size(status_bar_, UI_SAFE_WIDTH, LV_SIZE_CONTENT);
     lv_obj_set_style_radius(status_bar_, 0, 0);
     lv_obj_set_style_bg_opa(status_bar_, LV_OPA_TRANSP, 0);  // Transparent background
     lv_obj_set_style_border_width(status_bar_, 0, 0);
@@ -872,7 +886,7 @@ void LcdDisplay::SetupUI() {
     lv_obj_align(status_bar_, LV_ALIGN_TOP_MID, 0, 0);  // Overlap with top_bar_
 
     notification_label_ = lv_label_create(status_bar_);
-    lv_obj_set_width(notification_label_, LV_HOR_RES * 0.75);
+    lv_obj_set_width(notification_label_, UI_SAFE_WIDTH * 0.75);
     lv_obj_set_style_text_align(notification_label_, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(notification_label_, lvgl_theme->text_color(), 0);
     lv_label_set_text(notification_label_, "");
@@ -880,7 +894,7 @@ void LcdDisplay::SetupUI() {
     lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
 
     status_label_ = lv_label_create(status_bar_);
-    lv_obj_set_width(status_label_, LV_HOR_RES * 0.75);
+    lv_obj_set_width(status_label_, UI_SAFE_WIDTH * 0.75);
     lv_label_set_long_mode(status_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_set_style_text_align(status_label_, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(status_label_, lvgl_theme->text_color(), 0);
@@ -889,7 +903,7 @@ void LcdDisplay::SetupUI() {
 
     /* Top layer: Bottom bar - fixed at bottom, minimum height 48, height can be adaptive */
     bottom_bar_ = lv_obj_create(screen);
-    lv_obj_set_width(bottom_bar_, LV_HOR_RES);
+    lv_obj_set_width(bottom_bar_, UI_SAFE_WIDTH);
     lv_obj_set_height(bottom_bar_, LV_SIZE_CONTENT);
     lv_obj_set_style_min_height(bottom_bar_, 48, 0); // Set minimum height 48
     lv_obj_set_style_radius(bottom_bar_, 0, 0);
@@ -905,7 +919,7 @@ void LcdDisplay::SetupUI() {
     /* chat_message_label_ placed in bottom_bar_ and vertically centered */
     chat_message_label_ = lv_label_create(bottom_bar_);
     lv_label_set_text(chat_message_label_, "");
-    lv_obj_set_width(chat_message_label_, LV_HOR_RES - lvgl_theme->spacing(8)); // Subtract left and right padding
+    lv_obj_set_width(chat_message_label_, UI_SAFE_WIDTH - lvgl_theme->spacing(8)); // Subtract left and right padding
     lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_WRAP); // Auto wrap mode
     lv_obj_set_style_text_align(chat_message_label_, LV_TEXT_ALIGN_CENTER, 0); // Center text alignment
     lv_obj_set_style_text_color(chat_message_label_, lvgl_theme->text_color(), 0);
@@ -913,7 +927,7 @@ void LcdDisplay::SetupUI() {
 
     low_battery_popup_ = lv_obj_create(screen);
     lv_obj_set_scrollbar_mode(low_battery_popup_, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_set_size(low_battery_popup_, LV_HOR_RES * 0.9, text_font->line_height * 2);
+    lv_obj_set_size(low_battery_popup_, UI_SAFE_WIDTH * 0.9, text_font->line_height * 2);
     lv_obj_align(low_battery_popup_, LV_ALIGN_BOTTOM_MID, 0, -lvgl_theme->spacing(4));
     lv_obj_set_style_bg_color(low_battery_popup_, lvgl_theme->low_battery_color(), 0);
     lv_obj_set_style_radius(low_battery_popup_, lvgl_theme->spacing(4), 0);
