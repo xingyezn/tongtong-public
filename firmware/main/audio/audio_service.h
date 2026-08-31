@@ -105,6 +105,9 @@ public:
 
     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
+    // Feed one 16 kHz / mono / 60 ms PCM frame into the same Opus send path
+    // used by the microphone. Intended only for supervised virtual-mic tests.
+    bool InjectPcmForSend(std::vector<int16_t>&& pcm);
     void PlaySound(const std::string_view& sound);
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
     void ResetDecoder();

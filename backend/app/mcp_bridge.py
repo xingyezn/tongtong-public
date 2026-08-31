@@ -7,6 +7,8 @@
   3. 设备执行 -> result 回传 -> 回填 Omni
 """
 
+import asyncio
+import inspect
 import json
 import logging
 from typing import Optional
@@ -125,3 +127,22 @@ class McpBridge:
     def register_pending(self, req_id, fut):
         log.info("register_pending id=%s (type=%s)", req_id, type(req_id).__name__)
         self._pending_calls[req_id] = fut
+
+    async def call_tool(self, name: str, arguments: dict, timeout: float = 8.0):
+        """Call a device MCP tool and wait for its JSON-RPC result.
+
+        This is shared by the Omni bridge and the authenticated developer test
+        endpoint.  The latter deliberately bypasses speech recognition and the
+        model so a hardware test can be deterministic.
+        """
+        request = self.make_tools_call(name, arguments)
+        request_id = request["payload"]["id"]
+        future = asyncio.get_running_loop().create_future()
+        self.register_pending(request_id, future)
+        try:
+            sent = self._send_json(request)
+            if inspect.isawaitable(sent):
+                await sent
+            return await asyncio.wait_for(future, timeout=timeout)
+        finally:
+            self._pending_calls.pop(request_id, None)

@@ -8,6 +8,7 @@
 """
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
@@ -31,7 +32,13 @@ AUTH_COOKIE = "tongtong_auth"
 class BroadcastLogHandler(logging.Handler):
     def __init__(self, maxlen=500):
         super().__init__()
+        # Keep dashboard polling and ordinary HTTP access separate.  Otherwise
+        # a browser refreshing /api/status every few seconds can evict the
+        # device/MCP diagnostics that are needed for troubleshooting.
         self.buf = deque(maxlen=maxlen)
+        self.access_buf = deque(maxlen=max(50, maxlen // 4))
+        self.periodic_buf = deque(maxlen=max(30, maxlen // 8))
+        self._sequence = 0
         self._loop = None
         self._evt = None
         self._lock = threading.Lock()
@@ -45,11 +52,37 @@ class BroadcastLogHandler(logging.Handler):
             msg = self.format(record)
         except Exception:
             return
+        category = self._classify(record)
         with self._lock:
-            self.buf.append(msg)
+            self._sequence += 1
+            entry = {"id": self._sequence, "category": category, "text": msg}
+            if category == "periodic":
+                self.periodic_buf.append(entry)
+            elif category == "access":
+                self.access_buf.append(entry)
+            else:
+                self.buf.append(entry)
         loop = self._loop
         if loop is not None:
             loop.call_soon_threadsafe(self._wake)
+
+    @staticmethod
+    def _classify(record):
+        """Return a stable, intentionally small category for dashboard logs."""
+        name = record.name.lower()
+        message = record.getMessage()
+        if name == "aiohttp.access":
+            # Dashboard auto-refresh is expected noise, not a diagnostic event.
+            if " /api/status " in message:
+                return "periodic"
+            return "access"
+        if name in ("ws", "session"):
+            return "device"
+        if name == "mcp" or name.startswith("mcp."):
+            return "mcp"
+        if "omni" in name or "dashscope" in name:
+            return "model"
+        return "system"
 
     def _wake(self):
         if self._evt is not None:
@@ -57,7 +90,18 @@ class BroadcastLogHandler(logging.Handler):
 
     def snapshot(self):
         with self._lock:
-            return list(self.buf)
+            return sorted(
+                list(self.buf) + list(self.access_buf) + list(self.periodic_buf),
+                key=lambda entry: entry["id"],
+            )
+
+    def events_after(self, sequence):
+        with self._lock:
+            entries = list(self.buf) + list(self.access_buf) + list(self.periodic_buf)
+        return sorted(
+            (entry for entry in entries if entry["id"] > sequence),
+            key=lambda entry: entry["id"],
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +195,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .tag { display:inline-block; padding:3px 9px; border-radius:20px; font-size:11px; font-weight:700; }
   .tag.online { background:var(--soft-mint); color:#178164; } .tag.offline { background:#fff0f2; color:#c04d61; }
   .tag.listen { background:var(--soft-blue); color:#2879c9; }
+  .tag.debug { background:#fff5dc; color:#a36600; }
   .kv { display:grid; grid-template-columns:auto 1fr; gap:6px 16px; font-size:13px; }
   .kv dt { color:var(--muted); } .kv dd { margin:0; word-break:break-all; }
   #logs { height:320px; overflow:auto; padding:11px 13px; border:1px solid #dceaf2; border-radius:12px; background:#f7fbfd;
@@ -159,6 +204,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .log-info { color:#3475a7; } .log-warning { color:#ae771b; }
   .log-error, .log-critical { color:var(--bad); }
   .log-debug { color:#91a2ae; }
+  .log-category { display:inline-block; min-width:42px; margin-right:7px; padding:1px 5px; border-radius:5px;
+                  color:#6a8494; background:#eaf2f6; font-family:inherit; font-size:10px; font-weight:700; text-align:center; }
+  .log-filters { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .log-filters label { color:var(--muted); font-size:12px; white-space:nowrap; }
   .btn { padding:8px 15px; border:0; border-radius:9px; color:#fff; cursor:pointer; font-size:13px; font-weight:700;
          background:linear-gradient(135deg, var(--mint), var(--acc)); box-shadow:0 5px 12px rgba(45,140,240,.18); transition:transform .18s, box-shadow .18s; }
   .btn:hover { transform:translateY(-1px); box-shadow:0 8px 16px rgba(45,140,240,.24); }
@@ -213,6 +262,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div class="card">
     <h2>后端配置</h2>
     <dl class="kv" id="cfg-kv"></dl>
+  </div>
+
+  <div class="card">
+    <h2>调试测试模式</h2>
+    <div class="row">
+      <select id="debug-device" onchange="updateDebugModePanel()" aria-label="选择设备"></select>
+      <button class="btn warn" id="debug-mode-btn" onclick="toggleDebugMode()" disabled>启用调试模式</button>
+    </div>
+    <div class="hint" id="debug-mode-status">等待设备上线…</div>
+    <div class="hint">启用后会持久化到设备：软件麦克风采集和唤醒词被关闭，设备保持测试 WebSocket 在线。仅在此模式下可执行直连 MCP 台架测试。测试电机前请先让车轮悬空。</div>
   </div>
 
   <div class="card">
@@ -332,11 +391,21 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
 
   <div class="card full">
-    <h2>实时日志 <span class="muted" style="text-transform:none">(<span id="log-count">0</span> 条，最新 500)</span></h2>
+    <h2>实时日志 <span class="muted" style="text-transform:none">(<span id="log-count">0</span> 条显示 / <span id="log-total">0</span> 条已接收)</span></h2>
     <div class="row" style="margin-bottom:8px">
       <button class="btn warn" id="log-toggle" onclick="toggleLogs()">暂停滚动</button>
       <button class="btn" onclick="clearLogs()">清空显示</button>
     </div>
+    <div class="log-filters" style="margin-bottom:8px">
+      <span class="muted">类别：</span>
+      <label><input type="checkbox" data-log-category="device" checked onchange="renderLogs()"> 设备</label>
+      <label><input type="checkbox" data-log-category="mcp" checked onchange="renderLogs()"> MCP</label>
+      <label><input type="checkbox" data-log-category="model" checked onchange="renderLogs()"> 模型</label>
+      <label><input type="checkbox" data-log-category="system" checked onchange="renderLogs()"> 系统</label>
+      <label><input type="checkbox" data-log-category="access" checked onchange="renderLogs()"> 普通请求</label>
+      <label><input type="checkbox" data-log-category="periodic" onchange="renderLogs()"> 周期状态请求</label>
+    </div>
+    <div class="hint">“周期状态请求”是面板自动刷新产生的 `/api/status` 日志，默认隐藏且在服务器上独立限额保存，不会挤掉调试信息。</div>
     <div id="logs"></div>
   </div>
 
@@ -359,6 +428,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <script>
 const $ = id => document.getElementById(id);
 let autoRefresh = true;
+let dashboardDevices = [];
 
 function fmtDur(sec) {
   sec = Math.max(0, Math.floor(sec));
@@ -409,7 +479,8 @@ function render(d) {
       if (dev.online) {
         st = '<span class="tag online">在线</span> ' +
           (dev.listening ? '<span class="tag listen">聆听中</span>' : "") +
-          (dev.speaking ? '<span class="tag listen">播放中</span>' : "");
+          (dev.speaking ? '<span class="tag listen">播放中</span>' : "") +
+          (dev.debug_mode ? '<span class="tag debug">调试</span>' : "");
       } else if (dev.idle) {
         st = '<span class="tag offline">待机中</span>';
       } else {
@@ -441,17 +512,95 @@ function render(d) {
     ["设备鉴权", c.devices_enabled ? "开启" : "关闭"],
     ["输出采样率", c.output_sample_rate + " Hz"],
   ].map(([k,v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
+  renderDebugModeControls(d.devices || []);
+}
+
+function renderDebugModeControls(devices) {
+  const select = $("debug-device");
+  const previous = select.value;
+  dashboardDevices = devices.filter(dev => dev.online);
+  select.innerHTML = dashboardDevices.map(dev =>
+    `<option value="${dev.device_id}">${dev.device_id} (v${dev.bin_version})</option>`
+  ).join("");
+  select.disabled = dashboardDevices.length === 0;
+  if (dashboardDevices.some(dev => dev.device_id === previous)) select.value = previous;
+  updateDebugModePanel();
+}
+
+function updateDebugModePanel() {
+  const select = $("debug-device");
+  const device = dashboardDevices.find(dev => dev.device_id === select.value);
+  const button = $("debug-mode-btn");
+  const status = $("debug-mode-status");
+  if (!device) {
+    button.disabled = true;
+    button.textContent = "启用调试模式";
+    status.textContent = "没有在线设备。先按住板载触摸键建立一次连接。";
+    return;
+  }
+  button.disabled = false;
+  button.textContent = device.debug_mode ? "退出调试模式" : "启用调试模式";
+  status.textContent = device.debug_mode
+    ? "已启用：语音输入被禁用，测试连接保持在线。"
+    : "未启用：可先正常连接设备，再点击启用。";
+}
+
+async function toggleDebugMode() {
+  const select = $("debug-device");
+  const device = dashboardDevices.find(dev => dev.device_id === select.value);
+  if (!device) return;
+  const enabled = !device.debug_mode;
+  const button = $("debug-mode-btn");
+  const normalText = button.textContent;
+  button.disabled = true;
+  button.textContent = enabled ? "启用中…" : "退出中…";
+  try {
+    const r = await fetch("/api/test/mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ device_id: device.device_id, enabled }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || "request failed");
+    device.debug_mode = data.debug_mode;
+    updateDebugModePanel();
+    showToast(data.debug_mode ? "调试模式已启用" : "已恢复正常语音模式", "ok");
+    refresh();
+  } catch (e) {
+    button.disabled = false;
+    button.textContent = normalText;
+    showToast("切换失败：" + e.message, "err");
+  }
 }
 
 // ---- 实时日志 (SSE) ----
-let logAuto = true, logTotal = 0;
+let logAuto = true, logEvents = [];
 function toggleLogs() {
   logAuto = !logAuto;
   $("log-toggle").textContent = logAuto ? "暂停滚动" : "恢复滚动";
 }
-function clearLogs() { $("logs").innerHTML = ""; logTotal = 0; $("log-count").textContent = 0; }
-function logLine(text) {
-  const div = document.createElement("div");
+function clearLogs() {
+  logEvents = [];
+  renderLogs();
+}
+function selectedLogCategories() {
+  return new Set(Array.from(document.querySelectorAll("[data-log-category]:checked"))
+    .map(input => input.dataset.logCategory));
+}
+function logLine(event) {
+  if (typeof event === "string") event = { category: "system", text: event };
+  logEvents.push(event);
+  while (logEvents.length > 750) logEvents.shift();
+  renderLogs();
+}
+function renderLogs() {
+  const selected = selectedLogCategories();
+  const visible = logEvents.filter(event => selected.has(event.category || "system"));
+  const box = $("logs");
+  box.innerHTML = "";
+  for (const event of visible.slice(-500)) {
+    const text = event.text || "";
+    const div = document.createElement("div");
   const m = text.match(/^([\d\-]+ [\d:,]+) (\w+) (\w+): (.*)$/);
   let cls = "log-info";
   if (m) {
@@ -464,15 +613,21 @@ function logLine(text) {
     div.textContent = text;
   }
   div.className = cls;
-  const box = $("logs");
+    const category = document.createElement("span");
+    category.className = "log-category";
+    category.textContent = ({ device:"设备", mcp:"MCP", model:"模型", system:"系统", access:"请求", periodic:"周期" })[event.category] || "系统";
+    div.prepend(category);
   box.appendChild(div);
-  while (box.childElementCount > 500) box.removeChild(box.firstChild);
-  logTotal++;
-  $("log-count").textContent = logTotal;
+  }
+  $("log-count").textContent = visible.length;
+  $("log-total").textContent = logEvents.length;
   if (logAuto) box.scrollTop = box.scrollHeight;
 }
 const es = new EventSource("/api/logs");
-es.onmessage = e => logLine(e.data);
+es.onmessage = e => {
+  try { logLine(JSON.parse(e.data)); }
+  catch (_) { logLine(e.data); }
+};
 es.onerror = () => {};
 
 // ---- 音频回显测试 ----
@@ -683,6 +838,10 @@ class Dashboard:
         app.router.add_post("/api/vad", self.api_vad_set)
         app.router.add_get("/api/model", self.api_model_get)
         app.router.add_post("/api/model", self.api_model_set)
+        app.router.add_get("/api/test/tools", self.api_test_tools)
+        app.router.add_post("/api/test/mcp", self.api_test_mcp)
+        app.router.add_post("/api/test/conversation", self.api_test_conversation)
+        app.router.add_post("/api/test/mode", self.api_test_mode)
 
     # ------------------------------------------------------------------
     # 鉴权辅助
@@ -775,6 +934,7 @@ class Dashboard:
                 "listening": getattr(s, "listening", False),
                 "speaking": getattr(s, "speaking", False),
                 "omni_busy": getattr(s, "omni_busy", False),
+                "debug_mode": getattr(s, "debug_mode", False),
                 "connected_at": s.connected_at,
                 "connected_for": now - s.connected_at,
             })
@@ -792,6 +952,7 @@ class Dashboard:
                 "listening": False,
                 "speaking": False,
                 "omni_busy": False,
+                "debug_mode": False,
                 "connected_at": info.get("last_seen", 0),
                 "connected_for": now - info.get("last_seen", now),
             })
@@ -899,6 +1060,201 @@ class Dashboard:
             "api_key_configured": bool(ds.get("api_key")),
         })
 
+    @staticmethod
+    def _testable_tools(session):
+        """Only expose actuator tools intended for supervised bench tests."""
+        mcp = getattr(session, "mcp", None)
+        tools = getattr(mcp, "tools", []) if mcp else []
+        allowed_prefixes = ("self.chassis.", "self.lamp.")
+        result = []
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            name = tool.get("name", "")
+            if not isinstance(name, str) or not name.startswith(allowed_prefixes):
+                continue
+            result.append({
+                "name": name,
+                "description": tool.get("description", ""),
+                "input_schema": tool.get("inputSchema", {"type": "object", "properties": {}}),
+            })
+        return result
+
+    def _get_test_session(self, device_id):
+        if not isinstance(device_id, str) or not device_id:
+            return None
+        return self.sessions.get(device_id)
+
+    async def api_test_tools(self, request):
+        if not self._check_cookie(request):
+            raise web.HTTPUnauthorized()
+        device_id = request.query.get("device_id", "")
+        session = self._get_test_session(device_id)
+        if session is None:
+            return web.json_response({"error": "device is not online"}, status=404)
+        return web.json_response({
+            "device_id": device_id,
+            "tools": self._testable_tools(session),
+        })
+
+    async def api_test_mcp(self, request):
+        """Send one supervised bench-test MCP command to an online device."""
+        if not self._check_cookie(request):
+            raise web.HTTPUnauthorized()
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "bad json"}, status=400)
+
+        device_id = data.get("device_id", "")
+        name = data.get("name", "")
+        arguments = data.get("arguments", {})
+        if not isinstance(arguments, dict):
+            return web.json_response({"error": "arguments must be an object"}, status=400)
+        session = self._get_test_session(device_id)
+        if session is None:
+            return web.json_response({"error": "device is not online"}, status=404)
+        if not getattr(session, "debug_mode", False):
+            return web.json_response({"error": "enable device debug mode before running bench commands"}, status=409)
+        testable_names = {tool["name"] for tool in self._testable_tools(session)}
+        if name not in testable_names:
+            return web.json_response({"error": "tool is not available for supervised testing"}, status=403)
+
+        timeout_ms = data.get("timeout_ms", 8000)
+        try:
+            timeout_ms = max(500, min(15000, int(timeout_ms)))
+        except (TypeError, ValueError):
+            return web.json_response({"error": "timeout_ms must be an integer"}, status=400)
+        try:
+            result = await session.mcp.call_tool(name, arguments, timeout_ms / 1000.0)
+        except asyncio.TimeoutError:
+            log.warning("MCP bench test timed out: device=%s tool=%s", device_id, name)
+            return web.json_response({"error": "device tool call timed out"}, status=504)
+        except Exception as exc:
+            log.exception("MCP bench test failed: device=%s tool=%s", device_id, name)
+            return web.json_response({"error": "device tool call failed", "detail": str(exc)}, status=502)
+
+        log.info("MCP bench test completed: device=%s tool=%s", device_id, name)
+        return web.json_response({"device_id": device_id, "name": name, "result": result})
+
+    async def api_test_conversation(self, request):
+        """Run one virtual-microphone conversation through the actual model.
+
+        The audio is injected only at the ESP32 input boundary.  From there it
+        follows the ordinary device Opus uplink, server VAD, Omni inference,
+        MCP tool selection, device execution and JSON-RPC callback path.
+        """
+        if not self._check_cookie(request):
+            raise web.HTTPUnauthorized()
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "bad json"}, status=400)
+        device_id = data.get("device_id", "")
+        encoded_pcm = data.get("pcm_b64", "")
+        if not isinstance(encoded_pcm, str):
+            return web.json_response({"error": "pcm_b64 must be a base64 string"}, status=400)
+        try:
+            pcm = base64.b64decode(encoded_pcm, validate=True)
+        except Exception:
+            return web.json_response({"error": "pcm_b64 is not valid base64"}, status=400)
+        # 16 kHz, mono, signed 16-bit; keep virtual audio bounded to 8 seconds.
+        if not pcm or len(pcm) % 2 or len(pcm) > 16000 * 2 * 8:
+            return web.json_response({"error": "PCM must be 16 kHz mono s16le and at most 8 seconds"}, status=400)
+
+        session = self._get_test_session(device_id)
+        if session is None:
+            return web.json_response({"error": "device is not online"}, status=404)
+        if not getattr(session, "debug_mode", False):
+            return web.json_response({"error": "enable device debug mode before running voice tests"}, status=409)
+
+        all_safe_tools = {tool["name"] for tool in self._testable_tools(session)}
+        allow_motion = data.get("allow_motion", False)
+        if not isinstance(allow_motion, bool):
+            return web.json_response({"error": "allow_motion must be a boolean"}, status=400)
+        allowed_tools = {
+            name for name in all_safe_tools
+            if allow_motion or name.startswith("self.lamp.")
+        }
+        if not allowed_tools:
+            return web.json_response({"error": "no safe device tools are available"}, status=409)
+        expected_tool = data.get("expected_tool", "")
+        if expected_tool and expected_tool not in allowed_tools:
+            return web.json_response({"error": "expected_tool is not permitted for this test"}, status=400)
+
+        frame_bytes = 16000 * 60 // 1000 * 2
+        padded_pcm = pcm + b"\x00" * ((-len(pcm)) % frame_bytes)
+        try:
+            completion = session.begin_e2e_test(allowed_tools)
+        except RuntimeError as exc:
+            return web.json_response({"error": str(exc)}, status=409)
+
+        try:
+            await session.send_json({"type": "test_audio", "event": "start"})
+            # Wait for the device to enter listening and emit its normal
+            # `listen:start` message before sending Opus input frames.
+            await asyncio.sleep(0.18)
+            for offset in range(0, len(padded_pcm), frame_bytes):
+                frame = padded_pcm[offset:offset + frame_bytes]
+                await session.send_json({
+                    "type": "test_audio",
+                    "event": "frame",
+                    "pcm_b64": base64.b64encode(frame).decode("ascii"),
+                })
+                # Match real microphone pacing so the ESP32 encoder/send queue
+                # and the server VAD observe ordinary 60 ms frames.
+                await asyncio.sleep(0.065)
+            await asyncio.sleep(0.25)
+            await session.send_json({"type": "test_audio", "event": "end"})
+            result = await asyncio.wait_for(asyncio.shield(completion), timeout=70)
+        except asyncio.TimeoutError:
+            session.cancel_e2e_test(completion)
+            log.warning("E2E voice test timed out: device=%s", device_id)
+            return web.json_response({"error": "model conversation timed out"}, status=504)
+        except Exception as exc:
+            session.cancel_e2e_test(completion)
+            log.exception("E2E voice test failed: device=%s", device_id)
+            return web.json_response({"error": "voice test failed", "detail": str(exc)}, status=502)
+
+        tool_calls = result["tool_calls"]
+        matched = (not expected_tool) or any(call["name"] == expected_tool for call in tool_calls)
+        log.info("E2E voice test completed: device=%s tools=%s expected=%s matched=%s",
+                 device_id, [call["name"] for call in tool_calls], expected_tool, matched)
+        return web.json_response({
+            "device_id": device_id,
+            "tool_calls": tool_calls,
+            "expected_tool": expected_tool,
+            "matched": matched,
+            "model_error": result["error"],
+        })
+
+    async def api_test_mode(self, request):
+        """Switch the persisted firmware debug mode on an online device."""
+        if not self._check_cookie(request):
+            raise web.HTTPUnauthorized()
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "bad json"}, status=400)
+        device_id = data.get("device_id", "")
+        enabled = data.get("enabled")
+        if not isinstance(enabled, bool):
+            return web.json_response({"error": "enabled must be a boolean"}, status=400)
+        session = self._get_test_session(device_id)
+        if session is None:
+            return web.json_response({"error": "device is not online"}, status=404)
+        try:
+            await session.send_json({"type": "debug_mode", "enabled": enabled})
+        except Exception as exc:
+            log.exception("Failed to send debug mode command: device=%s", device_id)
+            return web.json_response({"error": "could not send debug mode command", "detail": str(exc)}, status=502)
+        # The device also declares this value in its next hello after a reboot.
+        # Track the accepted command now so the protected test API is usable
+        # during the persistent test connection.
+        session.debug_mode = enabled
+        log.warning("Device debug mode requested: device=%s enabled=%s", device_id, enabled)
+        return web.json_response({"device_id": device_id, "debug_mode": enabled})
+
     async def api_logs(self, request):
         if not self._check_cookie(request):
             raise web.HTTPUnauthorized()
@@ -912,22 +1268,22 @@ class Dashboard:
         await resp.prepare(request)
 
         snapshot = self.log_handler.snapshot()
-        for line in snapshot:
+        for entry in snapshot:
             try:
-                await resp.write(("data: " + line + "\n\n").encode("utf-8"))
+                await resp.write(("data: " + json.dumps(entry, ensure_ascii=False) + "\n\n").encode("utf-8"))
             except (ConnectionError, RuntimeError):
                 return resp
 
         evt = self.log_handler._evt
-        idx = len(snapshot)
+        last_sequence = snapshot[-1]["id"] if snapshot else 0
         try:
             while True:
                 # 检查是否有新日志
-                new_lines = self.log_handler.snapshot()[idx:]
-                if new_lines:
-                    for line in new_lines:
-                        await resp.write(("data: " + line + "\n\n").encode("utf-8"))
-                    idx += len(new_lines)
+                new_entries = self.log_handler.events_after(last_sequence)
+                if new_entries:
+                    for entry in new_entries:
+                        await resp.write(("data: " + json.dumps(entry, ensure_ascii=False) + "\n\n").encode("utf-8"))
+                    last_sequence = new_entries[-1]["id"]
                 else:
                     try:
                         await asyncio.wait_for(evt.wait(), timeout=15)

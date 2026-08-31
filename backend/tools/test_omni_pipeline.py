@@ -197,8 +197,30 @@ async def test_realtime_tool_event_loop():
     assert websocket.response_creates == 2
 
 
+async def test_direct_mcp_bench_call():
+    sent = []
+    bridge = None
+
+    async def send_json(message):
+        sent.append(message)
+        await asyncio.sleep(0)
+        bridge.on_device_mcp({
+            "id": message["payload"]["id"],
+            "result": {"content": [{"type": "text", "text": "ok"}]},
+        })
+
+    bridge = McpBridge(send_json)
+    result = await bridge.call_tool("self.chassis.go_forward", {"speed": 30}, timeout=1)
+    assert result["content"][0]["text"] == "ok"
+    assert sent[0]["payload"]["method"] == "tools/call"
+    assert sent[0]["payload"]["params"] == {
+        "name": "self.chassis.go_forward", "arguments": {"speed": 30},
+    }
+
+
 async def main():
     await test_realtime_tool_event_loop()
+    await test_direct_mcp_bench_call()
 
     config = {
         "dashscope": {"output_sample_rate": 24000},

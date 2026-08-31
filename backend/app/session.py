@@ -99,7 +99,12 @@ class Session:
         # 控制
         self.listening = False
         self.speaking = False
+        self.debug_mode = False
         self._mcp = None
+        # One supervised virtual-microphone conversation may be active while
+        # the device is in debug mode.  It observes the *model* tool calls;
+        # it never invokes MCP directly.
+        self._e2e_test = None
         self._tools_cached = False
         self.history = []          # 百炼对话历史
         self.max_history = 10
@@ -198,9 +203,10 @@ class Session:
         if version in (1, 2, 3):
             self.bin_version = version
         features = msg.get("features", {})
+        self.debug_mode = bool(features.get("debug_mode", False))
         # 设备 hello 上报 sample_rate=16000, frame_duration=60（固定）
-        log.info("device %s hello, bin_version=%d, features=%s",
-                 self.device_id, self.bin_version, features)
+        log.info("device %s hello, bin_version=%d, debug_mode=%s, features=%s",
+                 self.device_id, self.bin_version, self.debug_mode, features)
 
     def _reset_vad_state(self):
         self._vad_speech = False
@@ -288,11 +294,41 @@ class Session:
         self.omni_busy = True
         self._omni_task = asyncio.create_task(self._run_omni_turn_task(pcm))
 
+    def begin_e2e_test(self, allowed_tool_names):
+        """Create an observer for one virtual-microphone Omni turn."""
+        if self._e2e_test is not None:
+            raise RuntimeError("an end-to-end voice test is already running")
+        future = asyncio.get_running_loop().create_future()
+        self._e2e_test = {
+            "future": future,
+            "tool_calls": [],
+            "allowed_tool_names": set(allowed_tool_names),
+        }
+        return future
+
+    def cancel_e2e_test(self, future):
+        if self._e2e_test and self._e2e_test.get("future") is future:
+            self._e2e_test = None
+
+    def _finish_e2e_test(self, error=None):
+        test = self._e2e_test
+        if not test:
+            return
+        future = test["future"]
+        if not future.done():
+            future.set_result({"tool_calls": test["tool_calls"], "error": error})
+        self._e2e_test = None
+
     async def _run_omni_turn_task(self, pcm: bytes):
+        error = None
         try:
             await self._run_omni_turn(pcm)
+        except Exception as exc:
+            error = str(exc)
+            log.exception("omni turn failed")
         finally:
             self.omni_busy = False
+            self._finish_e2e_test(error)
 
     async def _run_omni_turn(self, pcm: bytes):
         # 无百炼 Key 时走回环模式，验证完整链路（说话→上行→下行→播放）
@@ -308,6 +344,9 @@ class Session:
         text_parts = []
 
         tools = self._mcp.make_omni_tools() if self._mcp else []
+        if self._e2e_test is not None:
+            allowed = self._e2e_test["allowed_tool_names"]
+            tools = [tool for tool in tools if tool.get("function", {}).get("name") in allowed]
         async for evt in self.omni.chat_stream(
                 pcm, tools=tools, tool_handler=self._handle_tool_call):
             et = evt.get("type")
@@ -332,23 +371,13 @@ class Session:
         用于无 DASHSCOPE_API_KEY 时验证完整链路：
           设备说话 -> 上行OPUS -> 服务器解码16k -> 重采样24k -> 编码 -> tts下行 -> 设备播放
 
-        同时测试一个模拟 MCP 工具调用（self.lamp.turn_on），
-        验证 Omni function_call -> tools/call -> 设备执行 -> result 回填 链路。
+        该模式不模拟模型的 function_call，也绝不调用设备 MCP 工具；
+        它只能用于验证音频传输和播放，不能作为语音控制测试的结论。
         """
         log.info("=== ECHO 模式：回放 %d 字节 PCM（%.1f 秒）===",
                  len(pcm), len(pcm) / DEVICE_SAMPLE_RATE / 2)
 
-        # 1) 模拟 MCP 工具调用（验证 tools/call 下发 + 设备回执）
-        if self._mcp and self._mcp.tools:
-            await self._handle_tool_call({
-                "type": "tool_call",
-                "name": "self.lamp.turn_on",
-                "arguments": {},
-                "id": "echo-tool-1",
-            })
-            await asyncio.sleep(1)
-
-        # 2) 回放音频（16k -> 24k -> opus 下发）
+        # 回放音频（16k -> 24k -> opus 下发）
         await self.send_json({"type": "tts", "state": "start"})
         self.speaking = True
         if pcm:
@@ -464,6 +493,12 @@ class Session:
             return json.dumps({"error": str(e)})
 
         log.info("设备 tools/call 回执: %s", json.dumps(result)[:300])
+        if self._e2e_test is not None:
+            self._e2e_test["tool_calls"].append({
+                "name": name,
+                "arguments": arguments,
+                "result": result,
+            })
         # result 形如 {"content":[{"type":"text","text":"true"}],"isError":false}
         if isinstance(result, dict) and "content" in result:
             texts = [c.get("text", "") for c in result["content"]

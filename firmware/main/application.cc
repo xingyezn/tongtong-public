@@ -13,11 +13,34 @@
 #include <cstring>
 #include <esp_log.h>
 #include <cJSON.h>
+#include <mbedtls/base64.h>
 #include <driver/gpio.h>
 #include <arpa/inet.h>
 #include <font_awesome.h>
 
 #define TAG "Application"
+
+namespace {
+bool DecodeVirtualPcmFrame(const char* encoded, std::vector<int16_t>& pcm) {
+    if (encoded == nullptr) {
+        return false;
+    }
+    size_t decoded_len = 0;
+    const auto* input = reinterpret_cast<const unsigned char*>(encoded);
+    const size_t input_len = strlen(encoded);
+    if (mbedtls_base64_decode(nullptr, 0, &decoded_len, input, input_len) != MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL ||
+        decoded_len != 16000 * OPUS_FRAME_DURATION_MS / 1000 * sizeof(int16_t)) {
+        return false;
+    }
+    std::vector<unsigned char> raw(decoded_len);
+    if (mbedtls_base64_decode(raw.data(), raw.size(), &decoded_len, input, input_len) != 0) {
+        return false;
+    }
+    pcm.resize(decoded_len / sizeof(int16_t));
+    memcpy(pcm.data(), raw.data(), decoded_len);
+    return true;
+}
+}  // namespace
 
 
 Application::Application() {
@@ -61,6 +84,15 @@ bool Application::SetDeviceState(DeviceState state) {
 void Application::Initialize() {
     auto& board = Board::GetInstance();
     SetDeviceState(kDeviceStateStarting);
+
+    // This is a development firmware: an unset value starts in network test
+    // mode so the device can join the bench-test channel without a first
+    // touch/wake interaction.  Dashboard changes remain persistent in NVS.
+    Settings debug_settings("debug", false);
+    debug_mode_ = debug_settings.GetBool("network_test_mode", true);
+    if (debug_mode_) {
+        ESP_LOGW(TAG, "Network test mode enabled: microphone and wake word are disabled");
+    }
 
     // Setup the display
     auto display = board.GetDisplay();
@@ -217,6 +249,12 @@ void Application::Run() {
 
         if (bits & MAIN_EVENT_SEND_AUDIO) {
             while (auto packet = audio_service_.PopPacketFromSendQueue()) {
+                // Debug mode blocks physical microphone traffic.  A supervised
+                // virtual microphone test deliberately uses this same queue
+                // and must retain the normal device-to-server Opus uplink.
+                if (debug_mode_ && !virtual_audio_input_active_) {
+                    continue;
+                }
                 if (protocol_ && !protocol_->SendAudio(std::move(packet))) {
                     break;
                 }
@@ -252,6 +290,7 @@ void Application::Run() {
             if (clock_ticks_ % 10 == 0) {
                 SystemInfo::PrintHeapStats();
             }
+            EnsureDebugChannel();
         }
     }
 }
@@ -314,6 +353,7 @@ void Application::HandleActivationDoneEvent() {
     ota_.reset();
     auto& board = Board::GetInstance();
     board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+    EnsureDebugChannel();
 }
 
 void Application::ActivationTask() {
@@ -517,7 +557,37 @@ void Application::InitializeProtocol() {
     protocol_->OnIncomingJson([this, display](const cJSON* root) {
         // Parse JSON data
         auto type = cJSON_GetObjectItem(root, "type");
-        if (strcmp(type->valuestring, "tts") == 0) {
+        if (strcmp(type->valuestring, "debug_mode") == 0) {
+            auto enabled = cJSON_GetObjectItem(root, "enabled");
+            if (cJSON_IsBool(enabled)) {
+                SetDebugMode(cJSON_IsTrue(enabled));
+            } else {
+                ESP_LOGW(TAG, "debug_mode command requires boolean enabled");
+            }
+        } else if (strcmp(type->valuestring, "test_audio") == 0) {
+            if (!debug_mode_) {
+                ESP_LOGW(TAG, "Ignoring virtual microphone command outside network test mode");
+                return;
+            }
+            auto event = cJSON_GetObjectItem(root, "event");
+            if (!cJSON_IsString(event)) {
+                ESP_LOGW(TAG, "test_audio command requires string event");
+            } else if (strcmp(event->valuestring, "start") == 0) {
+                StartVirtualAudioInput();
+            } else if (strcmp(event->valuestring, "frame") == 0) {
+                auto data = cJSON_GetObjectItem(root, "pcm_b64");
+                std::vector<int16_t> pcm;
+                if (cJSON_IsString(data) && DecodeVirtualPcmFrame(data->valuestring, pcm)) {
+                    PushVirtualAudioFrame(std::move(pcm));
+                } else {
+                    ESP_LOGW(TAG, "Invalid virtual microphone PCM frame");
+                }
+            } else if (strcmp(event->valuestring, "end") == 0) {
+                StopVirtualAudioInput();
+            } else {
+                ESP_LOGW(TAG, "Unknown test_audio event: %s", event->valuestring);
+            }
+        } else if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
             if (strcmp(state->valuestring, "start") == 0) {
                 Schedule([this]() {
@@ -668,6 +738,10 @@ void Application::StopListening() {
 }
 
 void Application::HandleToggleChatEvent() {
+    if (debug_mode_) {
+        ESP_LOGI(TAG, "Ignoring chat toggle while network test mode is enabled");
+        return;
+    }
     auto state = GetDeviceState();
     
     if (state == kDeviceStateActivating) {
@@ -705,6 +779,10 @@ void Application::HandleToggleChatEvent() {
 }
 
 void Application::HandleStartListeningEvent() {
+    if (debug_mode_) {
+        ESP_LOGI(TAG, "Ignoring start listening while network test mode is enabled");
+        return;
+    }
     auto state = GetDeviceState();
     
     if (state == kDeviceStateActivating) {
@@ -752,6 +830,9 @@ void Application::HandleStopListeningEvent() {
 }
 
 void Application::HandleWakeWordDetectedEvent() {
+    if (debug_mode_) {
+        return;
+    }
     if (!protocol_) {
         return;
     }
@@ -805,10 +886,10 @@ void Application::HandleStateChangedEvent() {
     switch (new_state) {
         case kDeviceStateUnknown:
         case kDeviceStateIdle:
-            display->SetStatus(Lang::Strings::STANDBY);
+            display->SetStatus(debug_mode_ ? "DEBUG" : Lang::Strings::STANDBY);
             display->SetEmotion("neutral");
             audio_service_.EnableVoiceProcessing(false);
-            audio_service_.EnableWakeWordDetection(true);
+            audio_service_.EnableWakeWordDetection(!debug_mode_);
             break;
         case kDeviceStateConnecting:
             display->SetStatus(Lang::Strings::CONNECTING);
@@ -823,7 +904,9 @@ void Application::HandleStateChangedEvent() {
             if (!audio_service_.IsAudioProcessorRunning()) {
                 // Send the start listening command
                 protocol_->SendStartListening(listening_mode_);
-                audio_service_.EnableVoiceProcessing(true);
+                // Virtual microphone frames are encoded directly into the
+                // normal send queue; keep the physical microphone disabled.
+                audio_service_.EnableVoiceProcessing(!debug_mode_);
                 audio_service_.EnableWakeWordDetection(false);
             }
 
@@ -850,6 +933,99 @@ void Application::HandleStateChangedEvent() {
         default:
             // Do nothing
             break;
+    }
+}
+
+void Application::SetDebugMode(bool enabled) {
+    Schedule([this, enabled]() {
+        ApplyDebugMode(enabled);
+    });
+}
+
+void Application::ApplyDebugMode(bool enabled) {
+    if (debug_mode_ == enabled) {
+        return;
+    }
+
+    Settings debug_settings("debug", true);
+    debug_settings.SetBool("network_test_mode", enabled);
+    debug_mode_ = enabled;
+    virtual_audio_input_active_ = false;
+    audio_service_.EnableVoiceProcessing(false);
+    audio_service_.EnableWakeWordDetection(false);
+    play_popup_on_listening_ = false;
+
+    if (enabled) {
+        if (protocol_ && GetDeviceState() == kDeviceStateListening) {
+            protocol_->SendStopListening();
+        }
+        SetDeviceState(kDeviceStateIdle);
+        ESP_LOGW(TAG, "Network test mode enabled: microphone disabled, keeping test channel online");
+        EnsureDebugChannel();
+        return;
+    }
+
+    ESP_LOGI(TAG, "Network test mode disabled: restoring normal voice operation");
+    if (protocol_ && protocol_->IsAudioChannelOpened()) {
+        protocol_->CloseAudioChannel();
+    }
+    SetDeviceState(kDeviceStateIdle);
+}
+
+void Application::StartVirtualAudioInput() {
+    Schedule([this]() {
+        if (!debug_mode_ || !protocol_ || !protocol_->IsAudioChannelOpened()) {
+            ESP_LOGW(TAG, "Cannot start virtual microphone: debug channel is not ready");
+            return;
+        }
+        if (GetDeviceState() != kDeviceStateIdle) {
+            ESP_LOGW(TAG, "Cannot start virtual microphone while device state is %d", GetDeviceState());
+            return;
+        }
+        virtual_audio_input_active_ = true;
+        ESP_LOGI(TAG, "Virtual microphone input started");
+        SetListeningMode(kListeningModeManualStop);
+    });
+}
+
+void Application::PushVirtualAudioFrame(std::vector<int16_t>&& pcm) {
+    Schedule([this, pcm = std::move(pcm)]() mutable {
+        if (!virtual_audio_input_active_ || GetDeviceState() != kDeviceStateListening) {
+            ESP_LOGW(TAG, "Dropping virtual microphone frame outside listening state");
+            return;
+        }
+        audio_service_.InjectPcmForSend(std::move(pcm));
+    });
+}
+
+void Application::StopVirtualAudioInput() {
+    Schedule([this]() {
+        if (!virtual_audio_input_active_) {
+            return;
+        }
+        virtual_audio_input_active_ = false;
+        ESP_LOGI(TAG, "Virtual microphone input finished");
+        if (GetDeviceState() == kDeviceStateListening) {
+            if (protocol_) {
+                protocol_->SendStopListening();
+            }
+            SetDeviceState(kDeviceStateIdle);
+        }
+    });
+}
+
+void Application::EnsureDebugChannel() {
+    if (!debug_mode_ || !protocol_ || protocol_->IsAudioChannelOpened()) {
+        return;
+    }
+    if (GetDeviceState() != kDeviceStateIdle) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "Opening persistent network test channel");
+    SetDeviceState(kDeviceStateConnecting);
+    if (protocol_->OpenAudioChannel()) {
+        SetDeviceState(kDeviceStateIdle);
     }
 }
 
@@ -1052,4 +1228,3 @@ void Application::ResetProtocol() {
         protocol_.reset();
     });
 }
-

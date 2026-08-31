@@ -434,6 +434,17 @@ std::unique_ptr<AudioStreamPacket> AudioService::PopPacketFromSendQueue() {
     return packet;
 }
 
+bool AudioService::InjectPcmForSend(std::vector<int16_t>&& pcm) {
+    constexpr size_t kFrameSamples = 16000 * OPUS_FRAME_DURATION_MS / 1000;
+    if (pcm.size() != kFrameSamples) {
+        ESP_LOGW(TAG, "Rejecting virtual microphone frame: expected %u samples, got %u",
+            static_cast<unsigned>(kFrameSamples), static_cast<unsigned>(pcm.size()));
+        return false;
+    }
+    PushTaskToEncodeQueue(kAudioTaskTypeEncodeToSendQueue, std::move(pcm));
+    return true;
+}
+
 void AudioService::EncodeWakeWord() {
     if (wake_word_) {
         wake_word_->EncodeWakeWordData();

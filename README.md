@@ -59,8 +59,12 @@ idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.private" bui
 The default configuration targets the bread-compact Wi-Fi board. Build outputs
 are ignored and must not be committed.
 
-For the TB6612FNG dual-motor wiring, safety limits, and MCP chassis commands,
+For the DRV8833 dual-motor wiring, safety limits, and MCP chassis commands,
 read [firmware/docs/MOTOR_DRIVER.md](firmware/docs/MOTOR_DRIVER.md).
+For deterministic network tests that bypass microphone and model input, read
+[docs/MCP_BENCH_TESTING.md](docs/MCP_BENCH_TESTING.md).
+For automated voice-to-model-to-MCP regression tests, read
+[docs/E2E_VOICE_TESTING.md](docs/E2E_VOICE_TESTING.md).
 
 ## Sharing policy
 

@@ -159,7 +159,9 @@ git push -u origin feat/short-description
 ```
 
 Open a Pull Request and merge it after the author has verified the relevant
-tests and the sharing scan. **At the current project stage, peer approval is
+tests and the sharing scan. For a firmware change that controls real hardware,
+first keep the feature branch local and complete a supervised hardware test;
+only then push it and open the PR. **At the current project stage, peer approval is
 not required:** the branch author may merge their own PR when it is ready.
 Squash merge is preferred to keep `main` history concise. Delete the merged
 feature branch, then update local `main` before starting the next task.
@@ -180,5 +182,8 @@ git pull --ff-only origin main
 - Each developer keeps their own ignored `private/local.yaml` and generated
   files. Never use Git to share private runtime configuration.
 - Before merging firmware changes, compile the target board when practical.
-  Before merging backend changes, run the affected backend tests. Always run
-  the sharing scan before a public push.
+  For changes that affect motors, power, relays, or other physical actuators,
+  also perform a supervised hardware test (start with the mechanism unloaded
+  or wheels off the ground) before the first remote push. Before merging backend
+  changes, run the affected backend tests. Always run the sharing scan before a
+  public push.
