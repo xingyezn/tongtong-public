@@ -1,3 +1,12 @@
+# A local build must never produce a firmware image with the public placeholder
+# endpoint. The private defaults are intentionally ignored by Git and must be
+# supplied through SDKCONFIG_DEFAULTS before configuring the project.
+if(CONFIG_OTA_URL MATCHES "your-server\\.example")
+    message(FATAL_ERROR
+        "CONFIG_OTA_URL still uses the public placeholder. Run scripts/configure_local.py "
+        "and configure with sdkconfig.defaults.private before building firmware.")
+endif()
+
 # Define source files
 set(SOURCES "audio/audio_codec.cc"
             "audio/audio_service.cc"
@@ -37,6 +46,7 @@ set(SOURCES "audio/audio_codec.cc"
             "assets.cc"
             "face_detection_test.cc"
             "face_tracking_controller.cc"
+            "face_tracking_controller_test.cc"
             "main.cc"
             )
 

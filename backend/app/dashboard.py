@@ -1,29 +1,29 @@
-"""监控面板：设备状态 / 配置查看 / 实时日志 / 音频回显测试。
+"""监控面板：设备状态 / 配置查看 / 实时日志 / 硬件测试。
 
 路由：
   GET  /            单页监控面板（内嵌 HTML）
   GET  /api/status  设备在线状态 + 后端配置摘要
   GET  /api/logs    实时日志流（SSE）
-  GET  /ws/echo     音频回显测试（浏览器录音 -> 服务器原样回放）
 """
 
 import asyncio
-import base64
 import hashlib
 import hmac
 import json
 import logging
+import math
 import secrets
 import threading
 import time
 from collections import deque
 
-from aiohttp import web, WSMsgType
+from aiohttp import web
 
 log = logging.getLogger("dash")
 
 # 登录 cookie 名
 AUTH_COOKIE = "tongtong_auth"
+MAX_CAMERA_PHOTO_BYTES = 2 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +214,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .btn:disabled { opacity:.45; cursor:not-allowed; }
   .btn.warn { background:linear-gradient(135deg, #f6bd58, #df9630); color:#fff; }
   .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .test-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; margin-top:12px; }
+  .test-group { padding:12px; border:1px solid #dceaf2; border-radius:12px; background:#f8fcfe; }
+  .test-group h3 { margin:0 0 9px; font-size:14px; color:var(--fg); }
+  .test-actions { display:flex; flex-wrap:wrap; gap:7px; }
+  .test-actions .btn { padding:7px 10px; font-size:12px; }
+  .test-input { width:72px; padding:6px 7px !important; }
+  #hardware-test-result { min-height:42px; max-height:180px; overflow:auto; margin-top:12px; padding:9px 11px; border:1px solid #dceaf2; border-radius:9px; background:#f7fbfd; color:#3b5265; font:12px/1.5 Consolas,monospace; white-space:pre-wrap; }
+  #camera-preview { display:none; margin-top:12px; padding:10px; border:1px solid #dceaf2; border-radius:9px; background:#f8fcfe; }
+  #camera-preview img { display:block; width:min(100%, 640px); max-height:420px; object-fit:contain; border-radius:6px; background:#edf4f8; }
   .muted { color:var(--muted); font-size:12px; }
   .empty { color:var(--muted); font-size:13px; padding:8px 0; }
   .hint { font-size:12px; color:var(--muted); margin-top:8px; }
@@ -264,14 +273,17 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <dl class="kv" id="cfg-kv"></dl>
   </div>
 
-  <div class="card">
-    <h2>调试测试模式</h2>
+  <div class="card full">
+    <h2>硬件手动测试</h2>
     <div class="row">
-      <select id="debug-device" onchange="updateDebugModePanel()" aria-label="选择设备"></select>
-      <button class="btn warn" id="debug-mode-btn" onclick="toggleDebugMode()" disabled>启用调试模式</button>
+      <select id="hardware-device" onchange="updateHardwareTestPanel()" aria-label="选择设备"></select>
+      <button class="btn" onclick="loadHardwareTests(true)">刷新测试项</button>
     </div>
-    <div class="hint" id="debug-mode-status">等待设备上线…</div>
-    <div class="hint">启用后会持久化到设备：软件麦克风采集和唤醒词被关闭，设备保持测试 WebSocket 在线。仅在此模式下可执行直连 MCP 台架测试。测试电机前请先让车轮悬空。</div>
+    <div class="hint" id="hardware-test-status">等待设备上线…</div>
+    <div id="hardware-test-groups" class="test-grid"></div>
+    <pre id="hardware-test-result">尚未执行测试。</pre>
+    <div id="camera-preview"><div class="muted" style="margin-bottom:7px">最近拍摄的照片（仅保存在后端内存，重启后自动清除）</div><img id="camera-preview-image" alt="设备最近拍摄的照片"></div>
+    <div class="hint">所有按钮通过设备 MCP 通道执行；运动测试必须先让车轮悬空。设备未声明的摄像头、舵机或屏幕工具会显示为不可用，不会伪造测试结果。</div>
   </div>
 
   <div class="card">
@@ -360,25 +372,21 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <option value="Sigga">Sigga · 海娜 (女·冰岛)</option>
         <option value="Bea">Bea · 雅娜 (女·菲律宾)</option>
         <option value="Chloe">Chloe · 思怡 (女·马来)</option>
-        <option value="custom">自定义（填下方输入框）</option>
       </select>
-    </div>
-    <div class="row" style="margin-bottom:10px">
-      <label class="muted" style="min-width:130px">自定义音色</label>
-      <input type="text" id="cfg-voice-custom" placeholder="音色 ID，如 my_voice_01" style="flex:1;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4">
     </div>
     <div class="row" style="margin-bottom:10px">
       <label class="muted" style="min-width:130px;align-self:flex-start">人物设定</label>
       <textarea id="cfg-instructions" rows="4" placeholder="你是童童，一个友好、热情的语音助手……" style="flex:1;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4;resize:vertical;font-family:Consolas,monospace;font-size:12px"></textarea>
     </div>
     <div class="row" style="margin-bottom:10px">
-      <label class="muted" style="min-width:130px">Workspace ID</label>
-      <input type="text" id="cfg-workspace" placeholder="llm-xxxx" style="flex:1;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4">
-    </div>
-    <div class="row" style="margin-bottom:10px">
       <label class="muted" style="min-width:130px">输入/输出采样率</label>
       <input type="number" id="cfg-in-rate" min="8000" max="48000" step="8000" value="16000" style="flex:1;max-width:140px;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4">
       <input type="number" id="cfg-out-rate" min="8000" max="48000" step="8000" value="24000" style="flex:1;max-width:140px;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4">
+    </div>
+    <div class="row" style="margin-bottom:10px">
+      <label class="muted" style="min-width:130px">对话连续时长（分钟）</label>
+      <input type="number" id="cfg-conversation-timeout" min="1" max="120" step="1" value="10" style="flex:1;max-width:140px;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4">
+      <span class="muted">无新对话超过此时长后重置</span>
     </div>
     <div class="row">
       <button class="btn" id="save-model-btn" onclick="saveModel()">保存模型 / 音色 / 设定</button>
@@ -386,6 +394,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
     <div class="hint">
       修改后<b>下一轮对话生效</b>，并持久化保存（重启仍生效）。
+      对话连续时长可设置为 1～120 分钟，默认 10 分钟。
       模型需为百炼 Realtime 系列（如 qwen3.5-omni-flash-realtime / qwen3.5-omni-plus-realtime）。
     </div>
   </div>
@@ -409,19 +418,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div id="logs"></div>
   </div>
 
-  <div class="card full">
-    <h2>音频回显测试</h2>
-    <div class="row">
-      <button class="btn" id="rec-btn" onclick="toggleRec()">开始录音</button>
-      <span class="muted" id="rec-status">未录音</span>
-      <button class="btn" onclick="sendAudio()" id="send-btn" disabled>发送到服务器</button>
-      <button class="btn" onclick="playEcho()" id="play-btn" disabled>回放回显</button>
-    </div>
-    <div class="hint">
-      浏览器录音 → WebSocket 发到 <span class="badge">/ws/echo</span> → 服务器原样回传 →
-      浏览器播放。用于验证「网络 → 后端 → 回程」音频通路（不经过设备协议）。
-    </div>
-  </div>
 </main>
 <div id="toast" role="status" aria-live="polite"></div>
 
@@ -479,8 +475,7 @@ function render(d) {
       if (dev.online) {
         st = '<span class="tag online">在线</span> ' +
           (dev.listening ? '<span class="tag listen">聆听中</span>' : "") +
-          (dev.speaking ? '<span class="tag listen">播放中</span>' : "") +
-          (dev.debug_mode ? '<span class="tag debug">调试</span>' : "");
+          (dev.speaking ? '<span class="tag listen">播放中</span>' : "");
       } else if (dev.idle) {
         st = '<span class="tag offline">待机中</span>';
       } else {
@@ -512,11 +507,11 @@ function render(d) {
     ["设备鉴权", c.devices_enabled ? "开启" : "关闭"],
     ["输出采样率", c.output_sample_rate + " Hz"],
   ].map(([k,v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
-  renderDebugModeControls(d.devices || []);
+  renderHardwareTestControls(d.devices || []);
 }
 
-function renderDebugModeControls(devices) {
-  const select = $("debug-device");
+function renderHardwareTestControls(devices) {
+  const select = $("hardware-device");
   const previous = select.value;
   dashboardDevices = devices.filter(dev => dev.online);
   select.innerHTML = dashboardDevices.map(dev =>
@@ -524,53 +519,22 @@ function renderDebugModeControls(devices) {
   ).join("");
   select.disabled = dashboardDevices.length === 0;
   if (dashboardDevices.some(dev => dev.device_id === previous)) select.value = previous;
-  updateDebugModePanel();
+  updateHardwareTestPanel();
 }
 
-function updateDebugModePanel() {
-  const select = $("debug-device");
+function updateHardwareTestPanel() {
+  const select = $("hardware-device");
   const device = dashboardDevices.find(dev => dev.device_id === select.value);
-  const button = $("debug-mode-btn");
-  const status = $("debug-mode-status");
+  const status = $("hardware-test-status");
   if (!device) {
-    button.disabled = true;
-    button.textContent = "启用调试模式";
-    status.textContent = "没有在线设备。先按住板载触摸键建立一次连接。";
+    status.textContent = "没有在线设备。";
+    hardwareToolsDevice = "";
+    hardwareTools = {};
+    renderHardwareTests();
     return;
   }
-  button.disabled = false;
-  button.textContent = device.debug_mode ? "退出调试模式" : "启用调试模式";
-  status.textContent = device.debug_mode
-    ? "已启用：语音输入被禁用，测试连接保持在线。"
-    : "未启用：可先正常连接设备，再点击启用。";
-}
-
-async function toggleDebugMode() {
-  const select = $("debug-device");
-  const device = dashboardDevices.find(dev => dev.device_id === select.value);
-  if (!device) return;
-  const enabled = !device.debug_mode;
-  const button = $("debug-mode-btn");
-  const normalText = button.textContent;
-  button.disabled = true;
-  button.textContent = enabled ? "启用中…" : "退出中…";
-  try {
-    const r = await fetch("/api/test/mode", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ device_id: device.device_id, enabled }),
-    });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.error || "request failed");
-    device.debug_mode = data.debug_mode;
-    updateDebugModePanel();
-    showToast(data.debug_mode ? "调试模式已启用" : "已恢复正常语音模式", "ok");
-    refresh();
-  } catch (e) {
-    button.disabled = false;
-    button.textContent = normalText;
-    showToast("切换失败：" + e.message, "err");
-  }
+  status.textContent = "设备在线，可直接执行手动硬件测试。";
+  loadHardwareTests(false);
 }
 
 // ---- 实时日志 (SSE) ----
@@ -630,54 +594,6 @@ es.onmessage = e => {
 };
 es.onerror = () => {};
 
-// ---- 音频回显测试 ----
-let mediaRec = null, chunks = [], recActive = false;
-async function toggleRec() {
-  if (recActive) {
-    mediaRec.stop();
-    return;
-  }
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  chunks = [];
-  mediaRec = new MediaRecorder(stream);
-  mediaRec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
-  mediaRec.onstop = () => {
-    recActive = false;
-    $("rec-btn").textContent = "开始录音";
-    $("rec-status").textContent = "已录 " + (chunks.length ? (chunks[0].size/1024).toFixed(0) : 0) + "KB 音频";
-    $("send-btn").disabled = chunks.length === 0;
-    stream.getTracks().forEach(t => t.stop());
-  };
-  mediaRec.start();
-  recActive = true;
-  $("rec-btn").textContent = "停止录音";
-  $("rec-status").textContent = "录音中…";
-}
-let lastEcho = null;
-function sendAudio() {
-  if (!chunks.length) return;
-  const blob = new Blob(chunks, { type: "audio/webm" });
-  $("send-btn").disabled = true;
-  $("rec-status").textContent = "发送中…";
-  const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/echo");
-  ws.binaryType = "arraybuffer";
-  ws.onopen = () => ws.send(blob);
-  ws.onmessage = e => {
-    lastEcho = new Blob([e.data], { type: blob.type });
-    ws.close();
-    $("rec-status").textContent = "已收到回显 " + (lastEcho.size/1024).toFixed(0) + "KB";
-    $("play-btn").disabled = false;
-  };
-  ws.onerror = () => { $("rec-status").textContent = "发送失败"; $("send-btn").disabled = false; };
-}
-function playEcho() {
-  if (!lastEcho) return;
-  const url = URL.createObjectURL(lastEcho);
-  const a = new Audio(url);
-  a.onended = () => URL.revokeObjectURL(url);
-  a.play();
-}
-
 // ---- VAD 控制 ----
 async function loadVad() {
   try {
@@ -722,52 +638,178 @@ async function saveVad() {
 }
 
 // ---- 模型/音色/人物设定 ----
-const VOICE_IDS = ["Tina","Cindy","Liora Mira","Sunnybobi","Raymond","Ethan","Theo Calm",
-                   "Serena","Harvey","Maia","Evan","Qiao","Momo","Wil","Angel","Li Cassian",
-                   "Mia","Joyner","Gold","Katerina","Ryan","Jennifer","Aiden","Mione","Sunny",
-                   "Dylan","Eric","Peter","Joseph Chen","Marcus","Li","Kiki","Rocky","Sohee",
-                   "Lenn","Ono Anna","Sonrisa","Bodega","Emilien","Andre","Radio Gol","Alek",
-                   "Rizky","Roya","Arda","Hana","Dolce","Jakub","Griet","Eliška","Marina",
-                   "Siiri","Ingrid","Sigga","Bea","Chloe"];
+let hardwareTools = {};
+let hardwareToolsDevice = "";
+
+const HARDWARE_TEST_GROUPS = [
+  { title: "电机驱动", items: [
+    ["self.chassis.go_forward", "前进"], ["self.chassis.go_back", "后退"],
+    ["self.chassis.turn_left", "左转"], ["self.chassis.turn_right", "右转"],
+    ["self.chassis.spin", "原地转圈"], ["self.chassis.stop", "停止"]
+  ]},
+  { title: "摄像头", items: [["self.camera.take_photo", "拍照测试"]] },
+  { title: "舵机 / 云台", items: [
+    ["self.gimbal.center", "云台回中"], ["self.gimbal.pan", "水平舵机"],
+    ["self.gimbal.tilt", "俯仰舵机"], ["self.face_tracking.get_state", "跟随状态"]
+  ]},
+  { title: "屏幕", items: [
+    ["self.screen.get_info", "读取屏幕信息"], ["self.screen.set_brightness", "亮度测试"],
+    ["self.screen.set_theme", "主题测试"]
+  ]},
+  { title: "RGB 指示灯", items: [
+    ["self.led.get_state", "读取灯状态"], ["self.led.turn_on", "开灯"],
+    ["self.led.turn_off", "关灯"], ["self.led.set_color", "设置颜色"]
+  ]}
+];
+
+function selectedHardwareDevice() {
+  return dashboardDevices.find(dev => dev.device_id === $("hardware-device").value);
+}
+
+function showCameraPreview(deviceId) {
+  const box = $("camera-preview");
+  const image = $("camera-preview-image");
+  image.onload = () => { box.style.display = "block"; };
+  image.onerror = () => { box.style.display = "none"; image.removeAttribute("src"); };
+  image.src = "/api/camera/latest?device_id=" + encodeURIComponent(deviceId) + "&v=" + Date.now();
+}
+
+function hardwareArgs(name) {
+  if (name === "self.led.set_color") return {
+    red: Math.max(0, Math.min(255, parseInt($("test-led-red").value, 10) || 0)),
+    green: Math.max(0, Math.min(255, parseInt($("test-led-green").value, 10) || 0)),
+    blue: Math.max(0, Math.min(255, parseInt($("test-led-blue").value, 10) || 0)),
+  };
+  if (name.indexOf("self.chassis.") === 0 && name !== "self.chassis.stop") {
+    return { speed: parseInt($("test-speed").value, 10) || 30,
+             duration_ms: parseInt($("test-duration").value, 10) || 500 };
+  }
+  if (name === "self.camera.take_photo") {
+    return { question: $("test-camera-question").value.trim() || "检查摄像头是否能正常拍照" };
+  }
+  if (name === "self.screen.set_brightness") {
+    return { brightness: parseInt($("test-brightness").value, 10) || 50 };
+  }
+  if (name === "self.screen.set_theme") {
+    return { theme: $("test-theme").value };
+  }
+  return {};
+}
+
+function renderHardwareTests() {
+  const box = $("hardware-test-groups");
+  const device = selectedHardwareDevice();
+  const canRun = !!device;
+  const previousValues = {};
+  ["test-speed", "test-duration", "test-brightness", "test-theme", "test-camera-question", "test-led-red", "test-led-green", "test-led-blue"].forEach(id => {
+    const input = $(id);
+    if (input) previousValues[id] = input.value;
+  });
+  if (!device) {
+    box.innerHTML = '<div class="empty">没有在线设备。</div>';
+    return;
+  }
+  let html = '<div class="row" style="grid-column:1/-1;margin-bottom:2px">' +
+    '<label class="muted">电机速度 <input class="test-input" id="test-speed" type="number" min="0" max="100" value="30"></label>' +
+    '<label class="muted">持续时间(ms) <input class="test-input" id="test-duration" type="number" min="1" max="10000" value="500"></label>' +
+    '<label class="muted">屏幕亮度 <input class="test-input" id="test-brightness" type="number" min="0" max="100" value="50"></label>' +
+    '<label class="muted">主题 <select id="test-theme"><option value="light">浅色</option><option value="dark">深色</option></select></label>' +
+    '<label class="muted" style="flex:1;min-width:220px">拍照问题 <input id="test-camera-question" value="检查摄像头是否能正常拍照" style="width:100%;padding:6px 8px"></label></div>';
+  html += HARDWARE_TEST_GROUPS.map(group => {
+    const actions = group.items.map(([name, label]) => {
+      const available = !!hardwareTools[name];
+      const disabled = !canRun || !available;
+      const reason = !available ? " title=\"设备未声明此工具\"" : "";
+      return '<button class="btn"' + reason + (disabled ? " disabled" : "") +
+        ' onclick=\'runHardwareTest("' + name + '", this)\'>' + label +
+        (available ? "" : "（不可用）") + '</button>';
+    }).join("");
+    const colorInputs = group.title === "RGB 指示灯"
+      ? '<div class="row" style="margin-bottom:8px"><label class="muted">R <input class="test-input" id="test-led-red" type="number" min="0" max="255" value="0"></label>' +
+        '<label class="muted">G <input class="test-input" id="test-led-green" type="number" min="0" max="255" value="160"></label>' +
+        '<label class="muted">B <input class="test-input" id="test-led-blue" type="number" min="0" max="255" value="255"></label></div>' : '';
+    return '<div class="test-group"><h3>' + group.title + '</h3>' + colorInputs + '<div class="test-actions">' + actions + '</div></div>';
+  }).join("");
+  box.innerHTML = html;
+  Object.entries(previousValues).forEach(([id, value]) => {
+    const input = $(id);
+    if (input) input.value = value;
+  });
+}
+
+async function loadHardwareTests(force) {
+  const device = selectedHardwareDevice();
+  if (!device) { hardwareTools = {}; renderHardwareTests(); return; }
+  if (!force && hardwareToolsDevice === device.device_id) { renderHardwareTests(); return; }
+  hardwareToolsDevice = device.device_id;
+  const status = $("hardware-test-status");
+  status.textContent = "正在读取设备测试工具…";
+  try {
+    const r = await fetch("/api/test/tools?device_id=" + encodeURIComponent(device.device_id));
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || "读取失败");
+    hardwareTools = Object.fromEntries((data.tools || []).map(tool => [tool.name, tool]));
+    status.textContent = "已加载 " + Object.keys(hardwareTools).length + " 个设备工具";
+  } catch (e) {
+    hardwareTools = {};
+    status.textContent = "读取测试工具失败：" + e.message;
+  }
+  renderHardwareTests();
+}
+
+async function runHardwareTest(name, button) {
+  const device = selectedHardwareDevice();
+  if (!device) return;
+  button.disabled = true;
+  $("hardware-test-result").textContent = "执行中：" + name;
+  try {
+    const r = await fetch("/api/test/mcp", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ device_id: device.device_id, name: name, arguments: hardwareArgs(name), timeout_ms: 15000 }) });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || "调用失败");
+    $("hardware-test-result").textContent = JSON.stringify(data.result, null, 2);
+    if (name === "self.camera.take_photo") showCameraPreview(device.device_id);
+    showToast(name + " 测试完成", "ok");
+  } catch (e) {
+    $("hardware-test-result").textContent = "失败：" + e.message;
+    showToast("硬件测试失败：" + e.message, "err");
+  } finally {
+    renderHardwareTests();
+  }
+}
+
 async function loadModel() {
   try {
     const r = await fetch("/api/model");
     const d = await r.json();
     $("cfg-model").value = d.model || "";
     $("cfg-instructions").value = d.instructions || "";
-    $("cfg-workspace").value = d.workspace_id || "";
     $("cfg-in-rate").value = d.input_sample_rate || 16000;
     $("cfg-out-rate").value = d.output_sample_rate || 24000;
+    $("cfg-conversation-timeout").value = d.conversation_timeout_minutes || 10;
     const voice = d.voice || "";
-    if (VOICE_IDS.includes(voice)) {
+    if (Array.from($("cfg-voice").options).some(option => option.value === voice)) {
       $("cfg-voice").value = voice;
-      $("cfg-voice-custom").value = "";
-    } else {
-      $("cfg-voice").value = "custom";
-      $("cfg-voice-custom").value = voice;
     }
   } catch (e) {}
 }
 async function saveModel() {
-  let voice = $("cfg-voice").value;
-  if (voice === "custom") {
-    voice = $("cfg-voice-custom").value.trim();
-    if (!voice) {
-      $("model-status").textContent = "自定义音色不能为空";
-      $("model-status").style.color = "var(--bad)";
-      return;
-    }
-  }
+  const voice = $("cfg-voice").value;
   const body = {
     model: $("cfg-model").value.trim(),
     voice: voice,
     instructions: $("cfg-instructions").value.trim(),
-    workspace_id: $("cfg-workspace").value.trim(),
     input_sample_rate: parseInt($("cfg-in-rate").value, 10),
     output_sample_rate: parseInt($("cfg-out-rate").value, 10),
+    conversation_timeout_minutes: parseFloat($("cfg-conversation-timeout").value),
   };
   if (!body.model) {
     $("model-status").textContent = "模型不能为空";
+    $("model-status").style.color = "var(--bad)";
+    return;
+  }
+  if (!Number.isFinite(body.conversation_timeout_minutes) || body.conversation_timeout_minutes < 1 || body.conversation_timeout_minutes > 120) {
+    $("model-status").textContent = "对话连续时长需为 1～120 分钟";
     $("model-status").style.color = "var(--bad)";
     return;
   }
@@ -825,6 +867,9 @@ class Dashboard:
         self.password = dash_cfg.get("password", "")
         self.session_ttl = int(dash_cfg.get("session_ttl", 86400))
         self._secret = secrets.token_hex(16)
+        # Latest JPEG per device. Photos are intentionally ephemeral: they
+        # are lost on restart and never written to disk.
+        self._camera_photos = {}
 
     def add_routes(self, app: web.Application):
         app.router.add_get("/", self.index)
@@ -833,15 +878,14 @@ class Dashboard:
         app.router.add_get("/logout", self.logout)
         app.router.add_get("/api/status", self.api_status)
         app.router.add_get("/api/logs", self.api_logs)
-        app.router.add_get("/ws/echo", self.echo)
         app.router.add_get("/api/vad", self.api_vad_get)
         app.router.add_post("/api/vad", self.api_vad_set)
         app.router.add_get("/api/model", self.api_model_get)
         app.router.add_post("/api/model", self.api_model_set)
         app.router.add_get("/api/test/tools", self.api_test_tools)
         app.router.add_post("/api/test/mcp", self.api_test_mcp)
-        app.router.add_post("/api/test/conversation", self.api_test_conversation)
-        app.router.add_post("/api/test/mode", self.api_test_mode)
+        app.router.add_post("/api/camera/upload", self.api_camera_upload)
+        app.router.add_get("/api/camera/latest", self.api_camera_latest)
 
     # ------------------------------------------------------------------
     # 鉴权辅助
@@ -934,7 +978,6 @@ class Dashboard:
                 "listening": getattr(s, "listening", False),
                 "speaking": getattr(s, "speaking", False),
                 "omni_busy": getattr(s, "omni_busy", False),
-                "debug_mode": getattr(s, "debug_mode", False),
                 "connected_at": s.connected_at,
                 "connected_for": now - s.connected_at,
             })
@@ -952,7 +995,6 @@ class Dashboard:
                 "listening": False,
                 "speaking": False,
                 "omni_busy": False,
-                "debug_mode": False,
                 "connected_at": info.get("last_seen", 0),
                 "connected_for": now - info.get("last_seen", now),
             })
@@ -1019,6 +1061,7 @@ class Dashboard:
             "realtime_url": ds.get("realtime_url", ""),
             "input_sample_rate": ds.get("input_sample_rate", 16000),
             "output_sample_rate": ds.get("output_sample_rate", 24000),
+            "conversation_timeout_minutes": ds.get("conversation_timeout_minutes", 10),
             "api_key_configured": bool(ds.get("api_key")),
         })
 
@@ -1044,6 +1087,14 @@ class Dashboard:
             ds["input_sample_rate"] = int(data["input_sample_rate"])
         if "output_sample_rate" in data:
             ds["output_sample_rate"] = int(data["output_sample_rate"])
+        if "conversation_timeout_minutes" in data:
+            try:
+                minutes = float(data["conversation_timeout_minutes"])
+            except (TypeError, ValueError):
+                return web.json_response({"error": "conversation_timeout_minutes must be a number"}, status=400)
+            if not math.isfinite(minutes) or not 1 <= minutes <= 120:
+                return web.json_response({"error": "conversation_timeout_minutes must be between 1 and 120"}, status=400)
+            ds["conversation_timeout_minutes"] = minutes
         # 持久化到 config.yaml（重启仍生效）
         if self.save_config:
             try:
@@ -1057,6 +1108,10 @@ class Dashboard:
             "voice": ds.get("voice", ""),
             "workspace_id": ds.get("workspace_id", ""),
             "realtime_url": ds.get("realtime_url", ""),
+            "instructions": ds.get("instructions", ""),
+            "input_sample_rate": ds.get("input_sample_rate", 16000),
+            "output_sample_rate": ds.get("output_sample_rate", 24000),
+            "conversation_timeout_minutes": ds.get("conversation_timeout_minutes", 10),
             "api_key_configured": bool(ds.get("api_key")),
         })
 
@@ -1065,13 +1120,23 @@ class Dashboard:
         """Only expose actuator tools intended for supervised bench tests."""
         mcp = getattr(session, "mcp", None)
         tools = getattr(mcp, "tools", []) if mcp else []
-        allowed_prefixes = ("self.chassis.", "self.lamp.")
+        # Keep manual hardware tests limited to bounded, observable tools.
+        # Destructive/configuration tools (firmware upgrade, screen snapshot
+        # upload, asset download, etc.) are intentionally not exposed here.
+        allowed_prefixes = ("self.chassis.", "self.gimbal.",
+                            "self.servo.", "self.face_tracking.", "self.led.")
+        allowed_names = {
+            "self.camera.take_photo",
+            "self.screen.get_info",
+            "self.screen.set_brightness",
+            "self.screen.set_theme",
+        }
         result = []
         for tool in tools:
             if not isinstance(tool, dict):
                 continue
             name = tool.get("name", "")
-            if not isinstance(name, str) or not name.startswith(allowed_prefixes):
+            if not isinstance(name, str) or (not name.startswith(allowed_prefixes) and name not in allowed_names):
                 continue
             result.append({
                 "name": name,
@@ -1084,6 +1149,72 @@ class Dashboard:
         if not isinstance(device_id, str) or not device_id:
             return None
         return self.sessions.get(device_id)
+
+    async def api_camera_upload(self, request):
+        """Accept one JPEG from the device's current MCP camera session."""
+        device_id = request.headers.get("Device-Id", "")
+        auth = request.headers.get("Authorization", "")
+        token = auth[7:] if auth.startswith("Bearer ") else ""
+        session = self._get_test_session(device_id)
+        expected = getattr(session, "camera_upload_token", "") if session else ""
+        if not token or not expected or not hmac.compare_digest(token, expected):
+            raise web.HTTPUnauthorized(text="invalid camera upload token")
+        if not request.content_type.startswith("multipart/"):
+            log.warning("camera upload rejected: device=%s content_type=%s", device_id, request.content_type)
+            return web.json_response({"error": "multipart JPEG upload required"}, status=400)
+
+        image = bytearray()
+        try:
+            reader = await request.multipart()
+            while True:
+                part = await reader.next()
+                if part is None:
+                    break
+                if part.name != "file":
+                    await part.release()
+                    continue
+                while True:
+                    chunk = await part.read_chunk()
+                    if not chunk:
+                        break
+                    if len(image) + len(chunk) > MAX_CAMERA_PHOTO_BYTES:
+                        return web.json_response({"error": "photo exceeds 2 MiB limit"}, status=413)
+                    image.extend(chunk)
+        except Exception:
+            log.exception("camera upload parse failed: device=%s", device_id)
+            return web.json_response({"error": "invalid camera upload"}, status=400)
+
+        if len(image) < 4 or image[:2] != b"\xff\xd8" or image[-2:] != b"\xff\xd9":
+            log.warning("camera upload rejected: device=%s bytes=%d head=%s tail=%s",
+                        device_id, len(image), bytes(image[:4]).hex(), bytes(image[-4:]).hex())
+            return web.json_response({"error": "camera did not send a JPEG"}, status=400)
+
+        photo = {
+            "data": bytes(image),
+            "created_at": time.time(),
+            "nonce": secrets.token_urlsafe(8),
+        }
+        self._camera_photos[device_id] = photo
+        log.info("camera photo stored in memory: device=%s bytes=%d", device_id, len(image))
+        return web.json_response({
+            "success": True,
+            "result": "Photo captured and available on the dashboard.",
+            "image_url": "/api/camera/latest?device_id={}&v={}".format(device_id, photo["nonce"]),
+        })
+
+    async def api_camera_latest(self, request):
+        """Serve a dashboard-authenticated, in-memory latest camera photo."""
+        if not self._check_cookie(request):
+            raise web.HTTPUnauthorized()
+        device_id = request.query.get("device_id", "")
+        photo = self._camera_photos.get(device_id)
+        if photo is None:
+            raise web.HTTPNotFound(text="no camera photo for this device")
+        return web.Response(
+            body=photo["data"],
+            content_type="image/jpeg",
+            headers={"Cache-Control": "no-store, max-age=0"},
+        )
 
     async def api_test_tools(self, request):
         if not self._check_cookie(request):
@@ -1114,8 +1245,6 @@ class Dashboard:
         session = self._get_test_session(device_id)
         if session is None:
             return web.json_response({"error": "device is not online"}, status=404)
-        if not getattr(session, "debug_mode", False):
-            return web.json_response({"error": "enable device debug mode before running bench commands"}, status=409)
         testable_names = {tool["name"] for tool in self._testable_tools(session)}
         if name not in testable_names:
             return web.json_response({"error": "tool is not available for supervised testing"}, status=403)
@@ -1136,124 +1265,6 @@ class Dashboard:
 
         log.info("MCP bench test completed: device=%s tool=%s", device_id, name)
         return web.json_response({"device_id": device_id, "name": name, "result": result})
-
-    async def api_test_conversation(self, request):
-        """Run one virtual-microphone conversation through the actual model.
-
-        The audio is injected only at the ESP32 input boundary.  From there it
-        follows the ordinary device Opus uplink, server VAD, Omni inference,
-        MCP tool selection, device execution and JSON-RPC callback path.
-        """
-        if not self._check_cookie(request):
-            raise web.HTTPUnauthorized()
-        try:
-            data = await request.json()
-        except Exception:
-            return web.json_response({"error": "bad json"}, status=400)
-        device_id = data.get("device_id", "")
-        encoded_pcm = data.get("pcm_b64", "")
-        if not isinstance(encoded_pcm, str):
-            return web.json_response({"error": "pcm_b64 must be a base64 string"}, status=400)
-        try:
-            pcm = base64.b64decode(encoded_pcm, validate=True)
-        except Exception:
-            return web.json_response({"error": "pcm_b64 is not valid base64"}, status=400)
-        # 16 kHz, mono, signed 16-bit; keep virtual audio bounded to 8 seconds.
-        if not pcm or len(pcm) % 2 or len(pcm) > 16000 * 2 * 8:
-            return web.json_response({"error": "PCM must be 16 kHz mono s16le and at most 8 seconds"}, status=400)
-
-        session = self._get_test_session(device_id)
-        if session is None:
-            return web.json_response({"error": "device is not online"}, status=404)
-        if not getattr(session, "debug_mode", False):
-            return web.json_response({"error": "enable device debug mode before running voice tests"}, status=409)
-
-        all_safe_tools = {tool["name"] for tool in self._testable_tools(session)}
-        allow_motion = data.get("allow_motion", False)
-        if not isinstance(allow_motion, bool):
-            return web.json_response({"error": "allow_motion must be a boolean"}, status=400)
-        allowed_tools = {
-            name for name in all_safe_tools
-            if allow_motion or name.startswith("self.lamp.")
-        }
-        if not allowed_tools:
-            return web.json_response({"error": "no safe device tools are available"}, status=409)
-        expected_tool = data.get("expected_tool", "")
-        if expected_tool and expected_tool not in allowed_tools:
-            return web.json_response({"error": "expected_tool is not permitted for this test"}, status=400)
-
-        frame_bytes = 16000 * 60 // 1000 * 2
-        padded_pcm = pcm + b"\x00" * ((-len(pcm)) % frame_bytes)
-        try:
-            completion = session.begin_e2e_test(allowed_tools)
-        except RuntimeError as exc:
-            return web.json_response({"error": str(exc)}, status=409)
-
-        try:
-            await session.send_json({"type": "test_audio", "event": "start"})
-            # Wait for the device to enter listening and emit its normal
-            # `listen:start` message before sending Opus input frames.
-            await asyncio.sleep(0.18)
-            for offset in range(0, len(padded_pcm), frame_bytes):
-                frame = padded_pcm[offset:offset + frame_bytes]
-                await session.send_json({
-                    "type": "test_audio",
-                    "event": "frame",
-                    "pcm_b64": base64.b64encode(frame).decode("ascii"),
-                })
-                # Match real microphone pacing so the ESP32 encoder/send queue
-                # and the server VAD observe ordinary 60 ms frames.
-                await asyncio.sleep(0.065)
-            await asyncio.sleep(0.25)
-            await session.send_json({"type": "test_audio", "event": "end"})
-            result = await asyncio.wait_for(asyncio.shield(completion), timeout=70)
-        except asyncio.TimeoutError:
-            session.cancel_e2e_test(completion)
-            log.warning("E2E voice test timed out: device=%s", device_id)
-            return web.json_response({"error": "model conversation timed out"}, status=504)
-        except Exception as exc:
-            session.cancel_e2e_test(completion)
-            log.exception("E2E voice test failed: device=%s", device_id)
-            return web.json_response({"error": "voice test failed", "detail": str(exc)}, status=502)
-
-        tool_calls = result["tool_calls"]
-        matched = (not expected_tool) or any(call["name"] == expected_tool for call in tool_calls)
-        log.info("E2E voice test completed: device=%s tools=%s expected=%s matched=%s",
-                 device_id, [call["name"] for call in tool_calls], expected_tool, matched)
-        return web.json_response({
-            "device_id": device_id,
-            "tool_calls": tool_calls,
-            "expected_tool": expected_tool,
-            "matched": matched,
-            "model_error": result["error"],
-        })
-
-    async def api_test_mode(self, request):
-        """Switch the persisted firmware debug mode on an online device."""
-        if not self._check_cookie(request):
-            raise web.HTTPUnauthorized()
-        try:
-            data = await request.json()
-        except Exception:
-            return web.json_response({"error": "bad json"}, status=400)
-        device_id = data.get("device_id", "")
-        enabled = data.get("enabled")
-        if not isinstance(enabled, bool):
-            return web.json_response({"error": "enabled must be a boolean"}, status=400)
-        session = self._get_test_session(device_id)
-        if session is None:
-            return web.json_response({"error": "device is not online"}, status=404)
-        try:
-            await session.send_json({"type": "debug_mode", "enabled": enabled})
-        except Exception as exc:
-            log.exception("Failed to send debug mode command: device=%s", device_id)
-            return web.json_response({"error": "could not send debug mode command", "detail": str(exc)}, status=502)
-        # The device also declares this value in its next hello after a reboot.
-        # Track the accepted command now so the protected test API is usable
-        # during the persistent test connection.
-        session.debug_mode = enabled
-        log.warning("Device debug mode requested: device=%s enabled=%s", device_id, enabled)
-        return web.json_response({"device_id": device_id, "debug_mode": enabled})
 
     async def api_logs(self, request):
         if not self._check_cookie(request):
@@ -1298,23 +1309,3 @@ class Dashboard:
             except Exception:
                 pass
         return resp
-
-    async def echo(self, request):
-        if not self._check_cookie(request):
-            raise web.HTTPUnauthorized()
-        ws = web.WebSocketResponse(max_msg_size=16 * 1024 * 1024)
-        await ws.prepare(request)
-        log.info("echo client connected from %s", request.remote)
-        try:
-            async for msg in ws:
-                if msg.type == WSMsgType.BINARY:
-                    await ws.send_bytes(msg.data)
-                elif msg.type == WSMsgType.TEXT:
-                    await ws.send_str(msg.data)
-                elif msg.type == WSMsgType.CLOSE:
-                    break
-        except asyncio.CancelledError:
-            pass
-        finally:
-            log.info("echo client disconnected")
-        return ws

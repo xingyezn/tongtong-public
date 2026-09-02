@@ -22,6 +22,8 @@ backend:
     instructions: "You are Tongtong, a friendly voice assistant. Reply briefly in natural Chinese."
     output_sample_rate: 24000
     input_sample_rate: 16000
+    # Reset an idle device conversation after this many minutes (1-120).
+    conversation_timeout_minutes: 10
 
   audio:
     opus_frame_ms: 60
@@ -36,8 +38,10 @@ backend:
     level: "INFO"
 
   vad:
-    silence_duration_ms: 400
-    energy_threshold: 100.0
+    # Tuned for the on-board microphone and speaker; prevents idle noise and
+    # speaker tail from being treated as a new voice command.
+    silence_duration_ms: 600
+    energy_threshold: 600.0
 
   dashboard:
     password: "change-me-before-production"

@@ -209,32 +209,32 @@ public:
         mcp_server.AddTool("self.chassis.get_state", "Get the chassis motor state. Motors are stopped after every motion command.",
             PropertyList(), [this](const PropertyList&) -> ReturnValue { return GetStateJson(); });
 
-        mcp_server.AddTool("self.chassis.go_forward", "Drive forward for a limited time. The chassis stops automatically when the time expires.",
+        mcp_server.AddTool("self.chassis.go_forward", "Drive both wheels forward. speed is 0-100 and duration_ms is 1-10000. The chassis stops automatically when the time expires.",
             MotionProperties(), [this](const PropertyList& properties) -> ReturnValue {
                 int speed = properties["speed"].value<int>();
                 return DriveFor(speed, speed, properties["duration_ms"].value<int>());
             });
-        mcp_server.AddTool("self.chassis.go_back", "Drive backward for a limited time. The chassis stops automatically when the time expires.",
+        mcp_server.AddTool("self.chassis.go_back", "Drive both wheels backward. speed is 0-100 and duration_ms is 1-10000. The chassis stops automatically when the time expires.",
             MotionProperties(), [this](const PropertyList& properties) -> ReturnValue {
                 int speed = properties["speed"].value<int>();
                 return DriveFor(-speed, -speed, properties["duration_ms"].value<int>());
             });
-        mcp_server.AddTool("self.chassis.turn_left", "Turn left in place for a limited time. The chassis stops automatically when the time expires.",
+        mcp_server.AddTool("self.chassis.turn_left", "Turn left in place: left wheel backward and right wheel forward. speed is 0-100 and duration_ms is 1-10000; the chassis then stops.",
             MotionProperties(), [this](const PropertyList& properties) -> ReturnValue {
                 int speed = properties["speed"].value<int>();
                 return DriveFor(-speed, speed, properties["duration_ms"].value<int>());
             });
-        mcp_server.AddTool("self.chassis.turn_right", "Turn right in place for a limited time. The chassis stops automatically when the time expires.",
+        mcp_server.AddTool("self.chassis.turn_right", "Make a short right turn: left wheel forward and right wheel backward. Use a short duration_ms (typically 300-1000 ms); speed is 0-100 and the chassis then stops.",
             MotionProperties(), [this](const PropertyList& properties) -> ReturnValue {
                 int speed = properties["speed"].value<int>();
                 return DriveFor(speed, -speed, properties["duration_ms"].value<int>());
             });
-        mcp_server.AddTool("self.chassis.spin", "Spin in place in a circle: the left and right wheels rotate in opposite directions. The chassis stops automatically when the time expires.",
+        mcp_server.AddTool("self.chassis.spin", "Spin continuously clockwise in place with the left wheel forward and right wheel backward. Use a longer duration_ms (typically 2000-5000 ms) for a full turn; speed is 0-100 and the chassis then stops.",
             MotionProperties(), [this](const PropertyList& properties) -> ReturnValue {
                 int speed = properties["speed"].value<int>();
                 return DriveFor(speed, -speed, properties["duration_ms"].value<int>());
             });
-        mcp_server.AddTool("self.chassis.drive", "Drive each wheel independently for a limited time. Speeds are -100 to 100; the chassis stops automatically when the time expires.",
+        mcp_server.AddTool("self.chassis.drive", "Drive each wheel independently for duration_ms 1-10000. left_speed and right_speed range from -100 to 100; positive is forward and negative is backward. The chassis stops automatically when the time expires.",
             PropertyList({
                 Property("left_speed", kPropertyTypeInteger, 0, -100, 100),
                 Property("right_speed", kPropertyTypeInteger, 0, -100, 100),

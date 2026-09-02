@@ -53,6 +53,16 @@ idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.private" set
 idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.private" build
 ```
 
+推荐直接使用仓库脚本：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build_firmware.ps1
+# 刷写：
+powershell -ExecutionPolicy Bypass -File scripts/build_firmware.ps1 -Flash -Port COM3
+```
+
+固件 CMake 会拒绝 `your-server.example` 占位 OTA 地址；如果没有私有配置，构建会直接失败，不会生成可刷写的占位地址固件。
+
 The second defaults file is loaded last, so its real OTA endpoint overrides the
 tracked placeholder. A production binary therefore contains private deployment
 data. Burn it to controlled devices or distribute it privately; do not commit
@@ -109,6 +119,10 @@ terminal transcripts.
 4. For a backend change: securely copy the regenerated `backend/config.yaml`
    to the server and restart the service.
 5. Never edit a tracked placeholder to make a deployment work.
+
+运行中的后端也可通过管理页面修改“对话连续时长（分钟）”（1～120，默认
+10）。该值写入后端运行配置，后续新一轮对话会按新值判断空闲超时；设备重连
+仍会立即创建全新的模型会话。
 
 ### Secret rotation
 

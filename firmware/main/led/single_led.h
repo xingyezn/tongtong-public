@@ -13,6 +13,11 @@ public:
     SingleLed(gpio_num_t gpio);
     virtual ~SingleLed();
 
+    bool SupportsColorControl() const override { return true; }
+    void SetColor(uint8_t r, uint8_t g, uint8_t b) override;
+    void TurnOn() override;
+    void TurnOff() override;
+    bool IsOn() const override { return is_on_; }
     void OnStateChanged() override;
 
 private:
@@ -20,6 +25,7 @@ private:
     TaskHandle_t blink_task_ = nullptr;
     led_strip_handle_t led_strip_ = nullptr;
     uint8_t r_ = 0, g_ = 0, b_ = 0;
+    bool is_on_ = false;
     int blink_counter_ = 0;
     int blink_interval_ms_ = 0;
     esp_timer_handle_t blink_timer_ = nullptr;
@@ -30,9 +36,6 @@ private:
     void BlinkOnce();
     void Blink(int times, int interval_ms);
     void StartContinuousBlink(int interval_ms);
-    void TurnOn();
-    void TurnOff();
-    void SetColor(uint8_t r, uint8_t g, uint8_t b);
 };
 
 #endif // _SINGLE_LED_H_

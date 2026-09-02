@@ -1,7 +1,7 @@
 #include "websocket_protocol.h"
 #include "board.h"
+#include "audio/audio_service.h"
 #include "system_info.h"
-#include "application.h"
 #include "settings.h"
 
 #include <cstring>
@@ -21,8 +21,12 @@ WebsocketProtocol::~WebsocketProtocol() {
 }
 
 bool WebsocketProtocol::Start() {
-    // Only connect to server when audio channel is needed
-    return true;
+    // Keep the device's MCP control channel available after boot.  Voice
+    // capture remains disabled while the application is idle; this only
+    // avoids requiring a wake word or touch event before supervised hardware
+    // tests can reach the board.
+    ESP_LOGI(TAG, "Opening persistent websocket control channel after boot");
+    return OpenAudioChannel();
 }
 
 bool WebsocketProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
@@ -209,7 +213,6 @@ std::string WebsocketProtocol::GetHelloMessage() {
     cJSON_AddBoolToObject(features, "aec", true);
 #endif
     cJSON_AddBoolToObject(features, "mcp", true);
-    cJSON_AddBoolToObject(features, "debug_mode", Application::GetInstance().IsDebugMode());
     cJSON_AddItemToObject(root, "features", features);
     cJSON_AddStringToObject(root, "transport", "websocket");
     cJSON* audio_params = cJSON_CreateObject();

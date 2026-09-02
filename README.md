@@ -51,10 +51,17 @@ appropriate device authentication strategy.
 Install ESP-IDF 5.4 or newer, configure the private settings above, then:
 
 ```bash
-cd firmware
-idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.private" set-target esp32s3
-idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.private" build
+powershell -ExecutionPolicy Bypass -File scripts/build_firmware.ps1
 ```
+
+The script regenerates the ignored private defaults and configures ESP-IDF with
+them. Firmware configuration rejects `your-server.example`, so a build cannot
+silently produce an image with the public placeholder OTA endpoint. Add
+`-Flash -Port COM3` when the board is connected.
+
+For the ESP32-S3 USB camera configuration, use this script rather than calling
+`idf.py build` directly: it applies the tracked low-memory UVC patch required
+to share the N16R8's 8 MB PSRAM with ESP-SR and ESP-DL.
 
 The default configuration targets the bread-compact Wi-Fi board. Build outputs
 are ignored and must not be committed.

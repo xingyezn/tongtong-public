@@ -7,14 +7,16 @@
 #include "config.h"
 #include "mcp_server.h"
 #include "dual_motor_controller.h"
-#include "lamp_controller.h"
 #include "led/single_led.h"
 #include "assets/lang_config.h"
+#include "esp32_camera.h"
+#include "esp_video_init.h"
 
 #include <esp_log.h>
 #include <driver/i2c_master.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_panel_vendor.h>
+#include <freertos/task.h>
 
 #ifdef SH1106
 #include <esp_lcd_panel_sh1106.h>
@@ -32,6 +34,7 @@ private:
     Button touch_button_;
     Button volume_up_button_;
     Button volume_down_button_;
+    Esp32Camera* camera_ = nullptr;
 
     void InitializeDisplayI2c() {
         i2c_master_bus_config_t bus_config = {
@@ -150,12 +153,47 @@ private:
 
     // 物联网初始化，逐步迁移到 MCP 协议
     void InitializeTools() {
-        static LampController lamp(LAMP_GPIO);
         static DualMotorController chassis(
             MOTOR_AIN1_GPIO, MOTOR_AIN2_GPIO,
             MOTOR_BIN1_GPIO, MOTOR_BIN2_GPIO,
             MOTOR_STBY_GPIO, MOTOR_LEFT_REVERSED, MOTOR_RIGHT_REVERSED);
     }
+
+#ifdef CONFIG_ESP_VIDEO_ENABLE_USB_UVC_VIDEO_DEVICE
+    void InitializeCamera() {
+        ESP_LOGI(TAG, "Initializing USB-UVC camera host");
+        esp_video_init_usb_uvc_config_t usb_uvc_config = {
+            .uvc = {
+                .uvc_dev_num = 1,
+                .task_stack = 4096,
+                .task_priority = 5,
+                .task_affinity = -1,
+            },
+            .usb = {
+                .init_usb_host_lib = true,
+                .task_stack = 4096,
+                .task_priority = 5,
+                .task_affinity = -1,
+            },
+        };
+        esp_video_init_config_t video_config = {
+            .usb_uvc = &usb_uvc_config,
+        };
+        camera_ = new Esp32Camera(video_config);
+#ifdef CONFIG_USB_CAMERA_BOOT_PROBE
+        xTaskCreate(
+            [](void* arg) {
+                vTaskDelay(pdMS_TO_TICKS(500));
+                auto* camera = static_cast<Esp32Camera*>(arg);
+                if (!camera->ProbeFrame()) {
+                    ESP_LOGE(TAG, "USB-UVC camera frame probe failed");
+                }
+                vTaskDelete(nullptr);
+            },
+            "CameraProbe", 2048, camera_, 5, nullptr);
+#endif
+    }
+#endif
 
 public:
     CompactWifiBoard() :
@@ -167,6 +205,9 @@ public:
         InitializeSsd1306Display();
         InitializeButtons();
         InitializeTools();
+#ifdef CONFIG_ESP_VIDEO_ENABLE_USB_UVC_VIDEO_DEVICE
+        InitializeCamera();
+#endif
     }
 
     virtual Led* GetLed() override {
@@ -188,6 +229,12 @@ public:
     virtual Display* GetDisplay() override {
         return display_;
     }
+
+#ifdef CONFIG_ESP_VIDEO_ENABLE_USB_UVC_VIDEO_DEVICE
+    virtual Camera* GetCamera() override {
+        return camera_;
+    }
+#endif
 };
 
 DECLARE_BOARD(CompactWifiBoard);

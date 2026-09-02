@@ -1,4 +1,5 @@
 #include "application.h"
+#include "settings.h"
 #include "board.h"
 #include "display.h"
 #include "system_info.h"
@@ -8,39 +9,16 @@
 #include "assets/lang_config.h"
 #include "mcp_server.h"
 #include "assets.h"
-#include "settings.h"
 
 #include <cstring>
 #include <esp_log.h>
 #include <cJSON.h>
-#include <mbedtls/base64.h>
 #include <driver/gpio.h>
 #include <arpa/inet.h>
 #include <font_awesome.h>
 
 #define TAG "Application"
-
-namespace {
-bool DecodeVirtualPcmFrame(const char* encoded, std::vector<int16_t>& pcm) {
-    if (encoded == nullptr) {
-        return false;
-    }
-    size_t decoded_len = 0;
-    const auto* input = reinterpret_cast<const unsigned char*>(encoded);
-    const size_t input_len = strlen(encoded);
-    if (mbedtls_base64_decode(nullptr, 0, &decoded_len, input, input_len) != MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL ||
-        decoded_len != 16000 * OPUS_FRAME_DURATION_MS / 1000 * sizeof(int16_t)) {
-        return false;
-    }
-    std::vector<unsigned char> raw(decoded_len);
-    if (mbedtls_base64_decode(raw.data(), raw.size(), &decoded_len, input, input_len) != 0) {
-        return false;
-    }
-    pcm.resize(decoded_len / sizeof(int16_t));
-    memcpy(pcm.data(), raw.data(), decoded_len);
-    return true;
-}
-}  // namespace
+#define TTS_ECHO_GUARD_US (500 * 1000)
 
 
 Application::Application() {
@@ -67,12 +45,28 @@ Application::Application() {
         .skip_unhandled_events = true
     };
     esp_timer_create(&clock_timer_args, &clock_timer_handle_);
+
+    esp_timer_create_args_t tts_resume_timer_args = {
+        .callback = [](void* arg) {
+            Application* app = static_cast<Application*>(arg);
+            app->Schedule([app]() { app->ResumeListeningAfterPlayback(); });
+        },
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "tts_resume",
+        .skip_unhandled_events = true
+    };
+    esp_timer_create(&tts_resume_timer_args, &tts_resume_timer_handle_);
 }
 
 Application::~Application() {
     if (clock_timer_handle_ != nullptr) {
         esp_timer_stop(clock_timer_handle_);
         esp_timer_delete(clock_timer_handle_);
+    }
+    if (tts_resume_timer_handle_ != nullptr) {
+        esp_timer_stop(tts_resume_timer_handle_);
+        esp_timer_delete(tts_resume_timer_handle_);
     }
     vEventGroupDelete(event_group_);
 }
@@ -85,14 +79,7 @@ void Application::Initialize() {
     auto& board = Board::GetInstance();
     SetDeviceState(kDeviceStateStarting);
 
-    // This is a development firmware: an unset value starts in network test
-    // mode so the device can join the bench-test channel without a first
-    // touch/wake interaction.  Dashboard changes remain persistent in NVS.
-    Settings debug_settings("debug", false);
-    debug_mode_ = debug_settings.GetBool("network_test_mode", true);
-    if (debug_mode_) {
-        ESP_LOGW(TAG, "Network test mode enabled: microphone and wake word are disabled");
-    }
+    ESP_LOGI(TAG, "Starting in normal voice mode");
 
     // Setup the display
     auto display = board.GetDisplay();
@@ -249,12 +236,6 @@ void Application::Run() {
 
         if (bits & MAIN_EVENT_SEND_AUDIO) {
             while (auto packet = audio_service_.PopPacketFromSendQueue()) {
-                // Debug mode blocks physical microphone traffic.  A supervised
-                // virtual microphone test deliberately uses this same queue
-                // and must retain the normal device-to-server Opus uplink.
-                if (debug_mode_ && !virtual_audio_input_active_) {
-                    continue;
-                }
                 if (protocol_ && !protocol_->SendAudio(std::move(packet))) {
                     break;
                 }
@@ -290,7 +271,6 @@ void Application::Run() {
             if (clock_ticks_ % 10 == 0) {
                 SystemInfo::PrintHeapStats();
             }
-            EnsureDebugChannel();
         }
     }
 }
@@ -353,7 +333,6 @@ void Application::HandleActivationDoneEvent() {
     ota_.reset();
     auto& board = Board::GetInstance();
     board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
-    EnsureDebugChannel();
 }
 
 void Application::ActivationTask() {
@@ -557,53 +536,16 @@ void Application::InitializeProtocol() {
     protocol_->OnIncomingJson([this, display](const cJSON* root) {
         // Parse JSON data
         auto type = cJSON_GetObjectItem(root, "type");
-        if (strcmp(type->valuestring, "debug_mode") == 0) {
-            auto enabled = cJSON_GetObjectItem(root, "enabled");
-            if (cJSON_IsBool(enabled)) {
-                SetDebugMode(cJSON_IsTrue(enabled));
-            } else {
-                ESP_LOGW(TAG, "debug_mode command requires boolean enabled");
-            }
-        } else if (strcmp(type->valuestring, "test_audio") == 0) {
-            if (!debug_mode_) {
-                ESP_LOGW(TAG, "Ignoring virtual microphone command outside network test mode");
-                return;
-            }
-            auto event = cJSON_GetObjectItem(root, "event");
-            if (!cJSON_IsString(event)) {
-                ESP_LOGW(TAG, "test_audio command requires string event");
-            } else if (strcmp(event->valuestring, "start") == 0) {
-                StartVirtualAudioInput();
-            } else if (strcmp(event->valuestring, "frame") == 0) {
-                auto data = cJSON_GetObjectItem(root, "pcm_b64");
-                std::vector<int16_t> pcm;
-                if (cJSON_IsString(data) && DecodeVirtualPcmFrame(data->valuestring, pcm)) {
-                    PushVirtualAudioFrame(std::move(pcm));
-                } else {
-                    ESP_LOGW(TAG, "Invalid virtual microphone PCM frame");
-                }
-            } else if (strcmp(event->valuestring, "end") == 0) {
-                StopVirtualAudioInput();
-            } else {
-                ESP_LOGW(TAG, "Unknown test_audio event: %s", event->valuestring);
-            }
-        } else if (strcmp(type->valuestring, "tts") == 0) {
+        if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
             if (strcmp(state->valuestring, "start") == 0) {
                 Schedule([this]() {
                     aborted_ = false;
+                    CancelPendingTtsResume();
                     SetDeviceState(kDeviceStateSpeaking);
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
-                Schedule([this]() {
-                    if (GetDeviceState() == kDeviceStateSpeaking) {
-                        if (listening_mode_ == kListeningModeManualStop) {
-                            SetDeviceState(kDeviceStateIdle);
-                        } else {
-                            SetDeviceState(kDeviceStateListening);
-                        }
-                    }
-                });
+                Schedule([this]() { HandleTtsStopped(); });
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
                 auto text = cJSON_GetObjectItem(root, "text");
                 if (cJSON_IsString(text)) {
@@ -738,10 +680,6 @@ void Application::StopListening() {
 }
 
 void Application::HandleToggleChatEvent() {
-    if (debug_mode_) {
-        ESP_LOGI(TAG, "Ignoring chat toggle while network test mode is enabled");
-        return;
-    }
     auto state = GetDeviceState();
     
     if (state == kDeviceStateActivating) {
@@ -779,10 +717,6 @@ void Application::HandleToggleChatEvent() {
 }
 
 void Application::HandleStartListeningEvent() {
-    if (debug_mode_) {
-        ESP_LOGI(TAG, "Ignoring start listening while network test mode is enabled");
-        return;
-    }
     auto state = GetDeviceState();
     
     if (state == kDeviceStateActivating) {
@@ -830,9 +764,6 @@ void Application::HandleStopListeningEvent() {
 }
 
 void Application::HandleWakeWordDetectedEvent() {
-    if (debug_mode_) {
-        return;
-    }
     if (!protocol_) {
         return;
     }
@@ -886,10 +817,10 @@ void Application::HandleStateChangedEvent() {
     switch (new_state) {
         case kDeviceStateUnknown:
         case kDeviceStateIdle:
-            display->SetStatus(debug_mode_ ? "DEBUG" : Lang::Strings::STANDBY);
+            display->SetStatus(Lang::Strings::STANDBY);
             display->SetEmotion("neutral");
             audio_service_.EnableVoiceProcessing(false);
-            audio_service_.EnableWakeWordDetection(!debug_mode_);
+            audio_service_.EnableWakeWordDetection(true);
             break;
         case kDeviceStateConnecting:
             display->SetStatus(Lang::Strings::CONNECTING);
@@ -904,9 +835,7 @@ void Application::HandleStateChangedEvent() {
             if (!audio_service_.IsAudioProcessorRunning()) {
                 // Send the start listening command
                 protocol_->SendStartListening(listening_mode_);
-                // Virtual microphone frames are encoded directly into the
-                // normal send queue; keep the physical microphone disabled.
-                audio_service_.EnableVoiceProcessing(!debug_mode_);
+                audio_service_.EnableVoiceProcessing(true);
                 audio_service_.EnableWakeWordDetection(false);
             }
 
@@ -936,99 +865,6 @@ void Application::HandleStateChangedEvent() {
     }
 }
 
-void Application::SetDebugMode(bool enabled) {
-    Schedule([this, enabled]() {
-        ApplyDebugMode(enabled);
-    });
-}
-
-void Application::ApplyDebugMode(bool enabled) {
-    if (debug_mode_ == enabled) {
-        return;
-    }
-
-    Settings debug_settings("debug", true);
-    debug_settings.SetBool("network_test_mode", enabled);
-    debug_mode_ = enabled;
-    virtual_audio_input_active_ = false;
-    audio_service_.EnableVoiceProcessing(false);
-    audio_service_.EnableWakeWordDetection(false);
-    play_popup_on_listening_ = false;
-
-    if (enabled) {
-        if (protocol_ && GetDeviceState() == kDeviceStateListening) {
-            protocol_->SendStopListening();
-        }
-        SetDeviceState(kDeviceStateIdle);
-        ESP_LOGW(TAG, "Network test mode enabled: microphone disabled, keeping test channel online");
-        EnsureDebugChannel();
-        return;
-    }
-
-    ESP_LOGI(TAG, "Network test mode disabled: restoring normal voice operation");
-    if (protocol_ && protocol_->IsAudioChannelOpened()) {
-        protocol_->CloseAudioChannel();
-    }
-    SetDeviceState(kDeviceStateIdle);
-}
-
-void Application::StartVirtualAudioInput() {
-    Schedule([this]() {
-        if (!debug_mode_ || !protocol_ || !protocol_->IsAudioChannelOpened()) {
-            ESP_LOGW(TAG, "Cannot start virtual microphone: debug channel is not ready");
-            return;
-        }
-        if (GetDeviceState() != kDeviceStateIdle) {
-            ESP_LOGW(TAG, "Cannot start virtual microphone while device state is %d", GetDeviceState());
-            return;
-        }
-        virtual_audio_input_active_ = true;
-        ESP_LOGI(TAG, "Virtual microphone input started");
-        SetListeningMode(kListeningModeManualStop);
-    });
-}
-
-void Application::PushVirtualAudioFrame(std::vector<int16_t>&& pcm) {
-    Schedule([this, pcm = std::move(pcm)]() mutable {
-        if (!virtual_audio_input_active_ || GetDeviceState() != kDeviceStateListening) {
-            ESP_LOGW(TAG, "Dropping virtual microphone frame outside listening state");
-            return;
-        }
-        audio_service_.InjectPcmForSend(std::move(pcm));
-    });
-}
-
-void Application::StopVirtualAudioInput() {
-    Schedule([this]() {
-        if (!virtual_audio_input_active_) {
-            return;
-        }
-        virtual_audio_input_active_ = false;
-        ESP_LOGI(TAG, "Virtual microphone input finished");
-        if (GetDeviceState() == kDeviceStateListening) {
-            if (protocol_) {
-                protocol_->SendStopListening();
-            }
-            SetDeviceState(kDeviceStateIdle);
-        }
-    });
-}
-
-void Application::EnsureDebugChannel() {
-    if (!debug_mode_ || !protocol_ || protocol_->IsAudioChannelOpened()) {
-        return;
-    }
-    if (GetDeviceState() != kDeviceStateIdle) {
-        return;
-    }
-
-    ESP_LOGI(TAG, "Opening persistent network test channel");
-    SetDeviceState(kDeviceStateConnecting);
-    if (protocol_->OpenAudioChannel()) {
-        SetDeviceState(kDeviceStateIdle);
-    }
-}
-
 void Application::Schedule(std::function<void()>&& callback) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1039,6 +875,7 @@ void Application::Schedule(std::function<void()>&& callback) {
 
 void Application::AbortSpeaking(AbortReason reason) {
     ESP_LOGI(TAG, "Abort speaking");
+    CancelPendingTtsResume();
     aborted_ = true;
     if (protocol_) {
         protocol_->SendAbortSpeaking(reason);
@@ -1048,6 +885,58 @@ void Application::AbortSpeaking(AbortReason reason) {
 void Application::SetListeningMode(ListeningMode mode) {
     listening_mode_ = mode;
     SetDeviceState(kDeviceStateListening);
+}
+
+void Application::CancelPendingTtsResume() {
+    tts_resume_pending_ = false;
+    tts_playback_drained_ = false;
+    if (tts_resume_timer_handle_ != nullptr) {
+        esp_timer_stop(tts_resume_timer_handle_);
+    }
+}
+
+void Application::HandleTtsStopped() {
+    if (GetDeviceState() != kDeviceStateSpeaking) {
+        return;
+    }
+
+    // In manual mode the user explicitly starts every turn, so no automatic
+    // microphone resume is needed. In auto mode, wait for the local speaker
+    // to finish instead of treating the server's stream-end as playback-end.
+    if (listening_mode_ == kListeningModeManualStop) {
+        SetDeviceState(kDeviceStateIdle);
+        return;
+    }
+
+    CancelPendingTtsResume();
+    tts_resume_pending_ = true;
+    ESP_LOGI(TAG, "TTS stream ended; waiting for local playback to drain");
+    esp_timer_start_once(tts_resume_timer_handle_, 20 * 1000);
+}
+
+void Application::ResumeListeningAfterPlayback() {
+    if (!tts_resume_pending_ || GetDeviceState() != kDeviceStateSpeaking) {
+        return;
+    }
+
+    if (!audio_service_.IsPlaybackComplete()) {
+        esp_timer_start_once(tts_resume_timer_handle_, 20 * 1000);
+        return;
+    }
+
+    // I2S/DAC and the enclosure can retain audible energy after OutputData
+    // returns. Keep the microphone gated long enough to reject that tail.
+    if (!tts_playback_drained_) {
+        tts_playback_drained_ = true;
+        ESP_LOGI(TAG, "TTS playback drained; applying 500ms echo guard");
+        esp_timer_start_once(tts_resume_timer_handle_, TTS_ECHO_GUARD_US);
+        return;
+    }
+
+    tts_resume_pending_ = false;
+    tts_playback_drained_ = false;
+    ESP_LOGI(TAG, "Echo guard complete; resuming automatic listening");
+    SetListeningMode(kListeningModeAutoStop);
 }
 
 void Application::Reboot() {

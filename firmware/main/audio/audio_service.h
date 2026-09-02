@@ -105,9 +105,8 @@ public:
 
     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
-    // Feed one 16 kHz / mono / 60 ms PCM frame into the same Opus send path
-    // used by the microphone. Intended only for supervised virtual-mic tests.
-    bool InjectPcmForSend(std::vector<int16_t>&& pcm);
+    // True only after all received speech has been decoded and played.
+    bool IsPlaybackComplete();
     void PlaySound(const std::string_view& sound);
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
     void ResetDecoder();
@@ -142,6 +141,10 @@ private:
     std::deque<std::unique_ptr<AudioTask>> audio_playback_queue_;
     // For server AEC
     std::deque<uint32_t> timestamp_queue_;
+
+    // These cover work removed from a queue but not yet decoded/output.
+    bool decoding_active_ = false;
+    bool output_active_ = false;
 
     bool wake_word_initialized_ = false;
     bool audio_processor_initialized_ = false;

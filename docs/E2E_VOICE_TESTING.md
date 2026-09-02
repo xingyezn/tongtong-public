@@ -1,51 +1,52 @@
-# 端到端语音与 MCP 自动测试
+# 端到端语音与 MCP 验证
 
-此测试验证完整的用户语音控制路径：
+本项目只保留真实麦克风的正常语音对话，不再提供虚拟麦克风、`test_audio` 或调试模式。
 
-`测试 WAV -> ESP32 虚拟麦克风 -> ESP32 Opus 上行 -> 后端 VAD -> Qwen-Omni -> 模型 function_call -> 设备 MCP -> JSON-RPC 回包 -> 模型回复`
+每项语音控制能力都应按完整链路验证：
 
-它不同于 `MCP_BENCH_TESTING.md` 中的直连台架测试：后者跳过模型，只适合诊断 MCP 下半链路；本测试只有在模型实际选择并调用工具时才会通过。
+`用户语音 -> ESP32 上行 Opus -> 后端 VAD -> Qwen-Omni -> 模型 function_call -> 设备 MCP -> JSON-RPC 回包 -> 模型语音回复`
 
-## 前提
+它不同于 [MCP 手动硬件测试](MCP_BENCH_TESTING.md)：后者跳过模型，适合诊断 MCP 下半链路；本测试要求模型实际选择并调用工具。
 
-- 设备刷入开发固件并显示为 `debug_mode=true`、在线。
-- 后端必须配置有效的 `DASHSCOPE_API_KEY`；没有 Key 时只会进入音频回环模式，不能验证模型推理。
-- 测试音频为不超过 8 秒的 WAV；脚本会转换为 16 kHz、单声道、16 位 PCM。
-- 默认只把灯控工具提供给模型。电机测试须明确加 `--allow-motion`，并先让车轮悬空。
+## 正常语音验证
 
-## 示例：安全灯控用例
+1. 通过唤醒词或触摸键开始正常对话。
+2. 对设备说出真实用户指令，例如“把灯打开”。
+3. 在后端日志确认顺序：设备 `listen:start`、服务端 VAD、模型推理、模型选择 MCP 工具、设备执行工具并返回 JSON-RPC 回包。
+4. 对电机等物理动作，先让车轮悬空，并确认动作结束后处于停止状态。
 
-准备内容为“打开灯”的 WAV 后运行：
+## 下行音频完整性与回声回归
 
-```bash
-cd backend
-python tools/e2e_voice_test.py --base-url https://your-server.example \
-  --device-id <dashboard-device-id> --wav open-lamp.wav \
-  --expected-tool self.lamp.turn_on
-```
+### 症状
 
-返回 `matched: true` 并包含设备 MCP `result`，才表示模型选择、设备执行和回包都成功。
+- 模型文本或后端日志完整，但设备扬声器末尾字句没有播放，界面持续显示“说话中”。
+- 或回复刚结束就恢复监听，把扬声器回声识别成新的用户输入，造成模型连续自言自语。
 
-## 电机用例
+### 根因
 
-确认车轮悬空后，才可提供“前进”等 WAV，并显式允许底盘工具：
+后端曾在模型生成完成时突发发送所有 60 ms Opus 音频帧，而 ESP32 的下行解码队列只能容纳约 2.4 秒音频。音频生成快于扬声器播放时，后半段帧会使队列满；固件此前没有对入队失败进行背压处理，因而出现尾音被静默丢弃。
 
-```bash
-python tools/e2e_voice_test.py --base-url https://your-server.example \
-  --device-id <dashboard-device-id> --wav forward.wav \
-  --expected-tool self.chassis.go_forward --allow-motion
-```
+此外，协议中的 `tts stop` 仅表示服务端下行流结束，并不代表设备已经播放完毕。若此时立即恢复麦克风监听，扬声器剩余声音会被 VAD 误判为新一轮语音。
 
-Dashboard 日志中应依次出现 `listen state=start`、`auto stop by server VAD`、`omni turn`、`MCP tools/call -> device`、`设备 tools/call 回执` 与 `E2E voice test completed`。
-## New-feature test standard
+### 解决方案
 
-Every new user-facing capability should add a repeatable test case following the same chain:
+1. 后端按 60 ms 一帧、接近实际播放速率发送下行音频；同时累计 PCM 总时长，在预计播放结束前不发送 `tts stop`，并保留少量传输余量。
+2. 固件收到 `tts stop` 后，等待解码队列、播放队列及进行中的输出全部清空，再额外保留 0.5 秒防回声窗口，之后才恢复自动监听。
+3. 本板当前推荐的服务端 VAD 初始参数为：静音时长 `600 ms`、能量阈值 `600`。实际环境可在后端面板中继续校准。
 
-1. Register the device MCP tool with a stable name, input schema, bounds, and deterministic JSON result. Document the command and safety limits.
-2. Add or generate a short speech fixture representing the user utterance.
-3. Run `tools/e2e_voice_test.py` with the expected tool name. Use `--allow-motion` only for explicitly supervised physical-action tests.
-4. Verify backend evidence for listen start, server VAD stop, model turn, model-selected tool call, device JSON-RPC callback, and E2E completion with `matched: true`.
-5. Test invalid/bounded arguments and the safe stop or recovery path where applicable. Physical actions must finish stopped/idle.
-6. Run backend regression tests and firmware build before committing. Keep fixtures and private endpoints out of the shared repository; record the command and result in change notes.
+### 回归检查
 
-For non-audio diagnosis, use `MCP_BENCH_TESTING.md` to isolate the device MCP/callback half, then run this E2E test before declaring a feature complete.
+1. 通过唤醒词说“把灯打开”。
+2. 后端日志应依次出现模型工具调用、`self.led.turn_on({})` 与设备成功回执。
+3. 回复的尾字必须完整播放，设备随后才从“说话中”切回监听状态。
+4. 回复结束后保持安静至少 10 秒，不应出现新的 `auto stop by server VAD` 或模型自言自语。
+
+## 新功能测试标准
+
+每个面向用户的新功能都应提供可重复的测试用例，并按同一链路验证：
+
+1. 注册名称稳定的设备 MCP 工具，定义输入 schema、参数边界和确定性的 JSON 结果；记录命令与安全限制。
+2. 先用 [MCP 手动硬件测试](MCP_BENCH_TESTING.md) 验证工具、设备执行与回包，再用真实语音验证模型是否能正确选择工具。
+3. 核验后端日志中的监听开始、VAD 停止、模型轮次、模型工具调用、设备 JSON-RPC 回包与语音回复。
+4. 验证非法或越界参数，以及安全停止或恢复路径；物理动作结束时必须处于停止/空闲状态。
+5. 提交前运行后端回归测试与固件构建；私有端点、密钥和本地测试素材不得进入共享仓库，并在变更说明中记录测试命令与结果。

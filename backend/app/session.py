@@ -13,6 +13,7 @@ import binascii
 import io
 import json
 import logging
+import secrets
 import struct
 import time
 import uuid
@@ -30,6 +31,9 @@ BIN_V3 = 3
 # 上行 OPUS 参数（设备 hello 上报）
 DEVICE_SAMPLE_RATE = 16000
 DEVICE_FRAME_MS = 60
+# Covers WebSocket transit and the device's decoder/DMA pipeline after the
+# model has finished generating its audio stream.
+TTS_PLAYBACK_TRANSPORT_MARGIN_S = 0.20
 
 
 class BinaryProtocolError(Exception):
@@ -79,9 +83,15 @@ class Session:
     def __init__(self, ws, config: dict, omni: OmniClient, device_id: str):
         self.ws = ws
         self.config = config
-        self.omni = omni
+        # Each device connection owns an isolated Realtime conversation.  This
+        # prevents devices from sharing context and makes reconnects reset it.
+        self.omni = omni.new_for_session() if hasattr(omni, "new_for_session") else omni
         self.device_id = device_id
         self.session_id = uuid.uuid4().hex
+        # This token only lives for the current WebSocket connection. It lets
+        # the camera upload a photo without firmware storing a dashboard
+        # cookie or a long-lived backend secret.
+        self.camera_upload_token = secrets.token_urlsafe(24)
         self.connected_at = time.time()
 
         self.bin_version = BIN_V3          # 默认 v3（可由 hello/配置覆盖）
@@ -99,15 +109,8 @@ class Session:
         # 控制
         self.listening = False
         self.speaking = False
-        self.debug_mode = False
         self._mcp = None
-        # One supervised virtual-microphone conversation may be active while
-        # the device is in debug mode.  It observes the *model* tool calls;
-        # it never invokes MCP directly.
-        self._e2e_test = None
         self._tools_cached = False
-        self.history = []          # 百炼对话历史
-        self.max_history = 10
         self.omni_busy = False
         self._latest_call_id = 0
         self._omni_task = None
@@ -161,6 +164,23 @@ class Session:
             },
         })
 
+    def camera_capabilities(self):
+        """Return the per-connection camera upload capability for MCP init."""
+        ws_url = self.config.get("server", {}).get("public_ws_url", "")
+        if not isinstance(ws_url, str) or not ws_url:
+            return {}
+        if ws_url.startswith("wss://"):
+            http_url = "https://" + ws_url[len("wss://"):]
+        elif ws_url.startswith("ws://"):
+            http_url = "http://" + ws_url[len("ws://"):]
+        else:
+            return {}
+        base = http_url.rsplit("/", 1)[0] if http_url.endswith("/ws") else http_url.rstrip("/")
+        return {"vision": {
+            "url": base + "/api/camera/upload",
+            "token": self.camera_upload_token,
+        }}
+
     # ------------------------------------------------------------------
     # 入站处理
     # ------------------------------------------------------------------
@@ -203,10 +223,9 @@ class Session:
         if version in (1, 2, 3):
             self.bin_version = version
         features = msg.get("features", {})
-        self.debug_mode = bool(features.get("debug_mode", False))
         # 设备 hello 上报 sample_rate=16000, frame_duration=60（固定）
-        log.info("device %s hello, bin_version=%d, debug_mode=%s, features=%s",
-                 self.device_id, self.bin_version, self.debug_mode, features)
+        log.info("device %s hello, bin_version=%d, features=%s",
+                 self.device_id, self.bin_version, features)
 
     def _reset_vad_state(self):
         self._vad_speech = False
@@ -294,41 +313,13 @@ class Session:
         self.omni_busy = True
         self._omni_task = asyncio.create_task(self._run_omni_turn_task(pcm))
 
-    def begin_e2e_test(self, allowed_tool_names):
-        """Create an observer for one virtual-microphone Omni turn."""
-        if self._e2e_test is not None:
-            raise RuntimeError("an end-to-end voice test is already running")
-        future = asyncio.get_running_loop().create_future()
-        self._e2e_test = {
-            "future": future,
-            "tool_calls": [],
-            "allowed_tool_names": set(allowed_tool_names),
-        }
-        return future
-
-    def cancel_e2e_test(self, future):
-        if self._e2e_test and self._e2e_test.get("future") is future:
-            self._e2e_test = None
-
-    def _finish_e2e_test(self, error=None):
-        test = self._e2e_test
-        if not test:
-            return
-        future = test["future"]
-        if not future.done():
-            future.set_result({"tool_calls": test["tool_calls"], "error": error})
-        self._e2e_test = None
-
     async def _run_omni_turn_task(self, pcm: bytes):
-        error = None
         try:
             await self._run_omni_turn(pcm)
-        except Exception as exc:
-            error = str(exc)
+        except Exception:
             log.exception("omni turn failed")
         finally:
             self.omni_busy = False
-            self._finish_e2e_test(error)
 
     async def _run_omni_turn(self, pcm: bytes):
         # 无百炼 Key 时走回环模式，验证完整链路（说话→上行→下行→播放）
@@ -340,13 +331,16 @@ class Session:
 
         # 音频增量直接切成设备需要的 60ms Opus 帧下发。不要等待
         # response.done，否则首句语音会被整段模型生成时间拖慢。
-        stream_state = {"pcm": bytearray(), "started": False}
+        stream_state = {
+            "pcm": bytearray(),
+            "started": False,
+            "started_at": None,
+            "audio_duration_s": 0.0,
+            "next_frame_send_at": None,
+        }
         text_parts = []
 
         tools = self._mcp.make_omni_tools() if self._mcp else []
-        if self._e2e_test is not None:
-            allowed = self._e2e_test["allowed_tool_names"]
-            tools = [tool for tool in tools if tool.get("function", {}).get("name") in allowed]
         async for evt in self.omni.chat_stream(
                 pcm, tools=tools, tool_handler=self._handle_tool_call):
             et = evt.get("type")
@@ -426,12 +420,20 @@ class Session:
         while len(state["pcm"]) >= frame_bytes:
             chunk = bytes(state["pcm"][:frame_bytes])
             del state["pcm"][:frame_bytes]
+            next_send_at = state.get("next_frame_send_at")
+            if next_send_at is not None:
+                delay = next_send_at - time.monotonic()
+                if delay > 0:
+                    await asyncio.sleep(delay)
             if not state["started"]:
                 await self.send_json({"type": "tts", "state": "start"})
                 state["started"] = True
+                state["started_at"] = time.monotonic()
                 self.speaking = True
             opus = self.device_encoder.encode(chunk, DEVICE_FRAME_MS)
             await self.send_audio_opus(opus)
+            state["audio_duration_s"] += len(chunk) / (self.server_sample_rate * 2)
+            state["next_frame_send_at"] = time.monotonic() + DEVICE_FRAME_MS / 1000.0
 
     async def _finish_omni_audio(self, state: dict):
         """Flush a partial PCM frame and stop device playback exactly once."""
@@ -439,13 +441,33 @@ class Session:
         if pcm:
             frame_bytes = self.server_sample_rate * DEVICE_FRAME_MS // 1000 * 2
             chunk = bytes(pcm) + b"\x00" * (frame_bytes - len(pcm))
+            next_send_at = state.get("next_frame_send_at")
+            if next_send_at is not None:
+                delay = next_send_at - time.monotonic()
+                if delay > 0:
+                    await asyncio.sleep(delay)
             if not state["started"]:
                 await self.send_json({"type": "tts", "state": "start"})
                 state["started"] = True
+                state["started_at"] = time.monotonic()
                 self.speaking = True
             opus = self.device_encoder.encode(chunk, DEVICE_FRAME_MS)
             await self.send_audio_opus(opus)
+            state["audio_duration_s"] += len(chunk) / (self.server_sample_rate * 2)
+            state["next_frame_send_at"] = time.monotonic() + DEVICE_FRAME_MS / 1000.0
             pcm.clear()
+
+        # The model can emit audio faster than real time. Do not use tts stop
+        # as a mere network-stream marker: wait until the amount of PCM already
+        # sent could have been played on the device.
+        if state["started"] and state["started_at"] is not None:
+            elapsed = time.monotonic() - state["started_at"]
+            remaining = state["audio_duration_s"] - elapsed
+            if remaining > 0:
+                delay = remaining + TTS_PLAYBACK_TRANSPORT_MARGIN_S
+                log.info("waiting %.2fs before tts stop (audio=%.2fs, elapsed=%.2fs)",
+                         delay, state["audio_duration_s"], elapsed)
+                await asyncio.sleep(delay)
         await self.send_json({"type": "tts", "state": "stop"})
         self.speaking = False
 
@@ -493,12 +515,6 @@ class Session:
             return json.dumps({"error": str(e)})
 
         log.info("设备 tools/call 回执: %s", json.dumps(result)[:300])
-        if self._e2e_test is not None:
-            self._e2e_test["tool_calls"].append({
-                "name": name,
-                "arguments": arguments,
-                "result": result,
-            })
         # result 形如 {"content":[{"type":"text","text":"true"}],"isError":false}
         if isinstance(result, dict) and "content" in result:
             texts = [c.get("text", "") for c in result["content"]
@@ -517,5 +533,9 @@ class Session:
     async def close(self):
         try:
             await self.send_json({"type": "tts", "state": "stop"})
+        except Exception:
+            pass
+        try:
+            await self.omni.close()
         except Exception:
             pass

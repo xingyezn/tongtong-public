@@ -1,9 +1,8 @@
 """本地验证 dashboard（不依赖 opuslib）。"""
 import asyncio
-import base64
 import logging
 import sys
-from aiohttp import web, test_utils
+from aiohttp import FormData, web, test_utils
 from aiohttp.client import ClientSession
 
 sys.path.insert(0, ".")
@@ -22,7 +21,7 @@ class FakeMcp:
             "inputSchema": {"type": "object", "properties": {}},
         },
         {
-            "name": "self.lamp.turn_on",
+            "name": "self.led.turn_on",
             "description": "Turn lamp on",
             "inputSchema": {"type": "object", "properties": {}},
         },
@@ -45,24 +44,11 @@ class FakeSession:
     speaking = False
     omni_busy = False
     connected_at = 100.0
+    camera_upload_token = "camera-upload-token"
     mcp = FakeMcp()
-    debug_mode = False
 
     async def send_json(self, value):
         self.last_sent = value
-
-    def begin_e2e_test(self, allowed_tool_names):
-        assert "self.lamp.turn_on" in allowed_tool_names
-        self.e2e_future = asyncio.get_running_loop().create_future()
-        self.e2e_future.set_result({
-            "tool_calls": [{"name": "self.lamp.turn_on", "arguments": {},
-                            "result": {"isError": False}}],
-            "error": None,
-        })
-        return self.e2e_future
-
-    def cancel_e2e_test(self, future):
-        self.e2e_cancelled = True
 
 
 async def main():
@@ -117,25 +103,31 @@ async def main():
         print("GET /api/status : ok ->", {k: data[k] for k in ("health", "devices", "ota_requests")})
         print("config:", data["config"])
 
+        photo_bytes = b"\xff\xd8dashboard-camera-test\xff\xd9"
+        form = FormData()
+        form.add_field("question", "camera test")
+        form.add_field("file", photo_bytes, filename="camera.jpg", content_type="image/jpeg")
+        r = await c.post("http://127.0.0.1:8099/api/camera/upload", data=form, headers={
+            "Device-Id": "AA:BB:CC", "Authorization": "Bearer camera-upload-token",
+        })
+        upload = await r.json()
+        assert r.status == 200 and upload["success"] is True
+        r = await c.get("http://127.0.0.1:8099/api/camera/latest?device_id=AA:BB:CC")
+        assert r.status == 200 and await r.read() == photo_bytes
+        form = FormData()
+        form.add_field("file", photo_bytes, filename="camera.jpg", content_type="image/jpeg")
+        r = await c.post("http://127.0.0.1:8099/api/camera/upload", data=form, headers={
+            "Device-Id": "AA:BB:CC", "Authorization": "Bearer invalid",
+        })
+        assert r.status == 401
+        print("camera upload + authenticated preview : ok")
+
         r = await c.get("http://127.0.0.1:8099/api/test/tools?device_id=AA:BB:CC")
         tools = await r.json()
         assert r.status == 200
         assert [tool["name"] for tool in tools["tools"]] == [
-            "self.chassis.go_forward", "self.lamp.turn_on"
+            "self.chassis.go_forward", "self.led.turn_on"
         ]
-
-        r = await c.post("http://127.0.0.1:8099/api/test/mcp", json={
-            "device_id": "AA:BB:CC", "name": "self.chassis.go_forward",
-            "arguments": {"speed": 30},
-        })
-        assert r.status == 409
-
-        r = await c.post("http://127.0.0.1:8099/api/test/mode", json={
-            "device_id": "AA:BB:CC", "enabled": True,
-        })
-        mode = await r.json()
-        assert r.status == 200 and mode["debug_mode"] is True
-        assert sessions["AA:BB:CC"].last_sent == {"type": "debug_mode", "enabled": True}
 
         r = await c.post("http://127.0.0.1:8099/api/test/mcp", json={
             "device_id": "AA:BB:CC", "name": "self.chassis.go_forward",
@@ -145,30 +137,11 @@ async def main():
         assert r.status == 200
         assert result["result"]["content"][0]["text"] == "self.chassis.go_forward:30"
 
-        pcm = b"\x00" * (16000 * 60 // 1000 * 2)
-        r = await c.post("http://127.0.0.1:8099/api/test/conversation", json={
-            "device_id": "AA:BB:CC", "pcm_b64": base64.b64encode(pcm).decode("ascii"),
-            "expected_tool": "self.lamp.turn_on",
-        })
-        conversation = await r.json()
-        assert r.status == 200 and conversation["matched"] is True
-        assert conversation["tool_calls"][0]["name"] == "self.lamp.turn_on"
-
         r = await c.post("http://127.0.0.1:8099/api/test/mcp", json={
             "device_id": "AA:BB:CC", "name": "self.upgrade_firmware", "arguments": {},
         })
         assert r.status == 403
-        print("GET /api/test/tools + direct MCP + E2E voice API : ok")
-
-    # 测试 echo
-    async with ClientSession() as c:
-        ws = await c.ws_connect("ws://127.0.0.1:8099/ws/echo")
-        await ws.send_bytes(b"hello-audio")
-        msg = await ws.receive()
-        assert msg.type == 2  # BINARY
-        assert msg.data == b"hello-audio"
-        await ws.close()
-        print("GET /ws/echo : ok (bytes echoed)")
+        print("GET /api/test/tools + direct MCP API : ok")
 
     await runner.cleanup()
     print("ALL DASHBOARD TESTS PASSED")

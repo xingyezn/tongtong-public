@@ -32,14 +32,14 @@ class McpBridge:
         self._next_id += 1
         return self._next_id
 
-    def make_initialize(self) -> dict:
+    def make_initialize(self, capabilities: Optional[dict] = None) -> dict:
         """initialize 请求（发给设备）"""
         return {
             "type": "mcp",
             "payload": {
                 "jsonrpc": "2.0",
                 "method": "initialize",
-                "params": {"capabilities": {}},
+                "params": {"capabilities": capabilities or {}},
                 "id": self._new_id(),
             },
         }

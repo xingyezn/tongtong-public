@@ -62,6 +62,28 @@ void McpServer::AddCommonTools() {
             codec->SetOutputVolume(properties["volume"].value<int>());
             return true;
         });
+
+    auto led = board.GetLed();
+    if (led && led->SupportsColorControl()) {
+        AddTool("self.led.get_state", "Get the on/off state of the color light (彩灯). The current RGB values are not included.", PropertyList(),
+            [led](const PropertyList&) -> ReturnValue {
+                return led->IsOn() ? "on" : "off";
+            });
+        AddTool("self.led.turn_on", "Turn on the color light (彩灯) using its last configured color.", PropertyList(),
+            [led](const PropertyList&) -> ReturnValue { led->TurnOn(); return true; });
+        AddTool("self.led.turn_off", "Turn off the color light (彩灯).", PropertyList(),
+            [led](const PropertyList&) -> ReturnValue { led->TurnOff(); return true; });
+        AddTool("self.led.set_color", "Configure the color light (彩灯) RGB color without changing its on/off state. Each channel is 0-255. Call self.led.turn_on afterwards to light it.",
+            PropertyList({Property("red", kPropertyTypeInteger, 0, 255),
+                          Property("green", kPropertyTypeInteger, 0, 255),
+                          Property("blue", kPropertyTypeInteger, 0, 255)}),
+            [led](const PropertyList& properties) -> ReturnValue {
+                led->SetColor(static_cast<uint8_t>(properties["red"].value<int>()),
+                              static_cast<uint8_t>(properties["green"].value<int>()),
+                              static_cast<uint8_t>(properties["blue"].value<int>()));
+                return true;
+            });
+    }
     
     auto backlight = board.GetBacklight();
     if (backlight) {

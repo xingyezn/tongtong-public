@@ -172,6 +172,9 @@ async def test_realtime_tool_event_loop():
     }
     websocket = FakeRealtimeWebSocket()
     client = OmniClient(config)
+    assert client.conversation_timeout == 600.0
+    config["dashscope"]["conversation_timeout_minutes"] = 2
+    assert client.conversation_timeout == 120.0
     client._session = FakeHttpSession(websocket)
     calls = []
 

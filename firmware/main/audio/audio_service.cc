@@ -266,6 +266,7 @@ void AudioService::AudioOutputTask() {
 
         auto task = std::move(audio_playback_queue_.front());
         audio_playback_queue_.pop_front();
+        output_active_ = true;
         audio_queue_cv_.notify_all();
         lock.unlock();
 
@@ -280,10 +281,13 @@ void AudioService::AudioOutputTask() {
         last_output_time_ = std::chrono::steady_clock::now();
         debug_statistics_.playback_count++;
 
+        lock.lock();
+        output_active_ = false;
+        audio_queue_cv_.notify_all();
+
 #if CONFIG_USE_SERVER_AEC
         /* Record the timestamp for server AEC */
         if (task->timestamp > 0) {
-            lock.lock();
             timestamp_queue_.push_back(task->timestamp);
         }
 #endif
@@ -308,6 +312,7 @@ void AudioService::OpusCodecTask() {
         if (!audio_decode_queue_.empty() && audio_playback_queue_.size() < MAX_PLAYBACK_TASKS_IN_QUEUE) {
             auto packet = std::move(audio_decode_queue_.front());
             audio_decode_queue_.pop_front();
+            decoding_active_ = true;
             audio_queue_cv_.notify_all();
             lock.unlock();
 
@@ -327,10 +332,13 @@ void AudioService::OpusCodecTask() {
 
                 lock.lock();
                 audio_playback_queue_.push_back(std::move(task));
+                decoding_active_ = false;
                 audio_queue_cv_.notify_all();
             } else {
                 ESP_LOGE(TAG, "Failed to decode audio");
                 lock.lock();
+                decoding_active_ = false;
+                audio_queue_cv_.notify_all();
             }
             debug_statistics_.decode_count++;
         }
@@ -434,15 +442,10 @@ std::unique_ptr<AudioStreamPacket> AudioService::PopPacketFromSendQueue() {
     return packet;
 }
 
-bool AudioService::InjectPcmForSend(std::vector<int16_t>&& pcm) {
-    constexpr size_t kFrameSamples = 16000 * OPUS_FRAME_DURATION_MS / 1000;
-    if (pcm.size() != kFrameSamples) {
-        ESP_LOGW(TAG, "Rejecting virtual microphone frame: expected %u samples, got %u",
-            static_cast<unsigned>(kFrameSamples), static_cast<unsigned>(pcm.size()));
-        return false;
-    }
-    PushTaskToEncodeQueue(kAudioTaskTypeEncodeToSendQueue, std::move(pcm));
-    return true;
+bool AudioService::IsPlaybackComplete() {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    return audio_decode_queue_.empty() && audio_playback_queue_.empty() &&
+        !decoding_active_ && !output_active_;
 }
 
 void AudioService::EncodeWakeWord() {

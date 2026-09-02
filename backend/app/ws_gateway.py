@@ -65,7 +65,7 @@ class WsGateway:
         # 设备连上后会立即发 hello；这里在 on_text 里自动回 ack
 
         # 初始化 MCP：拿设备工具表
-        await session.send_json(mcp.make_initialize())
+        await session.send_json(mcp.make_initialize(session.camera_capabilities()))
         await session.send_json(mcp.make_tools_list())
 
         try:

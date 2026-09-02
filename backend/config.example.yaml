@@ -28,8 +28,10 @@ logging:
   level: "INFO"
 
 vad:
-  silence_duration_ms: 400
-  energy_threshold: 100.0
+  # Tuned for the on-board microphone and speaker; prevents idle noise and
+  # speaker tail from being treated as a new voice command.
+  silence_duration_ms: 600
+  energy_threshold: 600.0
 
 dashboard:
   password: "change-me-before-production"

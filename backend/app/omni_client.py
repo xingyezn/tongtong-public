@@ -18,6 +18,39 @@ import aiohttp
 log = logging.getLogger("omni")
 
 
+class _PersistentRealtimeContext:
+    """Keep one Realtime WebSocket alive across turns in one device session."""
+
+    def __init__(self, owner, http_session, url, headers):
+        self.owner = owner
+        self.http_session = http_session
+        self.url = url
+        self.headers = headers
+
+    async def __aenter__(self):
+        now = asyncio.get_running_loop().time()
+        ws = self.owner._ws
+        if (ws is None or ws.closed or
+                now - self.owner._last_activity > self.owner.conversation_timeout):
+            await self.owner._reset_realtime()
+            connection = self.http_session.ws_connect(
+                self.url, headers=self.headers, timeout=120,
+                max_msg_size=64 * 1024 * 1024, heartbeat=30)
+            # aiohttp returns an awaitable request context manager; lightweight
+            # test doubles may return the websocket directly.
+            ws = await connection if hasattr(connection, "__await__") else connection
+            self.owner._ws = ws
+            log.info("omni: started new conversation session")
+        self.owner._last_activity = now
+        return ws
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self.owner._last_activity = asyncio.get_running_loop().time()
+        if exc_type is not None:
+            await self.owner._reset_realtime()
+        return False
+
+
 class OmniClient:
     """百炼 qwen3.5-omni-flash-realtime 实时语音客户端。"""
 
@@ -27,6 +60,12 @@ class OmniClient:
         self.output_rate = config["dashscope"]["output_sample_rate"]   # 24000
         self.input_rate = config["dashscope"]["input_sample_rate"]     # 16000
         self._session: Optional[aiohttp.ClientSession] = None
+        self._ws = None
+        self._last_activity = 0.0
+
+    def new_for_session(self):
+        """Create an isolated model client for one device WebSocket session."""
+        return OmniClient(self.config)
 
     @property
     def model(self) -> str:
@@ -55,6 +94,15 @@ class OmniClient:
         )
 
     @property
+    def conversation_timeout(self) -> float:
+        """Idle timeout in seconds, read dynamically for dashboard updates."""
+        try:
+            minutes = float(self.config["dashscope"].get("conversation_timeout_minutes", 10))
+        except (TypeError, ValueError):
+            minutes = 10.0
+        return max(1.0, min(120.0, minutes)) * 60.0
+
+    @property
     def realtime_url(self) -> str:
         return self.realtime_url_tpl.replace("{workspace}", self.workspace) + "?model=" + self.model
 
@@ -64,8 +112,16 @@ class OmniClient:
         return self._session
 
     async def close(self):
+        await self._reset_realtime()
         if self._session and not self._session.closed:
             await self._session.close()
+
+    async def _reset_realtime(self):
+        ws = self._ws
+        self._ws = None
+        self._last_activity = 0.0
+        if ws is not None and not ws.closed:
+            await ws.close()
 
     # ------------------------------------------------------------------
     # 单轮对话（手动模式：客户端控制语音起止）
@@ -102,9 +158,7 @@ class OmniClient:
         url = self.realtime_url
 
         try:
-            async with session.ws_connect(url, headers=headers, timeout=120,
-                                          max_msg_size=64 * 1024 * 1024,
-                                          heartbeat=30) as ws:
+            async with _PersistentRealtimeContext(self, session, url, headers) as ws:
                 # 1. 会话配置：手动模式（客户端控制 VAD 结束），音频+文本输出
                 # 注意: 必须显式 turn_detection=null 关闭服务端VAD，
                 # 否则服务端自行管理音频缓冲，手动 commit 会报 "buffer too small"

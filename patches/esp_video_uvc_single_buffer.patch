@@ -1,0 +1,14 @@
+diff --git a/firmware/managed_components/espressif__esp_video/src/device/esp_video_usb_uvc_device.c b/firmware/managed_components/espressif__esp_video/src/device/esp_video_usb_uvc_device.c
+--- a/firmware/managed_components/espressif__esp_video/src/device/esp_video_usb_uvc_device.c
++++ b/firmware/managed_components/espressif__esp_video/src/device/esp_video_usb_uvc_device.c
+@@ -35,7 +35,10 @@
+ #define UVC_DEVICE_INIT_TASK_STACK_SIZE (3 * 1024)
+ #define UVC_DEVICE_INIT_TASK_PRIORITY   5
+ 
+-#define UVC_DEVICE_FRAME_COUNT          3
++// The ESP32-S3 N16R8 shares 8 MB PSRAM between UVC, ESP-SR and ESP-DL.
++// One buffer is sufficient for the still-photo / serial face-tracking path:
++// every frame is consumed and returned before the next one is requested.
++#define UVC_DEVICE_FRAME_COUNT          1
+ 
+ #define UVC_DEVICE_URB_SIZE             (10 * 1024)
