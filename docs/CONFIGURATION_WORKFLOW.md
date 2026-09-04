@@ -120,7 +120,9 @@ terminal transcripts.
    to the server and restart the service.
 5. Never edit a tracked placeholder to make a deployment work.
 
-当前后端每一轮语音对话都会在结束后释放并重建 Realtime 会话，不再保留多轮对话历史。因此管理页面不再显示或修改“对话连续时长”；配置文件中若残留 `conversation_timeout_minutes` 仅为兼容旧配置，不参与当前会话控制。
+运行中的后端也可通过管理页面修改“对话连续时长（分钟）”（1～120，默认
+10）。该值写入后端运行配置，后续新一轮对话会按新值判断空闲超时；设备重连
+仍会立即创建全新的模型会话。
 
 ### Secret rotation
 

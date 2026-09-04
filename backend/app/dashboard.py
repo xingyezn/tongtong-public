@@ -383,12 +383,18 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <input type="number" id="cfg-in-rate" min="8000" max="48000" step="8000" value="16000" style="flex:1;max-width:140px;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4">
       <input type="number" id="cfg-out-rate" min="8000" max="48000" step="8000" value="24000" style="flex:1;max-width:140px;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4">
     </div>
+    <div class="row" style="margin-bottom:10px">
+      <label class="muted" style="min-width:130px">对话连续时长（分钟）</label>
+      <input type="number" id="cfg-conversation-timeout" min="1" max="120" step="1" value="10" style="flex:1;max-width:140px;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4">
+      <span class="muted">无新对话超过此时长后重置</span>
+    </div>
     <div class="row">
       <button class="btn" id="save-model-btn" onclick="saveModel()">保存模型 / 音色 / 设定</button>
       <span class="muted" id="model-status"></span>
     </div>
     <div class="hint">
       修改后<b>下一轮对话生效</b>，并持久化保存（重启仍生效）。
+      对话连续时长可设置为 1～120 分钟，默认 10 分钟。
       模型需为百炼 Realtime 系列（如 qwen3.5-omni-flash-realtime / qwen3.5-omni-plus-realtime）。
     </div>
   </div>
@@ -780,6 +786,7 @@ async function loadModel() {
     $("cfg-instructions").value = d.instructions || "";
     $("cfg-in-rate").value = d.input_sample_rate || 16000;
     $("cfg-out-rate").value = d.output_sample_rate || 24000;
+    $("cfg-conversation-timeout").value = d.conversation_timeout_minutes || 10;
     const voice = d.voice || "";
     if (Array.from($("cfg-voice").options).some(option => option.value === voice)) {
       $("cfg-voice").value = voice;
@@ -794,9 +801,15 @@ async function saveModel() {
     instructions: $("cfg-instructions").value.trim(),
     input_sample_rate: parseInt($("cfg-in-rate").value, 10),
     output_sample_rate: parseInt($("cfg-out-rate").value, 10),
+    conversation_timeout_minutes: parseFloat($("cfg-conversation-timeout").value),
   };
   if (!body.model) {
     $("model-status").textContent = "模型不能为空";
+    $("model-status").style.color = "var(--bad)";
+    return;
+  }
+  if (!Number.isFinite(body.conversation_timeout_minutes) || body.conversation_timeout_minutes < 1 || body.conversation_timeout_minutes > 120) {
+    $("model-status").textContent = "对话连续时长需为 1～120 分钟";
     $("model-status").style.color = "var(--bad)";
     return;
   }
@@ -1048,6 +1061,7 @@ class Dashboard:
             "realtime_url": ds.get("realtime_url", ""),
             "input_sample_rate": ds.get("input_sample_rate", 16000),
             "output_sample_rate": ds.get("output_sample_rate", 24000),
+            "conversation_timeout_minutes": ds.get("conversation_timeout_minutes", 10),
             "api_key_configured": bool(ds.get("api_key")),
         })
 
@@ -1073,6 +1087,14 @@ class Dashboard:
             ds["input_sample_rate"] = int(data["input_sample_rate"])
         if "output_sample_rate" in data:
             ds["output_sample_rate"] = int(data["output_sample_rate"])
+        if "conversation_timeout_minutes" in data:
+            try:
+                minutes = float(data["conversation_timeout_minutes"])
+            except (TypeError, ValueError):
+                return web.json_response({"error": "conversation_timeout_minutes must be a number"}, status=400)
+            if not math.isfinite(minutes) or not 1 <= minutes <= 120:
+                return web.json_response({"error": "conversation_timeout_minutes must be between 1 and 120"}, status=400)
+            ds["conversation_timeout_minutes"] = minutes
         # 持久化到 config.yaml（重启仍生效）
         if self.save_config:
             try:
@@ -1089,6 +1111,7 @@ class Dashboard:
             "instructions": ds.get("instructions", ""),
             "input_sample_rate": ds.get("input_sample_rate", 16000),
             "output_sample_rate": ds.get("output_sample_rate", 24000),
+            "conversation_timeout_minutes": ds.get("conversation_timeout_minutes", 10),
             "api_key_configured": bool(ds.get("api_key")),
         })
 
