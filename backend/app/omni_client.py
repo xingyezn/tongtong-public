@@ -19,7 +19,12 @@ log = logging.getLogger("omni")
 
 
 class _PersistentRealtimeContext:
-    """Keep one Realtime WebSocket alive across turns in one device session."""
+    """Create an isolated Realtime WebSocket for one speech turn.
+
+    The device session remains connected, but model conversation memory is
+    intentionally reset for every turn.  This keeps early-stage testing
+    deterministic and prevents stale context from affecting tool selection.
+    """
 
     def __init__(self, owner, http_session, url, headers):
         self.owner = owner
@@ -29,25 +34,23 @@ class _PersistentRealtimeContext:
 
     async def __aenter__(self):
         now = asyncio.get_running_loop().time()
-        ws = self.owner._ws
-        if (ws is None or ws.closed or
-                now - self.owner._last_activity > self.owner.conversation_timeout):
-            await self.owner._reset_realtime()
-            connection = self.http_session.ws_connect(
-                self.url, headers=self.headers, timeout=120,
-                max_msg_size=64 * 1024 * 1024, heartbeat=30)
-            # aiohttp returns an awaitable request context manager; lightweight
-            # test doubles may return the websocket directly.
-            ws = await connection if hasattr(connection, "__await__") else connection
-            self.owner._ws = ws
-            log.info("omni: started new conversation session")
+        # Always discard the previous model connection before a new turn.
+        await self.owner._reset_realtime()
+        connection = self.http_session.ws_connect(
+            self.url, headers=self.headers, timeout=120,
+            max_msg_size=64 * 1024 * 1024, heartbeat=30)
+        # aiohttp returns an awaitable request context manager; lightweight
+        # test doubles may return the websocket directly.
+        ws = await connection if hasattr(connection, "__await__") else connection
+        self.owner._ws = ws
+        log.info("omni: started isolated conversation turn")
         self.owner._last_activity = now
         return ws
 
     async def __aexit__(self, exc_type, exc, tb):
         self.owner._last_activity = asyncio.get_running_loop().time()
-        if exc_type is not None:
-            await self.owner._reset_realtime()
+        # Do not retain model-side conversation state after this turn.
+        await self.owner._reset_realtime()
         return False
 
 
