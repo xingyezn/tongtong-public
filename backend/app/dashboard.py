@@ -24,6 +24,11 @@ log = logging.getLogger("dash")
 # 登录 cookie 名
 AUTH_COOKIE = "tongtong_auth"
 MAX_CAMERA_PHOTO_BYTES = 2 * 1024 * 1024
+MODEL_LANGUAGE_CODES = {
+    "auto", "zh", "en", "fr", "de", "ru", "it", "es", "pt", "ja", "ko",
+    "th", "id", "ar", "vi", "tr", "fi", "pl", "hi", "nl", "cs", "ur",
+    "fil", "sv", "da", "he", "is", "ms", "no", "fa",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -308,10 +313,45 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
 
   <div class="card">
-    <h2>模型 / 音色 / 人物设定</h2>
+    <h2>模型 / 语言 / 音色 / 人物设定</h2>
     <div class="row" style="margin-bottom:10px">
       <label class="muted" style="min-width:130px">模型</label>
       <input type="text" id="cfg-model" placeholder="qwen3.5-omni-flash-realtime" style="flex:1;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4">
+    </div>
+    <div class="row" style="margin-bottom:10px">
+      <label class="muted" style="min-width:130px">对话语言</label>
+      <select id="cfg-language" style="flex:1;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4">
+        <option value="auto">自动检测（Auto Detect）</option>
+        <option value="zh">中文（普通话）</option>
+        <option value="en">英语（English）</option>
+        <option value="fr">法语（Français）</option>
+        <option value="de">德语（Deutsch）</option>
+        <option value="ru">俄语（Русский）</option>
+        <option value="it">意大利语（Italiano）</option>
+        <option value="es">西班牙语（Español）</option>
+        <option value="pt">葡萄牙语（Português）</option>
+        <option value="ja">日语（日本語）</option>
+        <option value="ko">韩语（한국어）</option>
+        <option value="th">泰语（ไทย）</option>
+        <option value="id">印度尼西亚语（Bahasa Indonesia）</option>
+        <option value="ar">阿拉伯语（العربية）</option>
+        <option value="vi">越南语（Tiếng Việt）</option>
+        <option value="tr">土耳其语（Türkçe）</option>
+        <option value="fi">芬兰语（Suomi）</option>
+        <option value="pl">波兰语（Polski）</option>
+        <option value="hi">印地语（हिन्दी）</option>
+        <option value="nl">荷兰语（Nederlands）</option>
+        <option value="cs">捷克语（Čeština）</option>
+        <option value="ur">乌尔都语（اردو）</option>
+        <option value="fil">他加禄语（Tagalog）</option>
+        <option value="sv">瑞典语（Svenska）</option>
+        <option value="da">丹麦语（Dansk）</option>
+        <option value="he">希伯来语（עברית）</option>
+        <option value="is">冰岛语（Íslenska）</option>
+        <option value="ms">马来语（Bahasa Melayu）</option>
+        <option value="no">挪威语（Norsk）</option>
+        <option value="fa">波斯语（فارسی）</option>
+      </select>
     </div>
     <div class="row" style="margin-bottom:10px">
       <label class="muted" style="min-width:130px">音色</label>
@@ -389,11 +429,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <span class="muted">无新对话超过此时长后重置</span>
     </div>
     <div class="row">
-      <button class="btn" id="save-model-btn" onclick="saveModel()">保存模型 / 音色 / 设定</button>
+      <button class="btn" id="save-model-btn" onclick="saveModel()">保存模型 / 语言 / 音色 / 设定</button>
       <span class="muted" id="model-status"></span>
     </div>
     <div class="hint">
-      修改后<b>下一轮对话生效</b>，并持久化保存（重启仍生效）。
+      修改后<b>下一轮对话生效</b>，并持久化保存（重启仍生效）。语言会同时约束语音识别和模型回复。
       对话连续时长可设置为 1～120 分钟，默认 10 分钟。
       模型需为百炼 Realtime 系列（如 qwen3.5-omni-flash-realtime / qwen3.5-omni-plus-realtime）。
     </div>
@@ -502,6 +542,7 @@ function render(d) {
     ["OTA URL", c.ota_url],
     ["WebSocket URL", c.ws_url],
     ["AI 模型", c.model + " @ " + c.model_base],
+    ["对话语言", c.language || "zh"],
     ["API Key", c.api_key_configured ? '<span style="color:var(--ok)">已配置</span>'
                                      : '<span style="color:var(--warn)">未配置 (回环模式)</span>'],
     ["设备鉴权", c.devices_enabled ? "开启" : "关闭"],
@@ -783,6 +824,7 @@ async function loadModel() {
     const r = await fetch("/api/model");
     const d = await r.json();
     $("cfg-model").value = d.model || "";
+    $("cfg-language").value = d.language || "zh";
     $("cfg-instructions").value = d.instructions || "";
     $("cfg-in-rate").value = d.input_sample_rate || 16000;
     $("cfg-out-rate").value = d.output_sample_rate || 24000;
@@ -797,6 +839,7 @@ async function saveModel() {
   const voice = $("cfg-voice").value;
   const body = {
     model: $("cfg-model").value.trim(),
+    language: $("cfg-language").value,
     voice: voice,
     instructions: $("cfg-instructions").value.trim(),
     input_sample_rate: parseInt($("cfg-in-rate").value, 10),
@@ -825,9 +868,9 @@ async function saveModel() {
     });
     if (!r.ok) throw new Error("save failed");
     const d = await r.json();
-    $("model-status").textContent = "已保存: " + d.model + " / " + d.voice;
+    $("model-status").textContent = "已保存: " + d.model + " / " + d.language + " / " + d.voice;
     $("model-status").style.color = "var(--ok)";
-    showToast("模型设置已保存 · " + d.model + " / " + d.voice, "ok");
+    showToast("模型设置已保存 · " + d.model + " / " + d.language + " / " + d.voice, "ok");
   } catch (e) {
     $("model-status").textContent = "保存失败";
     $("model-status").style.color = "var(--bad)";
@@ -1013,6 +1056,7 @@ class Dashboard:
                 "ota_url": base.rstrip("/") + "/ota",
                 "ws_url": cfg["server"].get("public_ws_url", ""),
                 "model": cfg["dashscope"].get("model", ""),
+                "language": cfg["dashscope"].get("language", "zh"),
                 "model_base": cfg["dashscope"].get("realtime_url", ""),
                 "api_key_configured": bool(cfg["dashscope"].get("api_key")),
                 "devices_enabled": bool(cfg.get("devices", {}).get("enabled")),
@@ -1055,6 +1099,7 @@ class Dashboard:
         ds = self.config["dashscope"]
         return web.json_response({
             "model": ds.get("model", ""),
+            "language": ds.get("language", "zh"),
             "voice": ds.get("voice", ""),
             "instructions": ds.get("instructions", ""),
             "workspace_id": ds.get("workspace_id", ""),
@@ -1075,6 +1120,10 @@ class Dashboard:
         ds = self.config["dashscope"]
         if "model" in data and isinstance(data["model"], str):
             ds["model"] = data["model"].strip()
+        if "language" in data:
+            if not isinstance(data["language"], str) or data["language"] not in MODEL_LANGUAGE_CODES:
+                return web.json_response({"error": "unsupported language"}, status=400)
+            ds["language"] = data["language"]
         if "voice" in data and isinstance(data["voice"], str):
             ds["voice"] = data["voice"].strip()
         if "instructions" in data and isinstance(data["instructions"], str):
@@ -1102,9 +1151,11 @@ class Dashboard:
                 log.info("模型/音色/人物设定配置已持久化")
             except Exception as e:
                 log.warning("配置持久化失败: %s", e)
-        log.info("模型/音色配置更新: model=%s voice=%s", ds.get("model"), ds.get("voice"))
+        log.info("模型/语言/音色配置更新: model=%s language=%s voice=%s",
+                 ds.get("model"), ds.get("language", "zh"), ds.get("voice"))
         return web.json_response({
             "model": ds.get("model", ""),
+            "language": ds.get("language", "zh"),
             "voice": ds.get("voice", ""),
             "workspace_id": ds.get("workspace_id", ""),
             "realtime_url": ds.get("realtime_url", ""),

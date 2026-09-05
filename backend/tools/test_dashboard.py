@@ -55,7 +55,8 @@ async def main():
     config = {
         "server": {"public_ws_url": "ws://x/ws"},
         "dashscope": {"api_key": "", "model": "qwen-omni-turbo",
-                      "base_url": "https://dashscope.example", "output_sample_rate": 24000},
+                      "language": "zh", "base_url": "https://dashscope.example",
+                      "output_sample_rate": 24000},
         "devices": {"enabled": False},
     }
     sessions = {"AA:BB:CC": FakeSession()}
@@ -77,6 +78,7 @@ async def main():
     print("log categories + independent periodic buffer : ok")
     log_handler.attach(asyncio.get_event_loop())
     dash = Dashboard(config, sessions, FakeHttpApi(), log_handler)
+    dash._check_cookie = lambda _request: True
 
     app = web.Application()
     dash.add_routes(app)
@@ -102,6 +104,20 @@ async def main():
         assert data["config"]["api_key_configured"] is False
         print("GET /api/status : ok ->", {k: data[k] for k in ("health", "devices", "ota_requests")})
         print("config:", data["config"])
+
+        r = await c.get("http://127.0.0.1:8099/api/model")
+        model_config = await r.json()
+        assert r.status == 200 and model_config["language"] == "zh"
+        r = await c.post("http://127.0.0.1:8099/api/model", json={"language": "ja"})
+        updated_model = await r.json()
+        assert r.status == 200 and updated_model["language"] == "ja"
+        for language in ("th", "ar", "fi", "nl", "ur", "fil", "he", "fa"):
+            r = await c.post(
+                "http://127.0.0.1:8099/api/model", json={"language": language})
+            assert r.status == 200, language
+        r = await c.post("http://127.0.0.1:8099/api/model", json={"language": "invalid"})
+        assert r.status == 400
+        print("model language get/set/validation : ok")
 
         photo_bytes = b"\xff\xd8dashboard-camera-test\xff\xd9"
         form = FormData()

@@ -7,9 +7,10 @@ server:
 
 dashscope:
   api_key: ""
-  model: "qwen3.5-omni-flash-realtime"
+  model: "qwen3.5-omni-plus-realtime"
   workspace_id: ""
   realtime_url: "wss://{workspace}.cn-beijing.maas.aliyuncs.com/api-ws/v1/realtime"
+  language: "zh"
   voice: "Ethan"
   instructions: "You are Tongtong, a friendly voice assistant. Reply briefly in natural Chinese."
   output_sample_rate: 24000

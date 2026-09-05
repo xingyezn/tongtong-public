@@ -23,6 +23,24 @@ class WsGateway:
         self.omni = omni
         self.sessions: dict = sessions  # device_id -> Session
         self.device_history: dict = {}   # device_id -> {last_seen, connected_at, client_id}
+        self.device_conversations: dict = {}  # device_id -> persistent text memory
+
+    def _conversation_memory(self, device_id: str) -> dict:
+        now = time.time()
+        try:
+            timeout = float(
+                self.config.get("dashscope", {}).get("conversation_timeout_minutes", 10)
+            ) * 60.0
+        except (TypeError, ValueError):
+            timeout = 600.0
+        timeout = max(60.0, min(7200.0, timeout))
+        memory = self.device_conversations.get(device_id)
+        if memory is None or (
+                memory.get("last_activity", 0.0)
+                and now - memory["last_activity"] > timeout):
+            memory = {"turns": [], "last_activity": 0.0}
+            self.device_conversations[device_id] = memory
+        return memory
 
     def _check_auth(self, headers) -> bool:
         if not self.config["devices"]["enabled"]:
@@ -50,7 +68,10 @@ class WsGateway:
             except Exception:
                 pass
 
-        session = Session(ws, self.config, self.omni, device_id)
+        session = Session(
+            ws, self.config, self.omni, device_id,
+            conversation_memory=self._conversation_memory(device_id),
+        )
         mcp = McpBridge(session.send_json)
         session.set_mcp(mcp)
         self.sessions[device_id] = session
@@ -82,7 +103,10 @@ class WsGateway:
         except asyncio.CancelledError:
             pass
         finally:
-            self.sessions.pop(device_id, None)
+            # A reconnect may already have installed a newer Session for this
+            # device. Do not let the old connection remove the replacement.
+            if self.sessions.get(device_id) is session:
+                self.sessions.pop(device_id, None)
             await session.close()
             if device_id in self.device_history:
                 self.device_history[device_id]["last_seen"] = time.time()

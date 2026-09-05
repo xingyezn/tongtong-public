@@ -259,11 +259,19 @@ void AudioService::AudioInputTask() {
 void AudioService::AudioOutputTask() {
     while (true) {
         std::unique_lock<std::mutex> lock(audio_queue_mutex_);
-        audio_queue_cv_.wait(lock, [this]() { return !audio_playback_queue_.empty() || service_stopped_; });
+        audio_queue_cv_.wait(lock, [this]() {
+            return service_stopped_ ||
+                (!audio_playback_queue_.empty() &&
+                 (playback_prebuffer_frames_ == 0 || playback_stream_ended_ ||
+                  audio_playback_queue_.size() >= playback_prebuffer_frames_));
+        });
         if (service_stopped_) {
             break;
         }
 
+        // The threshold is only needed before the first frame. Once playback
+        // starts, consume continuously while the server maintains its lead.
+        playback_prebuffer_frames_ = 0;
         auto task = std::move(audio_playback_queue_.front());
         audio_playback_queue_.pop_front();
         output_active_ = true;
@@ -639,12 +647,24 @@ bool AudioService::IsIdle() {
 }
 
 void AudioService::ResetDecoder() {
+    PreparePlaybackStream(0);
+}
+
+void AudioService::PreparePlaybackStream(size_t prebuffer_frames) {
     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
     opus_decoder_->ResetState();
     timestamp_queue_.clear();
     audio_decode_queue_.clear();
     audio_playback_queue_.clear();
     audio_testing_queue_.clear();
+    playback_prebuffer_frames_ = prebuffer_frames;
+    playback_stream_ended_ = false;
+    audio_queue_cv_.notify_all();
+}
+
+void AudioService::FinishPlaybackStream() {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    playback_stream_ended_ = true;
     audio_queue_cv_.notify_all();
 }
 

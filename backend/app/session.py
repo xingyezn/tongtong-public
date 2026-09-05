@@ -31,6 +31,8 @@ BIN_V3 = 3
 # 上行 OPUS 参数（设备 hello 上报）
 DEVICE_SAMPLE_RATE = 16000
 DEVICE_FRAME_MS = 60
+# Four frames give the device 240 ms of jitter headroom before playback.
+TTS_PLAYBACK_PREBUFFER_FRAMES = 4
 # Covers WebSocket transit and the device's decoder/DMA pipeline after the
 # model has finished generating its audio stream.
 TTS_PLAYBACK_TRANSPORT_MARGIN_S = 0.20
@@ -80,12 +82,14 @@ def build_binary_frame(payload: bytes, version: int) -> bytes:
 class Session:
     """单设备会话。"""
 
-    def __init__(self, ws, config: dict, omni: OmniClient, device_id: str):
+    def __init__(self, ws, config: dict, omni: OmniClient, device_id: str,
+                 conversation_memory=None):
         self.ws = ws
         self.config = config
-        # Each device connection owns an isolated Realtime conversation.  This
-        # prevents devices from sharing context and makes reconnects reset it.
-        self.omni = omni.new_for_session() if hasattr(omni, "new_for_session") else omni
+        # Each device gets an isolated Realtime client while its text memory is
+        # shared across reconnects for that same device only.
+        self.omni = (omni.new_for_session(conversation_memory)
+                     if hasattr(omni, "new_for_session") else omni)
         self.device_id = device_id
         self.session_id = uuid.uuid4().hex
         # This token only lives for the current WebSocket connection. It lets
@@ -339,6 +343,7 @@ class Session:
             "next_frame_send_at": None,
         }
         text_parts = []
+        input_transcript = ""
 
         tools = self._mcp.make_omni_tools() if self._mcp else []
         async for evt in self.omni.chat_stream(
@@ -349,6 +354,11 @@ class Session:
                 break
             elif et == "text":
                 text_parts.append(evt.get("text", ""))
+            elif et == "input_text":
+                input_transcript = evt.get("text", "")
+                if input_transcript:
+                    log.info("user transcript: %s", input_transcript)
+                    await self.send_json({"type": "stt", "text": input_transcript})
             elif et == "audio":
                 await self._stream_omni_audio(evt, stream_state)
             elif et == "done":
@@ -391,7 +401,7 @@ class Session:
         log.info("=== ECHO 结束 ===")
 
     async def _stream_omni_audio(self, evt: dict, state: dict):
-        """Append one Realtime PCM delta and immediately send complete frames."""
+        """Append one Realtime PCM delta and send frames with a startup buffer."""
         import base64 as b64
         audio_b64 = evt.get("audio_b64")
         if not audio_b64:
@@ -416,46 +426,54 @@ class Session:
             pcm = resample_pcm(pcm, rate, self.server_sample_rate)
 
         state["pcm"].extend(pcm)
+        await self._send_buffered_omni_frames(state)
+
+    async def _send_buffered_omni_frames(self, state: dict, final: bool = False):
+        """Send complete frames, bursting the initial 240 ms as a jitter buffer.
+
+        After the initial burst, deadlines advance from the previous deadline
+        instead of from the actual send time.  A late send therefore catches up
+        rather than permanently adding scheduler/network jitter to every frame.
+        """
+        pcm = state["pcm"]
         frame_bytes = self.server_sample_rate * DEVICE_FRAME_MS // 1000 * 2
-        while len(state["pcm"]) >= frame_bytes:
-            chunk = bytes(state["pcm"][:frame_bytes])
-            del state["pcm"][:frame_bytes]
+        if final and pcm and len(pcm) % frame_bytes:
+            pcm.extend(b"\x00" * (frame_bytes - len(pcm) % frame_bytes))
+
+        complete_frames = len(pcm) // frame_bytes
+        if complete_frames == 0:
+            return
+        if (not state["started"] and not final
+                and complete_frames < TTS_PLAYBACK_PREBUFFER_FRAMES):
+            return
+
+        startup_burst = 0
+        if not state["started"]:
+            await self.send_json({"type": "tts", "state": "start"})
+            state["started"] = True
+            state["started_at"] = time.monotonic()
+            state["next_frame_send_at"] = (
+                state["started_at"] + DEVICE_FRAME_MS / 1000.0)
+            self.speaking = True
+            startup_burst = min(complete_frames, TTS_PLAYBACK_PREBUFFER_FRAMES)
+
+        for frame_index in range(complete_frames):
+            chunk = bytes(pcm[:frame_bytes])
+            del pcm[:frame_bytes]
             next_send_at = state.get("next_frame_send_at")
-            if next_send_at is not None:
+            if frame_index >= startup_burst and next_send_at is not None:
                 delay = next_send_at - time.monotonic()
                 if delay > 0:
                     await asyncio.sleep(delay)
-            if not state["started"]:
-                await self.send_json({"type": "tts", "state": "start"})
-                state["started"] = True
-                state["started_at"] = time.monotonic()
-                self.speaking = True
             opus = self.device_encoder.encode(chunk, DEVICE_FRAME_MS)
             await self.send_audio_opus(opus)
             state["audio_duration_s"] += len(chunk) / (self.server_sample_rate * 2)
-            state["next_frame_send_at"] = time.monotonic() + DEVICE_FRAME_MS / 1000.0
+            if frame_index >= startup_burst:
+                state["next_frame_send_at"] += DEVICE_FRAME_MS / 1000.0
 
     async def _finish_omni_audio(self, state: dict):
         """Flush a partial PCM frame and stop device playback exactly once."""
-        pcm = state["pcm"]
-        if pcm:
-            frame_bytes = self.server_sample_rate * DEVICE_FRAME_MS // 1000 * 2
-            chunk = bytes(pcm) + b"\x00" * (frame_bytes - len(pcm))
-            next_send_at = state.get("next_frame_send_at")
-            if next_send_at is not None:
-                delay = next_send_at - time.monotonic()
-                if delay > 0:
-                    await asyncio.sleep(delay)
-            if not state["started"]:
-                await self.send_json({"type": "tts", "state": "start"})
-                state["started"] = True
-                state["started_at"] = time.monotonic()
-                self.speaking = True
-            opus = self.device_encoder.encode(chunk, DEVICE_FRAME_MS)
-            await self.send_audio_opus(opus)
-            state["audio_duration_s"] += len(chunk) / (self.server_sample_rate * 2)
-            state["next_frame_send_at"] = time.monotonic() + DEVICE_FRAME_MS / 1000.0
-            pcm.clear()
+        await self._send_buffered_omni_frames(state, final=True)
 
         # The model can emit audio faster than real time. Do not use tts stop
         # as a mere network-stream marker: wait until the amount of PCM already

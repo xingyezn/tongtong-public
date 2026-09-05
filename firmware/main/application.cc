@@ -10,6 +10,7 @@
 #include "mcp_server.h"
 #include "assets.h"
 
+#include <algorithm>
 #include <cstring>
 #include <esp_log.h>
 #include <cJSON.h>
@@ -266,6 +267,7 @@ void Application::Run() {
             clock_ticks_++;
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
+            MaintainProtocolConnection();
         
             // Print debug info every 10 seconds
             if (clock_ticks_ % 10 == 0) {
@@ -277,6 +279,9 @@ void Application::Run() {
 
 void Application::HandleNetworkConnectedEvent() {
     ESP_LOGI(TAG, "Network connected");
+    network_connected_ = true;
+    protocol_reconnect_attempts_ = 0;
+    next_protocol_reconnect_at_ = std::chrono::steady_clock::now();
     auto state = GetDeviceState();
 
     if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring) {
@@ -301,6 +306,9 @@ void Application::HandleNetworkConnectedEvent() {
 }
 
 void Application::HandleNetworkDisconnectedEvent() {
+    network_connected_ = false;
+    accepting_tts_audio_ = false;
+    audio_service_.FinishPlaybackStream();
     // Close current conversation when network disconnected
     auto state = GetDeviceState();
     if (state == kDeviceStateConnecting || state == kDeviceStateListening || state == kDeviceStateSpeaking) {
@@ -311,6 +319,33 @@ void Application::HandleNetworkDisconnectedEvent() {
     // Update the status bar immediately to show the network state
     auto display = Board::GetInstance().GetDisplay();
     display->UpdateStatusBar(true);
+}
+
+void Application::MaintainProtocolConnection() {
+    if (!network_connected_ || !protocol_ || !protocol_->ShouldAutoReconnect() ||
+            protocol_->IsAudioChannelOpened()) {
+        return;
+    }
+
+    auto now = std::chrono::steady_clock::now();
+    if (now < next_protocol_reconnect_at_) {
+        return;
+    }
+
+    int attempt = protocol_reconnect_attempts_ + 1;
+    ESP_LOGW(TAG, "Audio channel reconnect attempt %d", attempt);
+    if (protocol_->OpenAudioChannel()) {
+        protocol_reconnect_attempts_ = 0;
+        next_protocol_reconnect_at_ = {};
+        ESP_LOGI(TAG, "Audio channel reconnected");
+        return;
+    }
+
+    int exponent = std::min(protocol_reconnect_attempts_, 5);
+    int delay_seconds = std::min(1 << exponent, 30);
+    protocol_reconnect_attempts_++;
+    next_protocol_reconnect_at_ = now + std::chrono::seconds(delay_seconds);
+    ESP_LOGW(TAG, "Audio channel reconnect failed; retrying in %d seconds", delay_seconds);
 }
 
 void Application::HandleActivationDoneEvent() {
@@ -511,12 +546,14 @@ void Application::InitializeProtocol() {
     });
     
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
-        if (GetDeviceState() == kDeviceStateSpeaking) {
+        if (GetDeviceState() == kDeviceStateSpeaking || accepting_tts_audio_) {
             audio_service_.PushPacketToDecodeQueue(std::move(packet));
         }
     });
     
     protocol_->OnAudioChannelOpened([this, codec, &board]() {
+        protocol_reconnect_attempts_ = 0;
+        next_protocol_reconnect_at_ = {};
         board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
         if (protocol_->server_sample_rate() != codec->output_sample_rate()) {
             ESP_LOGW(TAG, "Server sample rate %d does not match device output sample rate %d, resampling may cause distortion",
@@ -525,11 +562,17 @@ void Application::InitializeProtocol() {
     });
     
     protocol_->OnAudioChannelClosed([this, &board]() {
+        accepting_tts_audio_ = false;
+        audio_service_.FinishPlaybackStream();
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         Schedule([this]() {
             auto display = Board::GetInstance().GetDisplay();
             display->SetChatMessage("system", "");
             SetDeviceState(kDeviceStateIdle);
+            if (network_connected_) {
+                next_protocol_reconnect_at_ =
+                    std::chrono::steady_clock::now() + std::chrono::seconds(1);
+            }
         });
     });
     
@@ -539,13 +582,21 @@ void Application::InitializeProtocol() {
         if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
             if (strcmp(state->valuestring, "start") == 0) {
+                // Prepare synchronously so the immediately following startup
+                // burst cannot race the scheduled speaking state transition.
+                accepting_tts_audio_ = true;
+                audio_service_.PreparePlaybackStream();
                 Schedule([this]() {
                     aborted_ = false;
                     CancelPendingTtsResume();
                     SetDeviceState(kDeviceStateSpeaking);
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
-                Schedule([this]() { HandleTtsStopped(); });
+                accepting_tts_audio_ = false;
+                Schedule([this]() {
+                    audio_service_.FinishPlaybackStream();
+                    HandleTtsStopped();
+                });
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
                 auto text = cJSON_GetObjectItem(root, "text");
                 if (cJSON_IsString(text)) {
@@ -853,7 +904,6 @@ void Application::HandleStateChangedEvent() {
                 // Only AFE wake word can be detected in speaking mode
                 audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
             }
-            audio_service_.ResetDecoder();
             break;
         case kDeviceStateWifiConfiguring:
             audio_service_.EnableVoiceProcessing(false);
@@ -875,6 +925,8 @@ void Application::Schedule(std::function<void()>&& callback) {
 
 void Application::AbortSpeaking(AbortReason reason) {
     ESP_LOGI(TAG, "Abort speaking");
+    accepting_tts_audio_ = false;
+    audio_service_.FinishPlaybackStream();
     CancelPendingTtsResume();
     aborted_ = true;
     if (protocol_) {

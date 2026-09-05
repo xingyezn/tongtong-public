@@ -37,7 +37,9 @@
 
 #define OPUS_FRAME_DURATION_MS 60
 #define MAX_ENCODE_TASKS_IN_QUEUE 2
-#define MAX_PLAYBACK_TASKS_IN_QUEUE 2
+#define TTS_PLAYBACK_PREBUFFER_MS 240
+#define TTS_PLAYBACK_PREBUFFER_FRAMES (TTS_PLAYBACK_PREBUFFER_MS / OPUS_FRAME_DURATION_MS)
+#define MAX_PLAYBACK_TASKS_IN_QUEUE (TTS_PLAYBACK_PREBUFFER_FRAMES + 2)
 #define MAX_DECODE_PACKETS_IN_QUEUE (2400 / OPUS_FRAME_DURATION_MS)
 #define MAX_SEND_PACKETS_IN_QUEUE (2400 / OPUS_FRAME_DURATION_MS)
 #define AUDIO_TESTING_MAX_DURATION_MS 10000
@@ -107,6 +109,10 @@ public:
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
     // True only after all received speech has been decoded and played.
     bool IsPlaybackComplete();
+    // Reset the decoder and hold output until enough TTS frames are buffered.
+    void PreparePlaybackStream(size_t prebuffer_frames = TTS_PLAYBACK_PREBUFFER_FRAMES);
+    // Release a short stream that ended before reaching the prebuffer target.
+    void FinishPlaybackStream();
     void PlaySound(const std::string_view& sound);
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
     void ResetDecoder();
@@ -145,6 +151,8 @@ private:
     // These cover work removed from a queue but not yet decoded/output.
     bool decoding_active_ = false;
     bool output_active_ = false;
+    size_t playback_prebuffer_frames_ = 0;
+    bool playback_stream_ended_ = false;
 
     bool wake_word_initialized_ = false;
     bool audio_processor_initialized_ = false;

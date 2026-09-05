@@ -7,6 +7,8 @@
 #include <esp_timer.h>
 
 #include <string>
+#include <atomic>
+#include <chrono>
 #include <mutex>
 #include <deque>
 #include <memory>
@@ -143,6 +145,10 @@ private:
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
     bool tts_resume_pending_ = false;
     bool tts_playback_drained_ = false;
+    std::atomic<bool> accepting_tts_audio_{false};
+    bool network_connected_ = false;
+    int protocol_reconnect_attempts_ = 0;
+    std::chrono::steady_clock::time_point next_protocol_reconnect_at_{};
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
 
@@ -156,6 +162,7 @@ private:
     void HandleNetworkDisconnectedEvent();
     void HandleActivationDoneEvent();
     void HandleWakeWordDetectedEvent();
+    void MaintainProtocolConnection();
 
     // Activation task (runs in background)
     void ActivationTask();

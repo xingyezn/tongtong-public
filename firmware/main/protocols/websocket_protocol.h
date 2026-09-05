@@ -20,6 +20,7 @@ public:
     bool OpenAudioChannel() override;
     void CloseAudioChannel() override;
     bool IsAudioChannelOpened() const override;
+    bool ShouldAutoReconnect() const override { return true; }
 
 private:
     EventGroupHandle_t event_group_handle_;
