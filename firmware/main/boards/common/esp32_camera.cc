@@ -413,6 +413,32 @@ bool Esp32Camera::Capture() {
         return false;
     }
 
+    // A USB UVC camera uses a single MMAP buffer on this board. The first
+    // completed JPEG may have been captured before the request arrived.
+    // Requeue it once and wait for the next completed frame so callers do not
+    // receive the previous frame on the first capture.
+    if (sensor_format_ == V4L2_PIX_FMT_JPEG && mmap_buffers_.size() == 1) {
+        if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
+            ESP_LOGE(TAG, "Failed to requeue stale UVC frame, errno=%d(%s)", errno, strerror(errno));
+            return false;
+        }
+        dequeued = false;
+        for (int attempt = 0; attempt < 30; ++attempt) {
+            memset(&buf, 0, sizeof(buf));
+            buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            buf.memory = V4L2_MEMORY_MMAP;
+            if (ioctl(video_fd_, VIDIOC_DQBUF, &buf) == 0) {
+                dequeued = true;
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+        if (!dequeued) {
+            ESP_LOGE(TAG, "VIDIOC_DQBUF failed while waiting for fresh UVC frame");
+            return false;
+        }
+    }
+
     {
             // 保存帧副本到PSRAM
             if (frame_.data) {

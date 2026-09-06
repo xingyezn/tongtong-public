@@ -60,6 +60,12 @@ TRANSCRIPTION_LANGUAGE_CODES = {
 }
 MAX_CONVERSATION_HISTORY_TURNS = 20
 
+DEFAULT_TOOL_INSTRUCTIONS = (
+    "实时传感器规则：涉及摄像头当前画面、当前人数、是否有人或人脸位置时，"
+    "必须每次重新调用对应的摄像头/人脸检测工具。工具返回结果只代表本次新采集的画面；"
+    "不得使用、推测或复用历史对话中的图片、工具结果或人数。"
+)
+
 
 class _PersistentRealtimeContext:
     """Reuse one Realtime WebSocket for the lifetime of a device session."""
@@ -166,7 +172,13 @@ class OmniClient:
         )
 
     def effective_instructions(self, include_history: bool = False) -> str:
-        parts = [self.instructions.strip(), LANGUAGE_PROMPTS[self.language]]
+        tool_instructions = self.config.get("dashscope", {}).get(
+            "tool_instructions") or DEFAULT_TOOL_INSTRUCTIONS
+        parts = [
+            self.instructions.strip(),
+            LANGUAGE_PROMPTS[self.language],
+            tool_instructions.strip(),
+        ]
         user_memory = self.config.get("dashscope", {}).get("user_memory_prompt", "")
         if user_memory:
             parts.append(

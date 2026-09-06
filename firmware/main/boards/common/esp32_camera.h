@@ -48,6 +48,12 @@ public:
     virtual void SetExplainUrl(const std::string& url, const std::string& token);
     virtual bool Capture();
     bool ProbeFrame();
+    // Accessors for on-device vision processing of the last captured frame.
+    const uint8_t* frame_data() const { return frame_.data; }
+    size_t frame_length() const { return frame_.len; }
+    uint16_t frame_width() const { return frame_.width; }
+    uint16_t frame_height() const { return frame_.height; }
+    v4l2_pix_fmt_t frame_format() const { return frame_.format; }
     // 翻转控制函数
     virtual bool SetHMirror(bool enabled) override;
     virtual bool SetVFlip(bool enabled) override;

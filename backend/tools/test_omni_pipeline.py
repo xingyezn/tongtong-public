@@ -239,6 +239,9 @@ async def test_realtime_tool_event_loop():
     }
     websocket = FakeRealtimeWebSocket()
     client = OmniClient(config)
+    effective_instructions = client.effective_instructions()
+    assert "必须每次重新调用对应的摄像头/人脸检测工具" in effective_instructions
+    assert "不得使用、推测或复用历史对话中的图片" in effective_instructions
     assert client.conversation_timeout == 600.0
     config["dashscope"]["conversation_timeout_minutes"] = 2
     assert client.conversation_timeout == 120.0

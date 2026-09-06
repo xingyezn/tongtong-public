@@ -19,6 +19,8 @@ from urllib.parse import urlparse
 
 from aiohttp import web
 
+from .omni_client import DEFAULT_TOOL_INSTRUCTIONS
+
 log = logging.getLogger("dash")
 
 # 登录 cookie 名
@@ -142,11 +144,16 @@ LOGIN_HTML = r"""<!DOCTYPE html>
            transition:transform .18s, box-shadow .18s; }
   button:hover { transform:translateY(-1px); box-shadow:0 11px 20px rgba(45,140,240,.28); }
   .error { margin-bottom:12px; color:#d9435b; font-size:13px; text-align:center; }
+  .env-warning { margin:0 auto 16px; padding:12px 14px; border:2px solid #c93636; border-radius:10px;
+                 color:#8b1717; background:#fff0f0; font-size:13px; font-weight:800; line-height:1.45;
+                 text-align:center; box-shadow:0 4px 12px rgba(201,54,54,.14); position:fixed; top:16px;
+                 left:50%; z-index:20; width:min(420px, calc(100vw - 32px)); transform:translateX(-50%); }
   .switch { margin:16px 0 0; color:var(--muted); font-size:13px; text-align:center; }
   .switch a { color:var(--blue-deep); text-decoration:none; font-weight:700; }
 </style>
 </head>
 <body>
+<!--ENV_WARNING-->
 <div class="box">
   <p class="eyebrow">TONGTONG · CONTROL CENTER</p>
   <h1>童童监控中心</h1>
@@ -243,13 +250,22 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .rgb-picker { width:42px !important; height:32px; margin:0; padding:2px !important; cursor:pointer; vertical-align:middle; }
   .rgb-swatch { display:inline-block; width:28px; height:28px; margin-left:4px; border:1px solid #bdd4e0; border-radius:7px; vertical-align:middle; background:#00a0ff; }
   .rgb-hex-input { width:86px !important; margin:0; padding:6px 7px !important; font-family:Consolas,monospace; text-transform:uppercase; }
-  #hardware-test-result { min-height:42px; max-height:180px; overflow:auto; margin-top:12px; padding:9px 11px; border:1px solid #dceaf2; border-radius:9px; background:#f7fbfd; color:#3b5265; font:12px/1.5 Consolas,monospace; white-space:pre-wrap; }
+  #hardware-test-result { min-height:42px; overflow:visible; margin-top:12px; padding:9px 11px; border:1px solid #dceaf2; border-radius:9px; background:#f7fbfd; color:#3b5265; font:12px/1.5 Consolas,monospace; white-space:pre-wrap; }
   #camera-preview { display:none; margin-top:12px; padding:10px; border:1px solid #dceaf2; border-radius:9px; background:#f8fcfe; }
-  #camera-preview img { display:block; width:min(100%, 640px); max-height:420px; object-fit:contain; border-radius:6px; background:#edf4f8; }
+  #camera-preview img { display:block; width:min(100%, 640px); height:auto; object-fit:contain; border-radius:6px; background:#edf4f8; }
+  .face-result { position:relative; width:min(100%, 640px); margin-top:8px; background:#edf4f8; }
+  .face-result img { display:block; width:100%; height:auto; }
+  .face-result svg { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+  .face-box { fill:rgba(40,210,130,.12); stroke:#19b879; stroke-width:2; }
+  .face-label { fill:#19b879; font:700 13px "Segoe UI","Microsoft YaHei",sans-serif; }
+  .result-json { margin:10px 0 0; padding:9px; border:1px solid #dceaf2; border-radius:8px; background:#fff; overflow:visible; white-space:pre-wrap; word-break:break-word; }
   .muted { color:var(--muted); font-size:12px; }
   .empty { color:var(--muted); font-size:13px; padding:8px 0; }
   .hint { font-size:12px; color:var(--muted); margin-top:8px; }
   .badge { padding:3px 9px; border-radius:20px; color:#527087; font-size:11px; background:#e8f3f8; }
+  .env-warning { margin:0 clamp(18px, 4vw, 48px); padding:13px 18px; border:2px solid #c93636; border-radius:12px;
+                 color:#8b1717; background:#fff0f0; font-size:14px; font-weight:800; line-height:1.45;
+                 text-align:center; box-shadow:0 5px 14px rgba(201,54,54,.14); position:sticky; top:82px; z-index:9; }
   .chat-layout { display:grid; grid-template-columns:minmax(180px,26%) 1fr; gap:12px; min-height:360px; }
   .conversation-list { max-height:520px; overflow:auto; display:flex; flex-direction:column; gap:7px; }
   .conversation-item { border:1px solid #dceaf2; border-radius:10px; padding:9px 11px; background:#f8fcfe; cursor:pointer; }
@@ -302,6 +318,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button class="btn" onclick="refresh()">刷新</button>
   <a class="btn" href="/logout">退出</a>
 </header>
+<!--ENV_WARNING-->
 
 <main>
   <div class="card full">
@@ -351,7 +368,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
     <div class="hint" id="hardware-test-status">等待设备上线…</div>
     <div id="hardware-test-groups" class="test-grid"></div>
-    <pre id="hardware-test-result">尚未执行测试。</pre>
+    <div id="hardware-test-result">尚未执行测试。</div>
     <div id="camera-preview"><div class="muted" style="margin-bottom:7px">最近拍摄的照片（仅保存在后端内存，重启后自动清除）</div><img id="camera-preview-image" alt="设备最近拍摄的照片"></div>
     <div class="hint">所有按钮通过设备 MCP 通道执行；运动测试必须先让车轮悬空。设备未声明的摄像头、舵机或屏幕工具会显示为不可用，不会伪造测试结果。</div>
   </div>
@@ -483,6 +500,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <label class="muted" style="min-width:130px;align-self:flex-start">人物设定</label>
       <textarea id="cfg-instructions" rows="4" placeholder="你是童童，一个友好、热情的语音助手……" style="flex:1;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4;resize:vertical;font-family:Consolas,monospace;font-size:12px"></textarea>
     </div>
+    <div class="row" style="margin-bottom:10px">
+      <label class="muted" style="min-width:130px;align-self:flex-start">工具规则（全局）</label>
+      <textarea id="cfg-tool-instructions" rows="5" placeholder="涉及实时传感器时的工具调用规则……" style="flex:1;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4;resize:vertical;font-family:Consolas,monospace;font-size:12px"></textarea>
+    </div>
+    <div class="hint">工具规则不区分用户和设备，保存后会拼接到所有会话的人物设定后面。</div>
     <div class="row" style="margin-bottom:10px">
       <label class="muted" style="min-width:130px">模型连接复用（分钟）</label>
       <input type="number" id="cfg-conversation-timeout" min="1" max="120" step="1" value="10" style="flex:1;max-width:140px;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4">
@@ -896,7 +918,7 @@ const HARDWARE_TEST_GROUPS = [
     ["self.chassis.turn_left", "左转"], ["self.chassis.turn_right", "右转"],
     ["self.chassis.spin", "原地转圈"], ["self.chassis.stop", "停止"]
   ]},
-  { title: "摄像头", items: [["self.camera.take_photo", "拍照测试"]] },
+  { title: "摄像头", items: [["self.camera.take_photo", "拍照测试"], ["self.camera.face_detect_local", "本地 ESP-DL 人脸检测"]] },
   { title: "舵机 / 云台", items: [
     ["self.gimbal.center", "云台回中"], ["self.gimbal.pan", "水平舵机"],
     ["self.gimbal.tilt", "俯仰舵机"], ["self.face_tracking.get_state", "跟随状态"]
@@ -930,7 +952,7 @@ function hardwareArgs(name) {
              duration_ms: parseInt($("test-duration").value, 10) || 500 };
   }
   if (name === "self.camera.take_photo") {
-    return { question: $("test-camera-question").value.trim() || "检查摄像头是否能正常拍照" };
+    return { question: "检查摄像头是否能正常拍照" };
   }
   if (name === "self.screen.set_brightness") {
     return { brightness: parseInt($("test-brightness").value, 10) || 50 };
@@ -1027,12 +1049,7 @@ function renderHardwareTests() {
     box.innerHTML = '<div class="empty">没有在线设备。</div>';
     return;
   }
-  let html = '<div class="row" style="grid-column:1/-1;margin-bottom:2px">' +
-    '<label class="muted">电机速度 <input class="test-input" id="test-speed" type="number" min="0" max="100" value="30"></label>' +
-    '<label class="muted">持续时间(ms) <input class="test-input" id="test-duration" type="number" min="1" max="10000" value="500"></label>' +
-    '<label class="muted">屏幕亮度 <input class="test-input" id="test-brightness" type="number" min="0" max="100" value="50"></label>' +
-    '<label class="muted">主题 <select id="test-theme"><option value="light">浅色</option><option value="dark">深色</option></select></label>' +
-    '<label class="muted" style="flex:1;min-width:220px">拍照问题 <input id="test-camera-question" value="检查摄像头是否能正常拍照" style="width:100%;padding:6px 8px"></label></div>';
+  let html = '';
   html += HARDWARE_TEST_GROUPS.map(group => {
     const actions = group.items.map(([name, label]) => {
       const available = !!hardwareTools[name];
@@ -1042,14 +1059,21 @@ function renderHardwareTests() {
         ' onclick=\'runHardwareTest("' + name + '", this)\'>' + label +
         (available ? "" : "（不可用）") + '</button>';
     }).join("");
+    const groupInputs = group.items.some(item => item[0].indexOf("self.chassis.") === 0)
+      ? '<div class="row" style="margin-bottom:8px"><label class="muted">速度 <input class="test-input" id="test-speed" type="number" min="0" max="100" value="30"></label>' +
+        '<label class="muted">持续时间(ms) <input class="test-input" id="test-duration" type="number" min="1" max="10000" value="500"></label></div>'
+      : group.items.some(item => item[0].indexOf("self.screen.") === 0)
+        ? '<div class="row" style="margin-bottom:8px"><label class="muted">亮度 <input class="test-input" id="test-brightness" type="number" min="0" max="100" value="50"></label>' +
+          '<label class="muted">主题 <select id="test-theme"><option value="light">浅色</option><option value="dark">深色</option></select></label></div>'
+        : '';
     const colorInputs = group.title === "RGB 指示灯"
-      ? '<div class="row" style="margin-bottom:8px"><label class="muted">色盘 <input class="rgb-picker" id="test-led-color" type="color" value="#00a0ff" oninput="syncLedRgbFromColor()"><span class="rgb-swatch" id="test-led-swatch"></span></label>' +
-        '<label class="muted">HEX <input class="rgb-hex-input" id="test-led-hex" type="text" value="#00A0FF" maxlength="7" spellcheck="false" oninput="syncLedRgbFromHex()" onchange="syncLedRgbFromHex()"></label>' +
+      ? '<div class="row" style="margin-bottom:8px"><label class="muted">色盘 <input class="rgb-picker" id="test-led-color" type="color" value="#0000ff" oninput="syncLedRgbFromColor()"><span class="rgb-swatch" id="test-led-swatch"></span></label>' +
+        '<label class="muted">HEX <input class="rgb-hex-input" id="test-led-hex" type="text" value="#0000FF" maxlength="7" spellcheck="false" oninput="syncLedRgbFromHex()" onchange="syncLedRgbFromHex()"></label>' +
         '<label class="muted">R <input class="test-input" id="test-led-red" type="number" min="0" max="255" value="0" oninput="syncLedColorFromRgb()"></label>' +
-        '<label class="muted">G <input class="test-input" id="test-led-green" type="number" min="0" max="255" value="160" oninput="syncLedColorFromRgb()"></label>' +
+        '<label class="muted">G <input class="test-input" id="test-led-green" type="number" min="0" max="255" value="0" oninput="syncLedColorFromRgb()"></label>' +
         '<label class="muted">B <input class="test-input" id="test-led-blue" type="number" min="0" max="255" value="255" oninput="syncLedColorFromRgb()"></label></div>' +
         '<div class="hint" style="margin:0 0 8px">色盘与 RGB 数值会同步；当前固件仅提供颜色、开关控制。亮度设置目前仅适用于“屏幕亮度”，RGB 指示灯没有独立亮度接口。</div>' : '';
-    return '<div class="test-group"><h3>' + group.title + '</h3>' + colorInputs + '<div class="test-actions">' + actions + '</div></div>';
+    return '<div class="test-group"><h3>' + group.title + '</h3>' + groupInputs + colorInputs + '<div class="test-actions">' + actions + '</div></div>';
   }).join("");
   box.innerHTML = html;
   Object.entries(previousValues).forEach(([id, value]) => {
@@ -1092,7 +1116,11 @@ async function runHardwareTest(name, button) {
       body: JSON.stringify({ device_id: device.device_id, name: name, arguments: hardwareArgs(name), timeout_ms: 15000 }) });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || "调用失败");
-    $("hardware-test-result").textContent = JSON.stringify(data.result, null, 2);
+    if (name === "self.camera.face_detect_local") {
+      renderLocalFaceResult(data.result);
+    } else {
+      $("hardware-test-result").textContent = JSON.stringify(data.result, null, 2);
+    }
     if (name === "self.camera.take_photo") showCameraPreview(device.device_id);
     showToast(name + " 测试完成", "ok");
   } catch (e) {
@@ -1101,6 +1129,30 @@ async function runHardwareTest(name, button) {
   } finally {
     renderHardwareTests();
   }
+}
+
+function renderLocalFaceResult(result) {
+  const text = result && result.content && result.content[0] ? result.content[0].text : "";
+  let item;
+  try { item = JSON.parse(text); } catch (_) { $("hardware-test-result").textContent = text || "检测结果为空"; return; }
+  const width = Number(item.width) || 1, height = Number(item.height) || 1;
+  const faces = Array.isArray(item.faces) ? item.faces : [];
+  const image = typeof item.image_jpeg_base64 === "string" ? item.image_jpeg_base64 : "";
+  if (!image) { $("hardware-test-result").textContent = JSON.stringify(item, null, 2); return; }
+  const boxes = faces.map((face, index) => {
+    const b = Array.isArray(face.box) ? face.box.map(Number) : [];
+    if (b.length < 4 || b.some(Number.isNaN)) return "";
+    const score = Number(face.confidence);
+    const label = "#" + (index + 1) + " " + (Number.isFinite(score) ? score.toFixed(3) : "?");
+    const labelY = Math.max(16, b[1] - 4);
+    return '<rect class="face-box" x="' + b[0] + '" y="' + b[1] + '" width="' + Math.max(0, b[2]-b[0]) + '" height="' + Math.max(0, b[3]-b[1]) + '"></rect>' +
+      '<text class="face-label" x="' + b[0] + '" y="' + labelY + '">' + label + '</text>';
+  }).join("");
+  const jsonItem = Object.assign({}, item);
+  delete jsonItem.image_jpeg_base64;
+  $("hardware-test-result").innerHTML = '<div>检测到 <b>' + faces.length + '</b> 张人脸，耗时 ' + (Number(item.elapsed_ms) || 0) + ' ms</div>' +
+    '<div class="face-result"><img src="data:image/jpeg;base64,' + image + '" alt="本地人脸检测画面"><svg viewBox="0 0 ' + width + ' ' + height + '" preserveAspectRatio="none">' + boxes + '</svg></div>' +
+    '<pre class="result-json">' + esc(JSON.stringify(jsonItem, null, 2)) + '</pre>';
 }
 
 async function loadModel() {
@@ -1115,6 +1167,7 @@ async function loadModel() {
     $("cfg-model").value = d.model || "";
     $("cfg-language").value = d.language || "zh";
     $("cfg-instructions").value = d.instructions || "";
+    $("cfg-tool-instructions").value = d.tool_instructions || "";
     $("cfg-conversation-timeout").value = d.conversation_timeout_minutes || 10;
     const voice = d.voice || "";
     if (Array.from($("cfg-voice").options).some(option => option.value === voice)) {
@@ -1131,6 +1184,7 @@ async function saveModel() {
     language: $("cfg-language").value,
     voice: voice,
     instructions: $("cfg-instructions").value.trim(),
+    tool_instructions: $("cfg-tool-instructions").value.trim(),
     conversation_timeout_minutes: parseFloat($("cfg-conversation-timeout").value),
   };
   if (!body.model) {
@@ -1391,6 +1445,18 @@ class Dashboard:
         # are lost on restart and never written to disk.
         self._camera_photos = {}
 
+    def _render_page(self, template):
+        """Add a prominent warning to the non-production dashboard only."""
+        port = self.config.get("server", {}).get("port")
+        warning = ""
+        if str(port) == "8081":
+            warning = (
+                '<div class="env-warning" role="alert">'
+                '⚠️ 当前为测试页面（8081），禁止登录主测试/生产后端账号，避免误操作真实设备和数据。'
+                '</div>'
+            )
+        return template.replace("<!--ENV_WARNING-->", warning)
+
     def add_routes(self, app: web.Application):
         app.router.add_get("/", self.index)
         app.router.add_get("/login", self.login_page)
@@ -1485,7 +1551,7 @@ class Dashboard:
     async def login_page(self, request):
         if self._check_cookie(request):
             raise web.HTTPFound("/")
-        return web.Response(text=LOGIN_HTML, content_type="text/html", charset="utf-8")
+        return web.Response(text=self._render_page(LOGIN_HTML), content_type="text/html", charset="utf-8")
 
     async def login(self, request):
         data = await request.post()
@@ -1494,10 +1560,10 @@ class Dashboard:
         user = self.account_store.authenticate(username, password) if self.account_store else None
         if user is None:
             log.warning("dashboard 登录失败 (username=%s ip=%s)", username, request.remote)
-            return web.Response(text=LOGIN_HTML.replace(
+            return web.Response(text=self._render_page(LOGIN_HTML.replace(
                 "<!--ERROR-->",
                 '<div class="error">用户名或密码错误</div>'
-            ), content_type="text/html", charset="utf-8")
+            )), content_type="text/html", charset="utf-8")
         log.info("dashboard 登录成功 (user=%s ip=%s)", user["username"], request.remote)
         token = self.account_store.create_session(user["id"], self.session_ttl)
         resp = web.HTTPFound("/")
@@ -1510,7 +1576,7 @@ class Dashboard:
             raise web.HTTPFound("/")
         if not self.registration_enabled:
             raise web.HTTPForbidden(text="registration disabled")
-        return web.Response(text=REGISTER_HTML, content_type="text/html", charset="utf-8")
+        return web.Response(text=self._render_page(REGISTER_HTML), content_type="text/html", charset="utf-8")
 
     async def register(self, request):
         if not self.registration_enabled:
@@ -1520,10 +1586,10 @@ class Dashboard:
             user = self.account_store.register_user(
                 data.get("username", ""), data.get("password", ""))
         except ValueError as exc:
-            return web.Response(text=REGISTER_HTML.replace(
+            return web.Response(text=self._render_page(REGISTER_HTML.replace(
                 "<!--ERROR-->", '<div class="error">{}</div>'.format(
                     str(exc).replace("<", "&lt;").replace(">", "&gt;"))
-            ), content_type="text/html", charset="utf-8", status=400)
+            )), content_type="text/html", charset="utf-8", status=400)
         token = self.account_store.create_session(user["id"], self.session_ttl)
         log.info("dashboard 用户注册成功 (user=%s ip=%s)", user["username"], request.remote)
         resp = web.HTTPFound("/")
@@ -1544,7 +1610,7 @@ class Dashboard:
     async def index(self, request):
         if not self._check_cookie(request):
             raise web.HTTPFound("/login")
-        return web.Response(text=DASHBOARD_HTML, content_type="text/html", charset="utf-8")
+        return web.Response(text=self._render_page(DASHBOARD_HTML), content_type="text/html", charset="utf-8")
 
     async def admin_page(self, request):
         self._require_admin(request)
@@ -1747,6 +1813,9 @@ class Dashboard:
         settings["conversation_timeout_minutes"] = (
             settings.get("conversation_timeout_minutes") or 10)
         settings.update(self.account_store.get_model_settings(device_id))
+        settings["tool_instructions"] = (
+            self.account_store.get_global_setting("tool_instructions")
+            or DEFAULT_TOOL_INSTRUCTIONS)
         settings["api_key_configured"] = bool(
             self.config.get("dashscope", {}).get("api_key"))
         return settings
@@ -2140,6 +2209,10 @@ class Dashboard:
             "instructions": instructions,
             "conversation_timeout_minutes": minutes,
         }
+        tool_instructions = (data.get("tool_instructions") or "").strip()
+        if len(tool_instructions) > 12000:
+            return web.json_response({"error": "invalid tool instructions"}, status=400)
+        self.account_store.set_global_setting("tool_instructions", tool_instructions)
         self.account_store.set_model_settings(user["id"], device_id, settings)
         self._refresh_active_device_config(device_id)
         log.info("设备模型配置更新: user=%s device=%s model=%s language=%s voice=%s",
@@ -2158,6 +2231,7 @@ class Dashboard:
                             "self.servo.", "self.face_tracking.", "self.led.")
         allowed_names = {
             "self.camera.take_photo",
+            "self.camera.face_detect_local",
             "self.screen.get_info",
             "self.screen.set_brightness",
             "self.screen.set_theme",

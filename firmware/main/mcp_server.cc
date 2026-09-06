@@ -17,6 +17,9 @@
 #include "settings.h"
 #include "lvgl_theme.h"
 #include "lvgl_display.h"
+#ifdef CONFIG_ESP_VIDEO_ENABLE_USB_UVC_VIDEO_DEVICE
+#include "camera_face_detect_local.h"
+#endif
 
 #define TAG "MCP"
 
@@ -119,6 +122,7 @@ void McpServer::AddCommonTools() {
             });
     }
 
+#ifdef CONFIG_ESP_VIDEO_ENABLE_USB_UVC_VIDEO_DEVICE
     auto camera = board.GetCamera();
     if (camera) {
         AddTool("self.camera.take_photo",
@@ -140,7 +144,21 @@ void McpServer::AddCommonTools() {
                 auto question = properties["question"].value<std::string>();
                 return camera->Explain(question);
             });
+
+        AddTool("self.camera.face_detect_local",
+            "Capture one frame from the USB camera and run face detection locally "
+            "on-device with ESP-DL (works offline). This is a real-time sensor "
+            "command: every call captures a new current frame. Never use, infer, "
+            "or reuse a previous frame or historical detection result. Whenever "
+            "the user asks about the current number, presence, or location of "
+            "faces, you must call this tool again for that question.",
+            PropertyList(),
+            [camera](const PropertyList&) -> ReturnValue {
+                TaskPriorityReset priority_reset(1);
+                return CameraFaceDetectLocalJson(camera);
+            });
     }
+#endif
 #endif
 
     // Restore the original tools list to the end of the tools list
