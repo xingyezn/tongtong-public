@@ -15,6 +15,7 @@ import secrets
 import threading
 import time
 from collections import deque
+from urllib.parse import urlparse
 
 from aiohttp import web
 
@@ -239,6 +240,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .test-actions { display:flex; flex-wrap:wrap; gap:7px; }
   .test-actions .btn { padding:7px 10px; font-size:12px; }
   .test-input { width:72px; padding:6px 7px !important; }
+  .rgb-picker { width:42px !important; height:32px; margin:0; padding:2px !important; cursor:pointer; vertical-align:middle; }
+  .rgb-swatch { display:inline-block; width:28px; height:28px; margin-left:4px; border:1px solid #bdd4e0; border-radius:7px; vertical-align:middle; background:#00a0ff; }
+  .rgb-hex-input { width:86px !important; margin:0; padding:6px 7px !important; font-family:Consolas,monospace; text-transform:uppercase; }
   #hardware-test-result { min-height:42px; max-height:180px; overflow:auto; margin-top:12px; padding:9px 11px; border:1px solid #dceaf2; border-radius:9px; background:#f7fbfd; color:#3b5265; font:12px/1.5 Consolas,monospace; white-space:pre-wrap; }
   #camera-preview { display:none; margin-top:12px; padding:10px; border:1px solid #dceaf2; border-radius:9px; background:#f8fcfe; }
   #camera-preview img { display:block; width:min(100%, 640px); max-height:420px; object-fit:contain; border-radius:6px; background:#edf4f8; }
@@ -258,6 +262,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .chat-message .speaker { font-size:10px; color:var(--muted); font-weight:800; margin-bottom:3px; }
   .memory-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:9px; margin-top:10px; }
   .memory-item { border:1px solid #dceaf2; border-radius:10px; padding:10px; background:#f8fcfe; }
+  .usage-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:9px; }
+  .usage-item { padding:11px; border:1px solid #dceaf2; border-radius:10px; background:#f8fcfe; }
+  .usage-item b { display:block; font-size:19px; color:#276c9f; }
+  .modal-backdrop { position:fixed; inset:0; z-index:1000; display:none; align-items:center; justify-content:center; padding:18px; background:rgba(19,47,67,.42); }
+  .modal-backdrop.show { display:flex; }
+  .modal { width:min(520px,100%); padding:22px; border:1px solid #dceaf2; border-radius:16px; background:#fff; box-shadow:0 22px 55px rgba(20,55,79,.25); }
+  .modal h3 { margin:0 0 15px; font-size:17px; } .modal label { display:block; margin:10px 0 5px; color:var(--muted); font-size:12px; font-weight:700; }
+  .modal input,.modal textarea { width:100%; margin:0; } .modal textarea { min-height:110px; resize:vertical; padding:9px; }
   input:not([type="checkbox"]), select, textarea { border:1px solid #d5e6ef !important; border-radius:9px !important; background:#fbfeff !important;
           color:var(--fg) !important; box-shadow:none; transition:border-color .18s, box-shadow .18s; }
   input:not([type="checkbox"]):focus, select:focus, textarea:focus { outline:none; border-color:#72b7f4 !important; box-shadow:0 0 0 3px rgba(45,140,240,.11) !important; }
@@ -285,6 +297,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <span class="badge" id="uptime">—</span>
   <span class="header-spacer"></span>
   <span class="badge" id="current-user">—</span>
+  <a class="btn" id="admin-link" href="/admin" style="display:none">管理员端</a>
   <label class="muted"><input type="checkbox" id="autorefresh" checked> 自动刷新</label>
   <button class="btn" onclick="refresh()">刷新</button>
   <a class="btn" href="/logout">退出</a>
@@ -322,6 +335,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div class="card">
     <h2>后端配置</h2>
     <dl class="kv" id="cfg-kv"></dl>
+  </div>
+
+  <div class="card">
+    <h2>我的用量</h2>
+    <div class="usage-grid" id="usage-summary"><div class="empty">加载中…</div></div>
+    <div class="hint" id="usage-device-hint"></div>
   </div>
 
   <div class="card full">
@@ -527,6 +546,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
 
 </main>
+<div class="modal-backdrop" id="memory-modal" role="dialog" aria-modal="true" aria-labelledby="memory-modal-title">
+  <form class="modal" onsubmit="saveMemoryEdit(event)"><h3 id="memory-modal-title">编辑个人记忆</h3>
+    <input id="memory-edit-id" type="hidden"><label>分类</label><input id="memory-edit-category" maxlength="40" required>
+    <label>标题</label><input id="memory-edit-label" maxlength="80" required><label>内容</label><textarea id="memory-edit-value" maxlength="1000" required></textarea>
+    <label><input id="memory-edit-enabled" type="checkbox"> 在对话中使用</label>
+    <div class="row" style="justify-content:flex-end;margin:16px 0 0"><button type="button" class="btn warn" onclick="closeMemoryEditor()">取消</button><button type="submit" class="btn">保存修改</button></div>
+  </form>
+</div>
 <div id="toast" role="status" aria-live="polite"></div>
 
 <script>
@@ -675,6 +702,7 @@ function render(d) {
     : '<span class="dot bad"></span>服务异常';
   $("uptime").textContent = "运行 " + fmtDur(d.server.uptime);
   $("current-user").textContent = "用户：" + (d.user ? d.user.username : "—");
+  $("admin-link").style.display = d.user && d.user.is_admin ? "inline-block" : "none";
   renderOwnedDeviceControls(d.devices || []);
 
   // devices
@@ -722,6 +750,7 @@ function render(d) {
     ["输出采样率", c.output_sample_rate + " Hz"],
   ].map(([k,v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
   renderHardwareTestControls(d.devices || []);
+  loadUsageStats();
 }
 
 function renderHardwareTestControls(devices) {
@@ -895,11 +924,7 @@ function showCameraPreview(deviceId) {
 }
 
 function hardwareArgs(name) {
-  if (name === "self.led.set_color") return {
-    red: Math.max(0, Math.min(255, parseInt($("test-led-red").value, 10) || 0)),
-    green: Math.max(0, Math.min(255, parseInt($("test-led-green").value, 10) || 0)),
-    blue: Math.max(0, Math.min(255, parseInt($("test-led-blue").value, 10) || 0)),
-  };
+  if (name === "self.led.set_color") return ledRgbValues();
   if (name.indexOf("self.chassis.") === 0 && name !== "self.chassis.stop") {
     return { speed: parseInt($("test-speed").value, 10) || 30,
              duration_ms: parseInt($("test-duration").value, 10) || 500 };
@@ -916,12 +941,85 @@ function hardwareArgs(name) {
   return {};
 }
 
+function clampRgb(value) {
+  const number = parseInt(value, 10);
+  return Math.max(0, Math.min(255, Number.isFinite(number) ? number : 0));
+}
+
+function ledRgbValues() {
+  return {
+    red: clampRgb($("test-led-red").value),
+    green: clampRgb($("test-led-green").value),
+    blue: clampRgb($("test-led-blue").value),
+  };
+}
+
+function ledRgbHex(rgb) {
+  return "#" + [rgb.red, rgb.green, rgb.blue]
+    .map(channel => channel.toString(16).padStart(2, "0")).join("");
+}
+
+function updateLedColorPresentation(rgb) {
+  const hex = ledRgbHex(rgb);
+  const picker = $("test-led-color");
+  const swatch = $("test-led-swatch");
+  const hexInput = $("test-led-hex");
+  if (picker) picker.value = hex;
+  if (swatch) swatch.style.background = hex;
+  if (hexInput) {
+    hexInput.value = hex.toUpperCase();
+    hexInput.setCustomValidity("");
+  }
+}
+
+function syncLedColorFromRgb() {
+  const rgb = ledRgbValues();
+  $("test-led-red").value = rgb.red;
+  $("test-led-green").value = rgb.green;
+  $("test-led-blue").value = rgb.blue;
+  updateLedColorPresentation(rgb);
+}
+
+function syncLedRgbFromColor() {
+  const value = $("test-led-color").value || "#000000";
+  const rgb = {
+    red: parseInt(value.slice(1, 3), 16),
+    green: parseInt(value.slice(3, 5), 16),
+    blue: parseInt(value.slice(5, 7), 16),
+  };
+  $("test-led-red").value = rgb.red;
+  $("test-led-green").value = rgb.green;
+  $("test-led-blue").value = rgb.blue;
+  updateLedColorPresentation(rgb);
+}
+
+function syncLedRgbFromHex() {
+  const hexInput = $("test-led-hex");
+  const match = /^#?([0-9a-fA-F]{6})$/.exec(hexInput.value.trim());
+  // Keep incomplete text intact while the user is typing.  Values only update
+  // after a complete #RRGGBB (or RRGGBB) color is available.
+  if (!match) {
+    hexInput.setCustomValidity("请输入 #RRGGBB 格式的颜色代码");
+    return;
+  }
+  const value = match[1];
+  const rgb = {
+    red: parseInt(value.slice(0, 2), 16),
+    green: parseInt(value.slice(2, 4), 16),
+    blue: parseInt(value.slice(4, 6), 16),
+  };
+  $("test-led-red").value = rgb.red;
+  $("test-led-green").value = rgb.green;
+  $("test-led-blue").value = rgb.blue;
+  updateLedColorPresentation(rgb);
+}
+
 function renderHardwareTests() {
   const box = $("hardware-test-groups");
   const device = selectedHardwareDevice();
   const canRun = !!device;
   const previousValues = {};
-  ["test-speed", "test-duration", "test-brightness", "test-theme", "test-camera-question", "test-led-red", "test-led-green", "test-led-blue"].forEach(id => {
+  ["test-speed", "test-duration", "test-brightness", "test-theme", "test-camera-question", "test-led-color", "test-led-hex", "test-led-red", "test-led-green", "test-led-blue"].forEach(id => {
     const input = $(id);
     if (input) previousValues[id] = input.value;
   });
@@ -945,9 +1043,12 @@ function renderHardwareTests() {
         (available ? "" : "（不可用）") + '</button>';
     }).join("");
     const colorInputs = group.title === "RGB 指示灯"
-      ? '<div class="row" style="margin-bottom:8px"><label class="muted">R <input class="test-input" id="test-led-red" type="number" min="0" max="255" value="0"></label>' +
-        '<label class="muted">G <input class="test-input" id="test-led-green" type="number" min="0" max="255" value="160"></label>' +
-        '<label class="muted">B <input class="test-input" id="test-led-blue" type="number" min="0" max="255" value="255"></label></div>' : '';
+      ? '<div class="row" style="margin-bottom:8px"><label class="muted">色盘 <input class="rgb-picker" id="test-led-color" type="color" value="#00a0ff" oninput="syncLedRgbFromColor()"><span class="rgb-swatch" id="test-led-swatch"></span></label>' +
+        '<label class="muted">HEX <input class="rgb-hex-input" id="test-led-hex" type="text" value="#00A0FF" maxlength="7" spellcheck="false" oninput="syncLedRgbFromHex()" onchange="syncLedRgbFromHex()"></label>' +
+        '<label class="muted">R <input class="test-input" id="test-led-red" type="number" min="0" max="255" value="0" oninput="syncLedColorFromRgb()"></label>' +
+        '<label class="muted">G <input class="test-input" id="test-led-green" type="number" min="0" max="255" value="160" oninput="syncLedColorFromRgb()"></label>' +
+        '<label class="muted">B <input class="test-input" id="test-led-blue" type="number" min="0" max="255" value="255" oninput="syncLedColorFromRgb()"></label></div>' +
+        '<div class="hint" style="margin:0 0 8px">色盘与 RGB 数值会同步；当前固件仅提供颜色、开关控制。亮度设置目前仅适用于“屏幕亮度”，RGB 指示灯没有独立亮度接口。</div>' : '';
     return '<div class="test-group"><h3>' + group.title + '</h3>' + colorInputs + '<div class="test-actions">' + actions + '</div></div>';
   }).join("");
   box.innerHTML = html;
@@ -955,12 +1056,16 @@ function renderHardwareTests() {
     const input = $(id);
     if (input) input.value = value;
   });
+  if ($("test-led-color")) syncLedColorFromRgb();
 }
 
 async function loadHardwareTests(force) {
   const device = selectedHardwareDevice();
   if (!device) { hardwareTools = {}; renderHardwareTests(); return; }
-  if (!force && hardwareToolsDevice === device.device_id) { renderHardwareTests(); return; }
+  // Status polling runs every three seconds.  Do not replace the controls for
+  // the same device during that poll: replacing an <input type=color> closes
+  // the browser's native color palette while the user is choosing a color.
+  if (!force && hardwareToolsDevice === device.device_id) return;
   hardwareToolsDevice = device.device_id;
   const status = $("hardware-test-status");
   status.textContent = "正在读取设备测试工具…";
@@ -1193,10 +1298,25 @@ async function addMemory() {
 async function toggleMemory(id, enabled) { await apiJson("/api/memories/update", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id,enabled})}); await loadMemories(); }
 async function editMemory(id) {
   const m = (window.currentMemories || []).find(x => x.id === id); if (!m) return;
-  const value = prompt("修改“" + m.label + "”", m.value); if (value === null) return;
-  await apiJson("/api/memories/update", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id,value})}); await loadMemories();
+  $("memory-edit-id").value = m.id; $("memory-edit-category").value = m.category;
+  $("memory-edit-label").value = m.label; $("memory-edit-value").value = m.value;
+  $("memory-edit-enabled").checked = !!m.enabled; $("memory-modal").classList.add("show");
 }
+function closeMemoryEditor(){ $("memory-modal").classList.remove("show"); }
+async function saveMemoryEdit(event) { event.preventDefault(); try {
+  await apiJson("/api/memories/update", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({
+    id:parseInt($("memory-edit-id").value,10), category:$("memory-edit-category").value,
+    label:$("memory-edit-label").value, value:$("memory-edit-value").value,
+    enabled:$("memory-edit-enabled").checked})}); closeMemoryEditor(); await loadMemories(); showToast("个人记忆已保存", "ok");
+} catch(e) { showToast("保存失败："+e.message, "err"); } }
 async function deleteMemory(id) { if (!confirm("确定删除这条个人信息？")) return; await apiJson("/api/memories/delete", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id})}); await loadMemories(); }
+
+function fmtTokens(value){ return Number(value||0).toLocaleString(); }
+function usageCard(label, value){ return '<div class="usage-item"><span class="muted">'+label+'</span><b>'+fmtTokens(value.total_tokens)+' token</b><span class="muted">'+value.turns+' 轮对话 · 输入 '+fmtTokens(value.input_tokens)+' / 输出 '+fmtTokens(value.output_tokens)+'</span></div>'; }
+async function loadUsageStats(){ try { const data=await apiJson("/api/usage"); const usage=data.usage||{};
+  $("usage-summary").innerHTML=[['今日',usage.today],['本周',usage.week],['本月',usage.month],['累计',usage.all]].map(([label,value])=>usageCard(label,value||{})).join('');
+  $("usage-device-hint").textContent=(data.by_device||[]).map(d=>d.name+'：累计 '+fmtTokens((d.usage.all||{}).total_tokens)+' token / '+((d.usage.all||{}).turns||0)+' 轮').join('；') || '尚无已统计的对话。';
+}catch(_){ $("usage-summary").innerHTML='<div class="empty">用量加载失败。</div>'; } }
 
 // ---- auto refresh ----
 $("autorefresh").addEventListener("change", e => { autoRefresh = e.target.checked; });
@@ -1207,6 +1327,43 @@ loadMemories();
 </body>
 </html>
 """
+
+
+ADMIN_HTML = r"""<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>管理员端 · Tongtong</title>
+<style>
+:root{--bg:#f4fafc;--card:#fff;--line:#dceaf2;--fg:#18334b;--muted:#708596;--ok:#198764;--bad:#c4475a;--acc:#2d8cf0}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 "Segoe UI","Microsoft YaHei",sans-serif}
+header{padding:18px 4vw;background:#fff;border-bottom:1px solid var(--line);display:flex;gap:12px;align-items:center;position:sticky;top:0}h1{font-size:19px;margin:0}.spacer{flex:1}main{max-width:1500px;margin:auto;padding:24px 4vw;display:grid;gap:18px}.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px;overflow:auto}h2{font-size:15px;margin:0 0 14px}.stats{display:grid;grid-template-columns:repeat(4,minmax(130px,1fr));gap:12px}.stat{background:#eef8fc;border-radius:12px;padding:15px}.stat b{display:block;font-size:25px}table{width:100%;border-collapse:collapse;min-width:760px}th,td{padding:9px;border-bottom:1px solid #edf3f6;text-align:left}th{color:var(--muted)}button,.btn,input,select{border:1px solid var(--line);border-radius:8px;padding:7px 10px;background:#fff;color:var(--fg)}button,.btn{cursor:pointer;text-decoration:none}button.primary{background:var(--acc);color:#fff;border-color:var(--acc)}button.danger{color:var(--bad)}.row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}.tag{border-radius:12px;padding:2px 8px;background:#eaf5ff}.off{background:#fff0f2;color:var(--bad)}#msg{position:fixed;right:24px;bottom:24px;padding:12px 16px;background:#17364d;color:#fff;border-radius:10px;display:none}@media(max-width:700px){.stats{grid-template-columns:1fr 1fr}}
+</style></head><body>
+<header><h1>童童管理员端</h1><span id="env" class="tag">—</span><span class="spacer"></span><a class="btn" href="/">用户面板</a><a class="btn" href="/logout">退出</a></header>
+<main>
+<section class="stats"><div class="stat">用户<b id="user-count">0</b></div><div class="stat">管理员<b id="admin-count">0</b></div><div class="stat">设备<b id="device-count">0</b></div><div class="stat">在线设备<b id="online-count">0</b></div></section>
+<section class="card"><h2>用户管理</h2><div class="row"><input id="new-user" placeholder="用户名"><input id="new-password" type="password" placeholder="初始密码（至少 8 位）"><label><input id="new-admin" type="checkbox"> 管理员</label><button class="primary" onclick="createUser()">创建用户</button></div>
+<table><thead><tr><th>ID</th><th>用户名</th><th>角色</th><th>状态</th><th>设备</th><th>会话</th><th>累计 Token</th><th>操作</th></tr></thead><tbody id="users"></tbody></table></section>
+<section class="card"><h2>设备管理</h2><div class="row"><label>按用户查询 <select id="device-user-filter" onchange="load()"><option value="">全部用户 / 未绑定设备</option></select></label></div><table><thead><tr><th>设备 ID</th><th>名称/识别码</th><th>所有者</th><th>设备状态</th><th>在线</th><th>累计 / 本月 Token</th><th>最后出现</th><th>操作</th></tr></thead><tbody id="devices"></tbody></table></section>
+<section class="card"><h2>管理员操作审计</h2><table><thead><tr><th>时间</th><th>管理员</th><th>操作</th><th>对象</th><th>详情</th></tr></thead><tbody id="audit"></tbody></table></section>
+</main><div id="msg"></div>
+<script>
+let data={users:[],devices:[]}; const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+async function api(url,options={}){const r=await fetch(url,options);let d={};try{d=await r.json()}catch{}if(!r.ok)throw Error(d.error||("HTTP "+r.status));return d}
+function toast(s,bad=false){const n=document.getElementById("msg");n.textContent=s;n.style.background=bad?"#a93649":"#17364d";n.style.display="block";setTimeout(()=>n.style.display="none",2800)}
+async function load(){try{const selected=document.getElementById("device-user-filter")?.value||"";data=await api("/api/admin/overview"+(selected?"?user_id="+encodeURIComponent(selected):""));render()}catch(e){toast(e.message,true)}}
+function render(){document.getElementById("env").textContent="环境："+data.environment;document.getElementById("user-count").textContent=data.counts.users;document.getElementById("admin-count").textContent=data.counts.admins;document.getElementById("device-count").textContent=data.counts.devices;document.getElementById("online-count").textContent=data.counts.online_devices;
+const filter=document.getElementById("device-user-filter"),selected=String(data.selected_user_id??filter.value??"");filter.innerHTML='<option value="">全部用户 / 未绑定设备</option>'+data.users.map(u=>`<option value="${u.id}">${esc(u.username)}</option>`).join('');filter.value=selected;const usage=new Map((data.usage_by_user_device||[]).map(x=>[x.user_id+'|'+x.device_id,x]));const userTokens=id=>(data.usage_by_user_device||[]).filter(x=>x.user_id===id).reduce((s,x)=>s+Number(x.total_tokens||0),0);
+document.getElementById("users").innerHTML=data.users.map(u=>`<tr><td>${u.id}</td><td>${esc(u.username)}</td><td>${u.is_admin?'<span class="tag">管理员</span>':'用户'}</td><td>${u.is_active?'启用':'<span class="tag off">禁用</span>'}</td><td>${u.device_count}</td><td>${u.active_session_count}</td><td>${userTokens(u.id).toLocaleString()}</td><td><button onclick="toggleRole(${u.id},${!u.is_admin})">${u.is_admin?'取消管理员':'设为管理员'}</button> <button onclick="toggleActive(${u.id},${!u.is_active})">${u.is_active?'禁用':'启用'}</button> <button onclick="resetPassword(${u.id})">重置密码</button> <button class="danger" onclick="deleteUser(${u.id})">删除</button></td></tr>`).join("");
+const opts='<option value="">未绑定</option>'+data.users.filter(u=>u.is_active).map(u=>`<option value="${u.id}">${esc(u.username)}</option>`).join('');
+document.getElementById("devices").innerHTML=data.devices.map(d=>{const u=usage.get((d.owner_user_id||'')+'|'+d.device_id)||{};return `<tr><td><code>${esc(d.device_id)}</code></td><td>${esc(d.name||'—')}<br><small>${esc(d.identifier||'—')}</small></td><td><select id="owner-${esc(d.device_id)}">${opts}</select></td><td>${d.is_active?'<span class="tag">启用</span>':'<span class="tag off">已禁用</span>'}</td><td>${d.online?'<span class="tag">在线</span>':'离线'}</td><td>${Number(u.total_tokens||0).toLocaleString()} / ${Number(u.month_tokens||0).toLocaleString()}<br><small>${u.turns||0} 轮</small></td><td>${new Date(d.last_seen*1000).toLocaleString()}</td><td><button onclick="assignDevice('${esc(d.device_id)}')">保存所有者</button> <button onclick="toggleDevice('${esc(d.device_id)}',${!d.is_active})">${d.is_active?'禁用设备':'启用设备'}</button> <button onclick="switchEnvironment('${esc(d.device_id)}')" ${d.online&&d.is_active?'':'disabled'}>切换环境</button> <button onclick="unbindDevice('${esc(d.device_id)}')">解绑</button> <button class="danger" onclick="deleteDevice('${esc(d.device_id)}')">删除记录</button></td></tr>`}).join('');data.devices.forEach(d=>{const e=document.getElementById('owner-'+d.device_id);if(e)e.value=d.owner_user_id||''});
+document.getElementById("audit").innerHTML=data.audit.map(a=>`<tr><td>${new Date(a.created_at*1000).toLocaleString()}</td><td>${esc(a.admin_username||a.admin_user_id||'—')}</td><td>${esc(a.action)}</td><td>${esc(a.target_type)} #${esc(a.target_id)}</td><td><code>${esc(JSON.stringify(a.details))}</code></td></tr>`).join('')}
+async function post(url,body){await api(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});await load();toast('操作成功')}
+async function createUser(){try{await post('/api/admin/users/create',{username:document.getElementById('new-user').value,password:document.getElementById('new-password').value,is_admin:document.getElementById('new-admin').checked})}catch(e){toast(e.message,true)}}
+async function toggleRole(id,is_admin){try{await post('/api/admin/users/update',{user_id:id,is_admin})}catch(e){toast(e.message,true)}}async function toggleActive(id,is_active){try{await post('/api/admin/users/update',{user_id:id,is_active})}catch(e){toast(e.message,true)}}
+async function resetPassword(id){const password=prompt('输入新密码（至少 8 位）');if(!password)return;try{await post('/api/admin/users/update',{user_id:id,password})}catch(e){toast(e.message,true)}}async function deleteUser(id){if(!confirm('永久删除该用户及其对话、记忆？设备会变为未绑定。'))return;try{await post('/api/admin/users/delete',{user_id:id})}catch(e){toast(e.message,true)}}
+async function assignDevice(id){const owner=document.getElementById('owner-'+id).value;try{await post('/api/admin/devices/assign',{device_id:id,owner_user_id:owner||null})}catch(e){toast(e.message,true)}}async function unbindDevice(id){if(!confirm('确认解绑设备？'))return;try{await post('/api/admin/devices/assign',{device_id:id,owner_user_id:null})}catch(e){toast(e.message,true)}}async function deleteDevice(id){if(!confirm('永久删除设备登记？设备再次连接时会重新登记。'))return;try{await post('/api/admin/devices/delete',{device_id:id})}catch(e){toast(e.message,true)}}load();setInterval(load,10000);
+async function toggleDevice(id,is_active){if(!confirm(is_active?'确认启用该设备？':'确认禁用该设备？禁用后设备会断开且无法连接。'))return;try{await post('/api/admin/devices/update',{device_id:id,is_active})}catch(e){toast(e.message,true)}}
+async function switchEnvironment(id){const environment=prompt('目标环境：test 或 production','test');if(!environment)return;const ota_url=prompt('目标环境 OTA 地址，例如 http://192.168.31.237:8082/ota');if(!ota_url)return;if(!confirm('设备将保存新地址并立即重启，确认继续？'))return;try{await post('/api/admin/devices/switch-environment',{device_id:id,environment,ota_url,reboot:true})}catch(e){toast(e.message,true)}}
+</script></body></html>"""
 
 
 # ---------------------------------------------------------------------------
@@ -1241,6 +1398,7 @@ class Dashboard:
         app.router.add_get("/register", self.register_page)
         app.router.add_post("/register", self.register)
         app.router.add_get("/logout", self.logout)
+        app.router.add_get("/admin", self.admin_page)
         app.router.add_get("/api/me", self.api_me)
         app.router.add_get("/api/devices", self.api_devices)
         app.router.add_post("/api/devices/bind", self.api_device_bind)
@@ -1254,6 +1412,7 @@ class Dashboard:
         app.router.add_post("/api/memories/update", self.api_memory_update)
         app.router.add_post("/api/memories/delete", self.api_memory_delete)
         app.router.add_post("/api/memories/summarize", self.api_memory_summarize)
+        app.router.add_get("/api/usage", self.api_usage)
         app.router.add_get("/api/features", self.api_features_get)
         app.router.add_post("/api/features", self.api_features_set)
         app.router.add_get("/api/status", self.api_status)
@@ -1266,6 +1425,15 @@ class Dashboard:
         app.router.add_post("/api/test/mcp", self.api_test_mcp)
         app.router.add_post("/api/camera/upload", self.api_camera_upload)
         app.router.add_get("/api/camera/latest", self.api_camera_latest)
+        app.router.add_get("/api/admin/overview", self.api_admin_overview)
+        app.router.add_post("/api/admin/users/create", self.api_admin_user_create)
+        app.router.add_post("/api/admin/users/update", self.api_admin_user_update)
+        app.router.add_post("/api/admin/users/delete", self.api_admin_user_delete)
+        app.router.add_post("/api/admin/devices/assign", self.api_admin_device_assign)
+        app.router.add_post("/api/admin/devices/update", self.api_admin_device_update)
+        app.router.add_post("/api/admin/devices/delete", self.api_admin_device_delete)
+        app.router.add_post("/api/admin/devices/switch-environment",
+                            self.api_admin_device_switch_environment)
 
     # ------------------------------------------------------------------
     # 鉴权辅助
@@ -1289,9 +1457,27 @@ class Dashboard:
 
     def _require_owned_device(self, request, device_id):
         user = self._require_user(request)
-        if not self.account_store.user_owns_device(user["id"], device_id):
+        if not self.account_store.user_can_access_device(user["id"], device_id):
             raise web.HTTPForbidden(text="device does not belong to this user")
         return user
+
+    def _require_admin(self, request):
+        user = self._require_user(request)
+        if not user.get("is_admin"):
+            raise web.HTTPForbidden(text="administrator access required")
+        return user
+
+    @staticmethod
+    def _target_user_id(user, requested_user_id):
+        if requested_user_id in (None, ""):
+            return user["id"]
+        try:
+            target_user_id = int(requested_user_id)
+        except (TypeError, ValueError) as exc:
+            raise web.HTTPBadRequest(text="invalid user_id") from exc
+        if target_user_id != user["id"] and not user.get("is_admin"):
+            raise web.HTTPForbidden(text="administrator access required")
+        return target_user_id
 
     # ------------------------------------------------------------------
     # 登录
@@ -1359,6 +1545,197 @@ class Dashboard:
         if not self._check_cookie(request):
             raise web.HTTPFound("/login")
         return web.Response(text=DASHBOARD_HTML, content_type="text/html", charset="utf-8")
+
+    async def admin_page(self, request):
+        self._require_admin(request)
+        return web.Response(text=ADMIN_HTML, content_type="text/html", charset="utf-8")
+
+    async def api_admin_overview(self, request):
+        self._require_admin(request)
+        users = self.account_store.list_users_for_admin()
+        owner_filter = request.query.get("user_id")
+        if owner_filter not in (None, ""):
+            owner_filter = int(owner_filter)
+            devices = self.account_store.list_devices_owned_by(owner_filter)
+        else:
+            devices = self.account_store.list_user_devices(self._current_user(request)["id"])
+        for device in devices:
+            session = self.sessions.get(device["device_id"])
+            device["online"] = bool(
+                session is not None and
+                not getattr(getattr(session, "ws", None), "closed", False))
+        return web.json_response({
+            "environment": self.config.get("environment", "production"),
+            "counts": {
+                "users": len(users),
+                "admins": sum(1 for item in users if item["is_admin"] and item["is_active"]),
+                "devices": len(devices),
+                "online_devices": sum(1 for item in devices if item["online"]),
+            },
+            "capabilities": self.config.get("runtime", {}),
+            "users": users,
+            "devices": devices,
+            "selected_user_id": owner_filter,
+            "usage_by_user_device": self.account_store.usage_by_user_device(),
+            "audit": self.account_store.list_admin_audit(100),
+        })
+
+    async def api_admin_user_create(self, request):
+        admin = self._require_admin(request)
+        try:
+            data = await request.json()
+            is_admin = data.get("is_admin", False)
+            if not isinstance(is_admin, bool):
+                raise ValueError("is_admin 必须是布尔值")
+            user = self.account_store.register_user(
+                data.get("username"), data.get("password"), is_admin)
+            self.account_store.audit_admin_action(
+                admin["id"], "user.create", "user", user["id"],
+                {"username": user["username"], "is_admin": user["is_admin"]})
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        return web.json_response(user, status=201)
+
+    async def api_admin_user_update(self, request):
+        admin = self._require_admin(request)
+        try:
+            data = await request.json()
+            user_id = int(data.pop("user_id"))
+            allowed = {key: data[key] for key in ("is_admin", "is_active", "password")
+                       if key in data}
+            if not allowed:
+                raise ValueError("没有可更新的字段")
+            for key in ("is_admin", "is_active"):
+                if key in allowed and not isinstance(allowed[key], bool):
+                    raise ValueError("{} 必须是布尔值".format(key))
+            if "password" in allowed and not isinstance(allowed["password"], str):
+                raise ValueError("password 必须是字符串")
+            user = self.account_store.update_user_for_admin(
+                admin["id"], user_id, **allowed)
+            audit_details = {key: value for key, value in allowed.items()
+                             if key != "password"}
+            if "password" in allowed:
+                audit_details["password_reset"] = True
+            self.account_store.audit_admin_action(
+                admin["id"], "user.update", "user", user_id, audit_details)
+        except (ValueError, TypeError, KeyError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        return web.json_response(user)
+
+    async def api_admin_user_delete(self, request):
+        admin = self._require_admin(request)
+        try:
+            data = await request.json()
+            user_id = int(data.get("user_id"))
+            affected = [item["device_id"] for item in
+                        self.account_store.list_devices_owned_by(user_id)]
+            self.account_store.delete_user_for_admin(admin["id"], user_id)
+            self.account_store.audit_admin_action(
+                admin["id"], "user.delete", "user", user_id,
+                {"unbound_devices": affected})
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        for device_id in affected:
+            session = self.sessions.get(device_id)
+            if session is not None:
+                await session.close()
+        return web.json_response({"success": True})
+
+    async def api_admin_device_assign(self, request):
+        admin = self._require_admin(request)
+        try:
+            data = await request.json()
+            device_id = self.account_store.normalize_device_id(data.get("device_id"))
+            device = self.account_store.assign_device_for_admin(
+                device_id, data.get("owner_user_id"), data.get("identifier"), data.get("name"))
+            self.account_store.audit_admin_action(
+                admin["id"], "device.assign", "device", device_id,
+                {"owner_user_id": device.get("owner_user_id")})
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        session = self.sessions.get(device_id)
+        if session is not None:
+            await session.close()
+        return web.json_response(device)
+
+    async def api_admin_device_update(self, request):
+        admin = self._require_admin(request)
+        try:
+            data = await request.json()
+            device_id = self.account_store.normalize_device_id(data.get("device_id"))
+            device = self.account_store.set_device_active_for_admin(
+                device_id, data.get("is_active"))
+            self.account_store.audit_admin_action(
+                admin["id"], "device.update", "device", device_id,
+                {"is_active": device["is_active"]})
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        if not device["is_active"]:
+            session = self.sessions.get(device_id)
+            if session is not None:
+                await session.close()
+        return web.json_response(device)
+
+    async def api_admin_device_delete(self, request):
+        admin = self._require_admin(request)
+        try:
+            data = await request.json()
+            device_id = self.account_store.normalize_device_id(data.get("device_id"))
+            self.account_store.delete_device_for_admin(device_id)
+            self.account_store.audit_admin_action(
+                admin["id"], "device.delete", "device", device_id)
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        session = self.sessions.get(device_id)
+        if session is not None:
+            await session.close()
+        return web.json_response({"success": True})
+
+    @staticmethod
+    def _validate_environment_url(environment, ota_url):
+        environment = str(environment or "").strip().lower()
+        ota_url = str(ota_url or "").strip()
+        if environment not in ("test", "production"):
+            raise ValueError("环境必须是 test 或 production")
+        if len(ota_url) > 512:
+            raise ValueError("OTA 地址过长")
+        parsed = urlparse(ota_url)
+        if not parsed.hostname or parsed.path.rstrip("/") != "/ota":
+            raise ValueError("OTA 地址必须是以 /ota 结尾的完整地址")
+        if environment == "production" and parsed.scheme != "https":
+            raise ValueError("生产环境 OTA 地址必须使用 HTTPS")
+        if environment == "test":
+            if parsed.scheme not in ("http", "https"):
+                raise ValueError("测试环境 OTA 地址必须使用 HTTP 或 HTTPS")
+        return environment, ota_url
+
+    async def api_admin_device_switch_environment(self, request):
+        admin = self._require_admin(request)
+        try:
+            data = await request.json()
+            device_id = self.account_store.normalize_device_id(data.get("device_id"))
+            if self.account_store.get_device(device_id) is None:
+                raise ValueError("设备不存在")
+            environment, ota_url = self._validate_environment_url(
+                data.get("environment"), data.get("ota_url"))
+            session = self.sessions.get(device_id)
+            if session is None or getattr(getattr(session, "ws", None), "closed", False):
+                return web.json_response({"error": "设备不在线，无法切换环境"}, status=409)
+            await session.send_json({
+                "type": "system", "command": "set_ota_url",
+                "environment": environment, "ota_url": ota_url,
+                "reboot": bool(data.get("reboot", True)),
+            })
+            self.account_store.audit_admin_action(
+                admin["id"], "device.switch_environment", "device", device_id,
+                {"environment": environment, "ota_url": ota_url,
+                 "reboot": bool(data.get("reboot", True))})
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        return web.json_response({
+            "accepted": True, "device_id": device_id,
+            "environment": environment, "rebooting": bool(data.get("reboot", True)),
+        }, status=202)
 
     def _effective_model_settings(self, device_id):
         settings = {
@@ -1542,43 +1919,74 @@ class Dashboard:
 
     async def api_memories(self, request):
         user = self._require_user(request)
-        return web.json_response({"memories": self.account_store.list_memories(user["id"])})
+        target_user_id = self._target_user_id(user, request.query.get("user_id"))
+        return web.json_response({
+            "user_id": target_user_id,
+            "memories": self.account_store.list_memories(target_user_id),
+        })
+
+    async def api_usage(self, request):
+        user = self._require_user(request)
+        device_id = request.query.get("device_id") or None
+        if device_id and not self.account_store.user_can_access_device(user["id"], device_id):
+            raise web.HTTPForbidden(text="无权访问该设备")
+        target_user_id = self.account_store.device_owner_id(device_id) if device_id else user["id"]
+        if target_user_id is None:
+            target_user_id = user["id"]
+        if not user.get("is_admin") and target_user_id != user["id"]:
+            raise web.HTTPForbidden(text="无权访问该用量")
+        by_device = []
+        devices = self.account_store.list_devices_owned_by(target_user_id)
+        for device in devices:
+            by_device.append({
+                "device_id": device["device_id"], "name": device["name"],
+                "identifier": device["identifier"],
+                "usage": self.account_store.usage_summary(target_user_id, device["device_id"]),
+            })
+        return web.json_response({
+            "user_id": target_user_id,
+            "usage": self.account_store.usage_summary(target_user_id, device_id),
+            "by_device": by_device,
+        })
 
     async def api_memory_create(self, request):
         user = self._require_user(request)
         try:
             data = await request.json()
+            target_user_id = self._target_user_id(user, data.pop("user_id", None))
             memory = self.account_store.upsert_memory(
-                user["id"], data.get("category"), data.get("label"),
+                target_user_id, data.get("category"), data.get("label"),
                 data.get("value"), data.get("enabled", True))
         except (ValueError, TypeError) as exc:
             return web.json_response({"error": str(exc)}, status=400)
-        self._refresh_user_sessions(user["id"])
+        self._refresh_user_sessions(target_user_id)
         return web.json_response(memory)
 
     async def api_memory_update(self, request):
         user = self._require_user(request)
         try:
             data = await request.json()
+            target_user_id = self._target_user_id(user, data.pop("user_id", None))
             memories = self.account_store.update_memory(
-                user["id"], data.pop("id"), **data)
+                target_user_id, data.pop("id"), **data)
         except PermissionError as exc:
             return web.json_response({"error": str(exc)}, status=403)
         except (ValueError, TypeError, KeyError) as exc:
             return web.json_response({"error": str(exc)}, status=400)
-        self._refresh_user_sessions(user["id"])
+        self._refresh_user_sessions(target_user_id)
         return web.json_response({"memories": memories})
 
     async def api_memory_delete(self, request):
         user = self._require_user(request)
         try:
             data = await request.json()
-            self.account_store.delete_memory(user["id"], data.get("id"))
+            target_user_id = self._target_user_id(user, data.pop("user_id", None))
+            self.account_store.delete_memory(target_user_id, data.get("id"))
         except PermissionError as exc:
             return web.json_response({"error": str(exc)}, status=403)
         except (ValueError, TypeError) as exc:
             return web.json_response({"error": str(exc)}, status=400)
-        self._refresh_user_sessions(user["id"])
+        self._refresh_user_sessions(target_user_id)
         return web.json_response({"success": True})
 
     async def api_memory_summarize(self, request):
@@ -1620,7 +2028,7 @@ class Dashboard:
         return web.json_response(features)
 
     def _refresh_user_sessions(self, user_id):
-        for device in self.account_store.list_user_devices(user_id):
+        for device in self.account_store.list_devices_owned_by(user_id):
             self._refresh_active_device_config(device["device_id"])
 
     async def api_status(self, request):
@@ -1654,7 +2062,8 @@ class Dashboard:
             base = base[:-3]
         return web.json_response({
             "health": {"status": "ok", "time": time.time()},
-            "server": {"uptime": now - self.start_time},
+            "server": {"uptime": now - self.start_time,
+                       "environment": cfg.get("environment", "production")},
             "user": user,
             "devices": devices,
             "ota_requests": [device["device_id"] for device in devices],

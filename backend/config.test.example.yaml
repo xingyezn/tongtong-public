@@ -1,10 +1,11 @@
-# Public-safe backend configuration example.
-# Use private/local.example.yaml plus scripts/configure_local.py for real values.
-environment: "production"
+# Isolated local/LAN test backend. Copy to config.test.yaml before use.
+environment: "test"
+
 server:
   host: "0.0.0.0"
-  port: 8080
-  public_ws_url: "wss://your-server.example/ws"
+  port: 8082
+  # scripts/start_test_backend.ps1 overrides this with the selected LAN host.
+  public_ws_url: "ws://127.0.0.1:8082/ws"
 
 dashscope:
   api_key: ""
@@ -21,8 +22,7 @@ audio:
   opus_frame_ms: 60
   omni_input_format: "wav"
   omni_output_format: "wav"
-  # Keep 0.9 s of model audio before device playback to prevent stream jitter.
-  # Valid range: 240-1500 ms.  Lower only on a stable LAN after testing.
+  # Public test service: trade a little initial latency for uninterrupted TTS.
   tts_startup_buffer_ms: 900
 
 devices:
@@ -33,8 +33,6 @@ logging:
   level: "INFO"
 
 vad:
-  # Tuned for the on-board microphone and speaker; prevents idle noise and
-  # speaker tail from being treated as a new voice command.
   silence_duration_ms: 600
   energy_threshold: 600.0
 
@@ -43,11 +41,11 @@ dashboard:
   registration_enabled: true
 
 storage:
-  database: "data/tongtong.db"
+  # Never point a test process at the production database.
+  database: "data/test/tongtong-test.db"
 
 memory:
   enabled: true
   model: "qwen3.8-max"
-  # Empty means https://{workspace_id}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
   compatible_url: ""
   max_memories_per_run: 12

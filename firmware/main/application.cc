@@ -510,6 +510,11 @@ void Application::CheckNewVersion() {
         // This will block the loop until the activation is done or timeout
         for (int i = 0; i < 10; ++i) {
             ESP_LOGI(TAG, "Activating... %d/%d", i + 1, 10);
+            // Keep announcing the binding code so the user can hear it while
+            // waiting for the dashboard binding to complete.
+            if (ota_->HasActivationCode()) {
+                PlayActivationCodeSound(ota_->GetActivationCode());
+            }
             esp_err_t err = ota_->Activate();
             if (err == ESP_OK) {
                 break;
@@ -659,6 +664,30 @@ void Application::InitializeProtocol() {
                     ESP_LOGI(TAG, "Conversation config: auto=%d button=%d double_end=%d",
                         automatic_interrupt_enabled_, button_interrupt_enabled_,
                         double_click_end_enabled_);
+                } else if (strcmp(command->valuestring, "set_ota_url") == 0) {
+                    auto ota_url = cJSON_GetObjectItem(root, "ota_url");
+                    auto environment = cJSON_GetObjectItem(root, "environment");
+                    auto reboot = cJSON_GetObjectItem(root, "reboot");
+                    if (!cJSON_IsString(ota_url) ||
+                        (strncmp(ota_url->valuestring, "https://", 8) != 0 &&
+                         strncmp(ota_url->valuestring, "http://", 7) != 0) ||
+                        strlen(ota_url->valuestring) > 512) {
+                        ESP_LOGE(TAG, "Rejected invalid OTA environment URL");
+                    } else {
+                        Settings settings("wifi", true);
+                        settings.SetString("ota_url", ota_url->valuestring);
+                        if (cJSON_IsString(environment)) {
+                            settings.SetString("server_environment", environment->valuestring);
+                        }
+                        ESP_LOGW(TAG, "Server environment changed to %s",
+                            cJSON_IsString(environment) ? environment->valuestring : "custom");
+                        if (!cJSON_IsBool(reboot) || cJSON_IsTrue(reboot)) {
+                            Schedule([this]() {
+                                vTaskDelay(pdMS_TO_TICKS(1000));
+                                Reboot();
+                            });
+                        }
+                    }
                 } else if (strcmp(command->valuestring, "standby") == 0) {
                     // The server sends this only after the assistant's final
                     // farewell text has been saved and its TTS stream closed.
@@ -708,13 +737,19 @@ void Application::InitializeProtocol() {
 }
 
 void Application::ShowActivationCode(const std::string& code, const std::string& message) {
+    // This sentence uses 9KB of SRAM, so we need to wait for it to finish
+    Alert(Lang::Strings::ACTIVATION, message.c_str(), "link", Lang::Sounds::OGG_ACTIVATION);
+    PlayActivationCodeSound(code);
+}
+
+void Application::PlayActivationCodeSound(const std::string& code) {
     struct digit_sound {
         char digit;
         const std::string_view& sound;
     };
     static const std::array<digit_sound, 10> digit_sounds{{
         digit_sound{'0', Lang::Sounds::OGG_0},
-        digit_sound{'1', Lang::Sounds::OGG_1}, 
+        digit_sound{'1', Lang::Sounds::OGG_1},
         digit_sound{'2', Lang::Sounds::OGG_2},
         digit_sound{'3', Lang::Sounds::OGG_3},
         digit_sound{'4', Lang::Sounds::OGG_4},
@@ -724,9 +759,6 @@ void Application::ShowActivationCode(const std::string& code, const std::string&
         digit_sound{'8', Lang::Sounds::OGG_8},
         digit_sound{'9', Lang::Sounds::OGG_9}
     }};
-
-    // This sentence uses 9KB of SRAM, so we need to wait for it to finish
-    Alert(Lang::Strings::ACTIVATION, message.c_str(), "link", Lang::Sounds::OGG_ACTIVATION);
 
     for (const auto& digit : code) {
         auto it = std::find_if(digit_sounds.begin(), digit_sounds.end(),

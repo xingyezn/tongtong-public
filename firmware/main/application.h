@@ -179,6 +179,7 @@ private:
     void CheckNewVersion();
     void InitializeProtocol();
     void ShowActivationCode(const std::string& code, const std::string& message);
+    void PlayActivationCodeSound(const std::string& code);
     void SetListeningMode(ListeningMode mode);
     void HandleTtsStopped();
     void ResumeListeningAfterPlayback();

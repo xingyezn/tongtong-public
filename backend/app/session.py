@@ -31,8 +31,14 @@ BIN_V3 = 3
 # 上行 OPUS 参数（设备 hello 上报）
 DEVICE_SAMPLE_RATE = 16000
 DEVICE_FRAME_MS = 60
-# Four frames give the device 240 ms of jitter headroom before playback.
-TTS_PLAYBACK_PREBUFFER_FRAMES = 4
+# Realtime model audio arrives in uneven network-sized chunks.  A 240 ms
+# buffer only protects one chunk, which makes the device run dry whenever the
+# next chunk is delayed briefly.  Keep enough audio ahead to absorb normal
+# public-network and model scheduling jitter.  The value can be tuned per
+# environment with ``audio.tts_startup_buffer_ms``.
+TTS_STARTUP_BUFFER_MS = 900
+TTS_MIN_STARTUP_BUFFER_MS = 240
+TTS_MAX_STARTUP_BUFFER_MS = 1500
 AI_DISPLAY_UPDATE_INTERVAL_S = 0.18
 # Covers WebSocket transit and the device's decoder/DMA pipeline after the
 # model has finished generating its audio stream.
@@ -165,6 +171,23 @@ class Session:
 
     def _vad_energy_threshold(self) -> float:
         return float(self.config.get("vad", {}).get("energy_threshold", 120.0))
+
+    def _tts_startup_prebuffer_frames(self) -> int:
+        """Return the number of 60 ms frames held before starting playback.
+
+        Keeping this configurable allows a LAN deployment to favour response
+        latency while the public test/production services favour continuity.
+        The lower bound matches the firmware decoder's own prebuffer.
+        """
+        raw = self.config.get("audio", {}).get(
+            "tts_startup_buffer_ms", TTS_STARTUP_BUFFER_MS)
+        try:
+            buffer_ms = int(raw)
+        except (TypeError, ValueError):
+            buffer_ms = TTS_STARTUP_BUFFER_MS
+        buffer_ms = max(TTS_MIN_STARTUP_BUFFER_MS,
+                        min(TTS_MAX_STARTUP_BUFFER_MS, buffer_ms))
+        return max(1, (buffer_ms + DEVICE_FRAME_MS - 1) // DEVICE_FRAME_MS)
 
     @property
     def mcp(self):
@@ -442,10 +465,15 @@ class Session:
             "started_at": None,
             "audio_duration_s": 0.0,
             "next_frame_send_at": None,
+            "model_audio_events": 0,
+            "last_model_audio_at": None,
+            "max_model_audio_gap_s": 0.0,
+            "startup_prebuffer_frames": self._tts_startup_prebuffer_frames(),
         }
         self._active_stream_state = stream_state
         text_parts = []
         input_transcript = ""
+        token_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         last_display_update = 0.0
         last_display_text = ""
 
@@ -474,6 +502,12 @@ class Session:
                 if input_transcript:
                     log.info("user transcript: %s", input_transcript)
                     await self.send_json({"type": "stt", "text": input_transcript})
+            elif et == "usage":
+                for key in token_usage:
+                    try:
+                        token_usage[key] += max(0, int(evt.get(key, 0) or 0))
+                    except (TypeError, ValueError):
+                        pass
             elif et == "audio":
                 if not self._suppress_current_audio:
                     await self._stream_omni_audio(evt, stream_state)
@@ -489,8 +523,12 @@ class Session:
             log.info("omni reply: %s", assistant_text)
         if input_transcript and assistant_text and self.turn_recorder:
             try:
-                result = self.turn_recorder(
-                    self.device_id, input_transcript, assistant_text)
+                # Preserve compatibility with integrations that record only
+                # the three text fields until the provider exposes usage.
+                result = (self.turn_recorder(
+                    self.device_id, input_transcript, assistant_text, token_usage)
+                    if any(token_usage.values()) else self.turn_recorder(
+                        self.device_id, input_transcript, assistant_text))
                 if result:
                     self._schedule_conversation_summary(
                         result.get("ended_conversation_id")
@@ -560,11 +598,23 @@ class Session:
         if rate != self.server_sample_rate:
             pcm = resample_pcm(pcm, rate, self.server_sample_rate)
 
+        now = time.monotonic()
+        last_audio_at = state.get("last_model_audio_at")
+        if last_audio_at is not None:
+            gap = now - last_audio_at
+            state["max_model_audio_gap_s"] = max(
+                state.get("max_model_audio_gap_s", 0.0), gap)
+            # This is intentionally sampled at INFO: it identifies upstream
+            # stalls without dumping audio payloads or device data to logs.
+            if gap >= 0.25:
+                log.info("omni audio chunk gap %.3fs (device=%s)", gap, self.device_id)
+        state["last_model_audio_at"] = now
+        state["model_audio_events"] = state.get("model_audio_events", 0) + 1
         state["pcm"].extend(pcm)
         await self._send_buffered_omni_frames(state)
 
     async def _send_buffered_omni_frames(self, state: dict, final: bool = False):
-        """Send complete frames, bursting the initial 240 ms as a jitter buffer.
+        """Send complete frames, bursting the startup jitter buffer.
 
         After the initial burst, deadlines advance from the previous deadline
         instead of from the actual send time.  A late send therefore catches up
@@ -578,8 +628,10 @@ class Session:
         complete_frames = len(pcm) // frame_bytes
         if complete_frames == 0:
             return
+        startup_prebuffer_frames = state.get(
+            "startup_prebuffer_frames", self._tts_startup_prebuffer_frames())
         if (not state["started"] and not final
-                and complete_frames < TTS_PLAYBACK_PREBUFFER_FRAMES):
+                and complete_frames < startup_prebuffer_frames):
             return
 
         startup_burst = 0
@@ -590,7 +642,13 @@ class Session:
             state["next_frame_send_at"] = (
                 state["started_at"] + DEVICE_FRAME_MS / 1000.0)
             self.speaking = True
-            startup_burst = min(complete_frames, TTS_PLAYBACK_PREBUFFER_FRAMES)
+            startup_burst = min(complete_frames, startup_prebuffer_frames)
+            log.info(
+                "tts playback start: %.2fs buffered (%d frames, device=%s)",
+                startup_burst * DEVICE_FRAME_MS / 1000.0,
+                startup_burst,
+                self.device_id,
+            )
 
         for frame_index in range(complete_frames):
             chunk = bytes(pcm[:frame_bytes])
@@ -613,6 +671,15 @@ class Session:
             self.speaking = False
             return
         await self._send_buffered_omni_frames(state, final=True)
+
+        if state.get("model_audio_events"):
+            log.info(
+                "omni audio stream: chunks=%d, max_gap=%.3fs, startup_buffer=%.2fs (device=%s)",
+                state["model_audio_events"],
+                state.get("max_model_audio_gap_s", 0.0),
+                state.get("startup_prebuffer_frames", 0) * DEVICE_FRAME_MS / 1000.0,
+                self.device_id,
+            )
 
         # The model can emit audio faster than real time. Do not use tts stop
         # as a mere network-stream marker: wait until the amount of PCM already

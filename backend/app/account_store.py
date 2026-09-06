@@ -54,6 +54,8 @@ class AccountStore:
                     username TEXT NOT NULL COLLATE NOCASE UNIQUE,
                     password_salt TEXT NOT NULL,
                     password_hash TEXT NOT NULL,
+                    is_admin INTEGER NOT NULL DEFAULT 0,
+                    is_active INTEGER NOT NULL DEFAULT 1,
                     created_at REAL NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS user_sessions (
@@ -68,6 +70,7 @@ class AccountStore:
                     device_id TEXT PRIMARY KEY COLLATE NOCASE,
                     client_id TEXT NOT NULL DEFAULT '',
                     owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    is_active INTEGER NOT NULL DEFAULT 1,
                     identifier TEXT COLLATE NOCASE,
                     display_name TEXT,
                     binding_code TEXT,
@@ -87,6 +90,9 @@ class AccountStore:
                     device_id TEXT NOT NULL,
                     user_text TEXT NOT NULL,
                     assistant_text TEXT NOT NULL,
+                    input_tokens INTEGER NOT NULL DEFAULT 0,
+                    output_tokens INTEGER NOT NULL DEFAULT 0,
+                    total_tokens INTEGER NOT NULL DEFAULT 0,
                     created_at REAL NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_conversations_user_device
@@ -126,7 +132,27 @@ class AccountStore:
                     updated_at REAL NOT NULL,
                     UNIQUE(user_id, category, label)
                 );
+                CREATE TABLE IF NOT EXISTS admin_audit_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    admin_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    action TEXT NOT NULL,
+                    target_type TEXT NOT NULL,
+                    target_id TEXT NOT NULL,
+                    details TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_admin_audit_created
+                    ON admin_audit_log(created_at DESC);
             """)
+            user_columns = {
+                row["name"] for row in self._db.execute("PRAGMA table_info(users)")
+            }
+            if "is_admin" not in user_columns:
+                self._db.execute(
+                    "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
+            if "is_active" not in user_columns:
+                self._db.execute(
+                    "ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
             columns = {
                 row["name"] for row in self._db.execute("PRAGMA table_info(devices)")
             }
@@ -139,6 +165,16 @@ class AccountStore:
             if "interruption_settings" not in columns:
                 self._db.execute(
                     "ALTER TABLE devices ADD COLUMN interruption_settings TEXT NOT NULL DEFAULT '{}'")
+            if "is_active" not in columns:
+                self._db.execute(
+                    "ALTER TABLE devices ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
+            turn_columns = {
+                row["name"] for row in self._db.execute("PRAGMA table_info(conversation_turns)")
+            }
+            for name in ("input_tokens", "output_tokens", "total_tokens"):
+                if name not in turn_columns:
+                    self._db.execute(
+                        "ALTER TABLE conversation_turns ADD COLUMN {} INTEGER NOT NULL DEFAULT 0".format(name))
             chat_columns = {
                 row["name"] for row in self._db.execute("PRAGMA table_info(chat_sessions)")
             }
@@ -228,7 +264,17 @@ class AccountStore:
 
     @staticmethod
     def _user_dict(row):
-        return {"id": row["id"], "username": row["username"]} if row else None
+        if not row:
+            return None
+        keys = set(row.keys())
+        result = {"id": row["id"], "username": row["username"]}
+        if "is_admin" in keys:
+            result["is_admin"] = bool(row["is_admin"])
+        if "is_active" in keys:
+            result["is_active"] = bool(row["is_active"])
+        if "created_at" in keys:
+            result["created_at"] = row["created_at"]
+        return result
 
     @staticmethod
     def _device_dict(row):
@@ -238,6 +284,9 @@ class AccountStore:
             "device_id": row["device_id"],
             "client_id": row["client_id"],
             "owner_user_id": row["owner_user_id"],
+            "is_active": bool(row["is_active"]) if "is_active" in set(row.keys()) else True,
+            "owner_username": (row["owner_username"] or "")
+                if "owner_username" in set(row.keys()) else "",
             "identifier": row["identifier"] or "",
             "name": row["display_name"] or "",
             "binding_code": row["binding_code"],
@@ -258,7 +307,7 @@ class AccountStore:
         except (TypeError, ValueError):
             return {}
 
-    def register_user(self, username, password):
+    def register_user(self, username, password, is_admin=False):
         username = (username or "").strip()
         if not USERNAME_RE.fullmatch(username):
             raise AccountError("用户名需为 3～64 个字符，且不能包含空格、斜杠")
@@ -269,13 +318,16 @@ class AccountStore:
         try:
             with self._lock, self._db:
                 cursor = self._db.execute(
-                    "INSERT INTO users(username,password_salt,password_hash,created_at) VALUES(?,?,?,?)",
-                    (username, salt, password_hash, time.time()),
+                    """INSERT INTO users(
+                           username,password_salt,password_hash,is_admin,is_active,created_at)
+                       VALUES(?,?,?,?,1,?)""",
+                    (username, salt, password_hash, int(bool(is_admin)), time.time()),
                 )
                 user_id = cursor.lastrowid
         except sqlite3.IntegrityError as exc:
             raise AccountError("用户名已存在") from exc
-        return {"id": user_id, "username": username}
+        return {"id": user_id, "username": username,
+                "is_admin": bool(is_admin), "is_active": True}
 
     def authenticate(self, username, password):
         with self._lock:
@@ -283,7 +335,7 @@ class AccountStore:
                 "SELECT * FROM users WHERE username = ? COLLATE NOCASE",
                 ((username or "").strip(),),
             ).fetchone()
-        if not row or not isinstance(password, str):
+        if not row or not row["is_active"] or not isinstance(password, str):
             return None
         actual = self._password_hash(password, row["password_salt"])
         if not secrets.compare_digest(actual, row["password_hash"]):
@@ -309,9 +361,10 @@ class AccountStore:
         now = time.time()
         with self._lock, self._db:
             row = self._db.execute("""
-                SELECT u.id, u.username FROM user_sessions s
+                SELECT u.id, u.username, u.is_admin, u.is_active, u.created_at
+                FROM user_sessions s
                 JOIN users u ON u.id = s.user_id
-                WHERE s.token_hash = ? AND s.expires_at > ?
+                WHERE s.token_hash = ? AND s.expires_at > ? AND u.is_active = 1
             """, (token_hash, now)).fetchone()
             if row is None:
                 self._db.execute("DELETE FROM user_sessions WHERE token_hash = ?", (token_hash,))
@@ -323,6 +376,140 @@ class AccountStore:
         token_hash = hashlib.sha256(token.encode()).hexdigest()
         with self._lock, self._db:
             self._db.execute("DELETE FROM user_sessions WHERE token_hash = ?", (token_hash,))
+
+    def ensure_admin(self, username, password):
+        """Create or promote a bootstrap admin without weakening normal registration."""
+        username = (username or "").strip()
+        if not username or not password:
+            return None
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM users WHERE username=? COLLATE NOCASE", (username,)
+            ).fetchone()
+        if row is None:
+            return self.register_user(username, password, is_admin=True)
+        with self._lock, self._db:
+            self._db.execute(
+                "UPDATE users SET is_admin=1,is_active=1 WHERE id=?", (row["id"],))
+            row = self._db.execute("SELECT * FROM users WHERE id=?", (row["id"],)).fetchone()
+        return self._user_dict(row)
+
+    def is_admin(self, user_id):
+        with self._lock:
+            row = self._db.execute(
+                "SELECT is_admin,is_active FROM users WHERE id=?", (int(user_id),)
+            ).fetchone()
+        return bool(row and row["is_admin"] and row["is_active"])
+
+    def user_can_access_device(self, user_id, device_id):
+        return self.is_admin(user_id) or self.user_owns_device(user_id, device_id)
+
+    def list_users_for_admin(self):
+        with self._lock:
+            rows = self._db.execute("""
+                SELECT u.id,u.username,u.is_admin,u.is_active,u.created_at,
+                       COUNT(DISTINCT d.device_id) AS device_count,
+                       COUNT(DISTINCT s.token_hash) AS active_session_count
+                FROM users u
+                LEFT JOIN devices d ON d.owner_user_id=u.id
+                LEFT JOIN user_sessions s ON s.user_id=u.id AND s.expires_at>?
+                GROUP BY u.id ORDER BY u.created_at,u.id
+            """, (time.time(),)).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["is_admin"] = bool(item["is_admin"])
+            item["is_active"] = bool(item["is_active"])
+            result.append(item)
+        return result
+
+    def update_user_for_admin(self, admin_user_id, user_id, *, is_admin=None,
+                              is_active=None, password=None):
+        admin_user_id = int(admin_user_id)
+        user_id = int(user_id)
+        with self._lock, self._db:
+            row = self._db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+            if row is None:
+                raise AccountError("用户不存在")
+            next_admin = bool(row["is_admin"] if is_admin is None else is_admin)
+            next_active = bool(row["is_active"] if is_active is None else is_active)
+            if user_id == admin_user_id and (not next_admin or not next_active):
+                raise AccountError("不能取消或禁用当前管理员账号")
+            if row["is_admin"] and row["is_active"] and (not next_admin or not next_active):
+                remaining = self._db.execute(
+                    "SELECT COUNT(*) FROM users WHERE is_admin=1 AND is_active=1 AND id<>?",
+                    (user_id,)).fetchone()[0]
+                if remaining == 0:
+                    raise AccountError("系统必须保留至少一个可用管理员")
+            self._db.execute(
+                "UPDATE users SET is_admin=?,is_active=? WHERE id=?",
+                (int(next_admin), int(next_active), user_id))
+            if password is not None:
+                if not isinstance(password, str) or not 8 <= len(password) <= 128:
+                    raise AccountError("密码长度需为 8～128 个字符")
+                salt = secrets.token_hex(16)
+                self._db.execute(
+                    "UPDATE users SET password_salt=?,password_hash=? WHERE id=?",
+                    (salt, self._password_hash(password, salt), user_id))
+            if not next_active or password is not None:
+                self._db.execute("DELETE FROM user_sessions WHERE user_id=?", (user_id,))
+            updated = self._db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        return self._user_dict(updated)
+
+    def delete_user_for_admin(self, admin_user_id, user_id):
+        admin_user_id = int(admin_user_id)
+        user_id = int(user_id)
+        if admin_user_id == user_id:
+            raise AccountError("不能删除当前管理员账号")
+        with self._lock, self._db:
+            row = self._db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+            if row is None:
+                raise AccountError("用户不存在")
+            if row["is_admin"] and row["is_active"]:
+                remaining = self._db.execute(
+                    "SELECT COUNT(*) FROM users WHERE is_admin=1 AND is_active=1 AND id<>?",
+                    (user_id,)).fetchone()[0]
+                if remaining == 0:
+                    raise AccountError("系统必须保留至少一个可用管理员")
+            device_rows = self._db.execute(
+                "SELECT device_id FROM devices WHERE owner_user_id=?", (user_id,)
+            ).fetchall()
+            for device in device_rows:
+                code = self._new_binding_code_locked()
+                self._db.execute("""
+                    UPDATE devices SET owner_user_id=NULL,identifier=NULL,display_name=NULL,
+                        binding_code=?,binding_code_expires_at=?,model_settings='{}',
+                        vad_settings='{}',memory_enabled=1,interruption_settings='{}',bound_at=NULL
+                    WHERE device_id=?
+                """, (code, time.time() + BINDING_CODE_TTL_SECONDS,
+                      device["device_id"]))
+            self._db.execute("DELETE FROM users WHERE id=?", (user_id,))
+
+    def audit_admin_action(self, admin_user_id, action, target_type, target_id,
+                           details=None):
+        with self._lock, self._db:
+            self._db.execute("""
+                INSERT INTO admin_audit_log(
+                    admin_user_id,action,target_type,target_id,details,created_at)
+                VALUES(?,?,?,?,?,?)
+            """, (int(admin_user_id), str(action), str(target_type), str(target_id),
+                  json.dumps(details or {}, ensure_ascii=False), time.time()))
+
+    def list_admin_audit(self, limit=100):
+        limit = max(1, min(500, int(limit)))
+        with self._lock:
+            rows = self._db.execute("""
+                SELECT a.id,a.admin_user_id,u.username AS admin_username,a.action,
+                       a.target_type,a.target_id,a.details,a.created_at
+                FROM admin_audit_log a LEFT JOIN users u ON u.id=a.admin_user_id
+                ORDER BY a.id DESC LIMIT ?
+            """, (limit,)).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["details"] = self._decode_json(item["details"])
+            result.append(item)
+        return result
 
     @staticmethod
     def normalize_device_id(device_id):
@@ -455,15 +642,93 @@ class AccountStore:
 
     def list_user_devices(self, user_id):
         with self._lock:
-            rows = self._db.execute("""
-                SELECT * FROM devices WHERE owner_user_id = ?
-                ORDER BY COALESCE(display_name, identifier, device_id) COLLATE NOCASE
-            """, (user_id,)).fetchall()
+            if self.is_admin(user_id):
+                rows = self._db.execute("""
+                    SELECT d.*,u.username AS owner_username FROM devices d
+                    LEFT JOIN users u ON u.id=d.owner_user_id
+                    ORDER BY COALESCE(d.display_name,d.identifier,d.device_id) COLLATE NOCASE
+                """).fetchall()
+            else:
+                rows = self._db.execute("""
+                    SELECT d.*,u.username AS owner_username FROM devices d
+                    LEFT JOIN users u ON u.id=d.owner_user_id
+                    WHERE d.owner_user_id = ?
+                    ORDER BY COALESCE(d.display_name,d.identifier,d.device_id) COLLATE NOCASE
+                """, (user_id,)).fetchall()
         return [self._device_dict(row) for row in rows]
+
+    def list_devices_owned_by(self, user_id):
+        """Return exactly one user's devices, even when that user is an admin."""
+        with self._lock:
+            rows = self._db.execute("""
+                SELECT d.*,u.username AS owner_username FROM devices d
+                LEFT JOIN users u ON u.id=d.owner_user_id
+                WHERE d.owner_user_id=?
+                ORDER BY COALESCE(d.display_name,d.identifier,d.device_id) COLLATE NOCASE
+            """, (int(user_id),)).fetchall()
+        return [self._device_dict(row) for row in rows]
+
+    def assign_device_for_admin(self, device_id, owner_user_id, identifier=None, name=None):
+        device_id = self.normalize_device_id(device_id)
+        owner_user_id = int(owner_user_id) if owner_user_id not in (None, "") else None
+        with self._lock, self._db:
+            row = self._db.execute("SELECT * FROM devices WHERE device_id=?", (device_id,)).fetchone()
+            if row is None:
+                raise AccountError("设备不存在")
+            if owner_user_id is None:
+                code = self._new_binding_code_locked()
+                self._db.execute("""
+                    UPDATE devices SET owner_user_id=NULL,identifier=NULL,display_name=NULL,
+                        binding_code=?,binding_code_expires_at=?,model_settings='{}',
+                        vad_settings='{}',memory_enabled=1,interruption_settings='{}',bound_at=NULL
+                    WHERE device_id=?
+                """, (code, time.time() + BINDING_CODE_TTL_SECONDS, device_id))
+            else:
+                user = self._db.execute(
+                    "SELECT id,is_active FROM users WHERE id=?", (owner_user_id,)).fetchone()
+                if user is None or not user["is_active"]:
+                    raise AccountError("目标用户不存在或已禁用")
+                identifier = (identifier or row["identifier"] or
+                              "device-{}".format(re.sub(r"[^a-z0-9]", "", device_id)[-6:]))
+                name = (name or row["display_name"] or device_id).strip()
+                if not DEVICE_IDENTIFIER_RE.fullmatch(identifier):
+                    raise AccountError("设备识别码格式无效")
+                if not 1 <= len(name) <= 64:
+                    raise AccountError("设备名称需为 1～64 个字符")
+                try:
+                    self._db.execute("""
+                        UPDATE devices SET owner_user_id=?,identifier=?,display_name=?,
+                            binding_code=NULL,binding_code_expires_at=NULL,
+                            model_settings='{}',vad_settings='{}',memory_enabled=1,
+                            interruption_settings='{}',bound_at=?
+                        WHERE device_id=?
+                    """, (owner_user_id, identifier, name, time.time(), device_id))
+                except sqlite3.IntegrityError as exc:
+                    raise AccountError("该用户已有相同识别码的设备") from exc
+        return self.get_device(device_id)
+
+    def set_device_active_for_admin(self, device_id, is_active):
+        device_id = self.normalize_device_id(device_id)
+        if not isinstance(is_active, bool):
+            raise AccountError("is_active 必须是布尔值")
+        with self._lock, self._db:
+            cursor = self._db.execute(
+                "UPDATE devices SET is_active=? WHERE device_id=?",
+                (int(is_active), device_id))
+            if cursor.rowcount != 1:
+                raise AccountError("设备不存在")
+        return self.get_device(device_id)
+
+    def delete_device_for_admin(self, device_id):
+        device_id = self.normalize_device_id(device_id)
+        with self._lock, self._db:
+            cursor = self._db.execute("DELETE FROM devices WHERE device_id=?", (device_id,))
+            if cursor.rowcount != 1:
+                raise AccountError("设备不存在")
 
     def update_device(self, user_id, device_id, identifier, name):
         device_id = self.normalize_device_id(device_id)
-        if not self.user_owns_device(user_id, device_id):
+        if not self.user_can_access_device(user_id, device_id):
             raise PermissionError("无权访问该设备")
         identifier = (identifier or "").strip()
         name = (name or "").strip()
@@ -483,7 +748,7 @@ class AccountStore:
 
     def unbind_device(self, user_id, device_id):
         device_id = self.normalize_device_id(device_id)
-        if not self.user_owns_device(user_id, device_id):
+        if not self.user_can_access_device(user_id, device_id):
             raise PermissionError("无权访问该设备")
         with self._lock, self._db:
             code = self._new_binding_code_locked()
@@ -510,7 +775,7 @@ class AccountStore:
 
     def set_model_settings(self, user_id, device_id, settings):
         device_id = self.normalize_device_id(device_id)
-        if not self.user_owns_device(user_id, device_id):
+        if not self.user_can_access_device(user_id, device_id):
             raise PermissionError("无权访问该设备")
         clean = {key: settings[key] for key in MODEL_SETTING_KEYS if key in settings}
         with self._lock, self._db:
@@ -536,7 +801,7 @@ class AccountStore:
 
     def set_vad_settings(self, user_id, device_id, settings):
         device_id = self.normalize_device_id(device_id)
-        if not self.user_owns_device(user_id, device_id):
+        if not self.user_can_access_device(user_id, device_id):
             raise PermissionError("无权访问该设备")
         clean = {key: settings[key] for key in VAD_SETTING_KEYS if key in settings}
         with self._lock, self._db:
@@ -569,7 +834,7 @@ class AccountStore:
 
     def set_device_features(self, user_id, device_id, settings):
         device_id = self.normalize_device_id(device_id)
-        if not self.user_owns_device(user_id, device_id):
+        if not self.user_can_access_device(user_id, device_id):
             raise PermissionError("无权访问该设备")
         current = self.get_device_features(device_id)
         for key in current:
@@ -584,7 +849,7 @@ class AccountStore:
         return current
 
     def record_turn(self, device_id, user_text, assistant_text,
-                    timeout_minutes=10):
+                    timeout_minutes=10, usage=None):
         device_id = self.normalize_device_id(device_id)
         user_text = (user_text or "").strip()
         assistant_text = (assistant_text or "").strip()
@@ -594,15 +859,26 @@ class AccountStore:
         if owner_id is None:
             return None
         now = time.time()
+        usage = usage if isinstance(usage, dict) else {}
+        def tokens(name):
+            try:
+                return max(0, int(usage.get(name, 0) or 0))
+            except (TypeError, ValueError):
+                return 0
+        input_tokens = tokens("input_tokens")
+        output_tokens = tokens("output_tokens")
+        total_tokens = tokens("total_tokens") or input_tokens + output_tokens
         # Kept in the signature for compatibility with older callers. A chat
         # is now bounded only by standby -> active conversation -> standby,
         # never by elapsed time between two turns.
         _ = timeout_minutes
         with self._lock, self._db:
             self._db.execute("""
-                INSERT INTO conversation_turns(user_id,device_id,user_text,assistant_text,created_at)
-                VALUES(?,?,?,?,?)
-            """, (owner_id, device_id, user_text, assistant_text, now))
+                INSERT INTO conversation_turns(
+                    user_id,device_id,user_text,assistant_text,input_tokens,output_tokens,total_tokens,created_at)
+                VALUES(?,?,?,?,?,?,?,?)
+            """, (owner_id, device_id, user_text, assistant_text, input_tokens,
+                  output_tokens, total_tokens, now))
             row = self._db.execute("""
                 SELECT id,last_message_at FROM chat_sessions
                 WHERE user_id=? AND device_id=? AND ended_at IS NULL
@@ -626,6 +902,61 @@ class AccountStore:
                 (now, conversation_id))
         return {"conversation_id": conversation_id,
                 "ended_conversation_id": None}
+
+    @staticmethod
+    def _usage_period_starts(now=None):
+        now = float(now or time.time())
+        local = time.localtime(now)
+        day = time.mktime((local.tm_year, local.tm_mon, local.tm_mday, 0, 0, 0,
+                           local.tm_wday, local.tm_yday, local.tm_isdst))
+        week = day - local.tm_wday * 86400
+        month = time.mktime((local.tm_year, local.tm_mon, 1, 0, 0, 0,
+                             local.tm_wday, local.tm_yday, local.tm_isdst))
+        return {"today": day, "week": week, "month": month, "all": 0}
+
+    def usage_summary(self, user_id=None, device_id=None, now=None):
+        """Return token-backed dialogue-turn totals for day/week/month/all."""
+        starts = self._usage_period_starts(now)
+        clauses, params = [], []
+        if user_id is not None:
+            clauses.append("user_id=?")
+            params.append(int(user_id))
+        if device_id is not None:
+            clauses.append("device_id=?")
+            params.append(self.normalize_device_id(device_id))
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        result = {}
+        with self._lock:
+            for period, start in starts.items():
+                period_where = where + (" AND " if where else " WHERE ") + "created_at>=?" if start else where
+                row = self._db.execute("""
+                    SELECT COUNT(*) AS turns, COALESCE(SUM(input_tokens),0) AS input_tokens,
+                           COALESCE(SUM(output_tokens),0) AS output_tokens,
+                           COALESCE(SUM(total_tokens),0) AS total_tokens
+                    FROM conversation_turns{}""".format(period_where),
+                    tuple(params + ([start] if start else []))).fetchone()
+                result[period] = dict(row)
+        return result
+
+    def usage_by_user_device(self):
+        starts = self._usage_period_starts()
+        with self._lock:
+            rows = self._db.execute("""
+                SELECT t.user_id,u.username,t.device_id,
+                       COUNT(*) AS turns, COALESCE(SUM(t.input_tokens),0) AS input_tokens,
+                       COALESCE(SUM(t.output_tokens),0) AS output_tokens,
+                       COALESCE(SUM(t.total_tokens),0) AS total_tokens,
+                       SUM(CASE WHEN t.created_at>=? THEN 1 ELSE 0 END) AS today_turns,
+                       COALESCE(SUM(CASE WHEN t.created_at>=? THEN t.total_tokens ELSE 0 END),0) AS today_tokens,
+                       SUM(CASE WHEN t.created_at>=? THEN 1 ELSE 0 END) AS week_turns,
+                       COALESCE(SUM(CASE WHEN t.created_at>=? THEN t.total_tokens ELSE 0 END),0) AS week_tokens,
+                       SUM(CASE WHEN t.created_at>=? THEN 1 ELSE 0 END) AS month_turns,
+                       COALESCE(SUM(CASE WHEN t.created_at>=? THEN t.total_tokens ELSE 0 END),0) AS month_tokens
+                FROM conversation_turns t JOIN users u ON u.id=t.user_id
+                GROUP BY t.user_id,t.device_id ORDER BY u.username,t.device_id
+            """, (starts["today"], starts["today"], starts["week"], starts["week"],
+                  starts["month"], starts["month"])).fetchall()
+        return [dict(row) for row in rows]
 
     def end_conversation(self, device_id):
         device_id = self.normalize_device_id(device_id)
@@ -653,8 +984,11 @@ class AccountStore:
 
     def list_chat_sessions(self, user_id, device_id, limit=100):
         device_id = self.normalize_device_id(device_id)
-        if not self.user_owns_device(user_id, device_id):
+        if not self.user_can_access_device(user_id, device_id):
             raise PermissionError("无权访问该设备")
+        target_user_id = self.device_owner_id(device_id)
+        if target_user_id is None:
+            return []
         limit = max(1, min(500, int(limit)))
         with self._lock:
             rows = self._db.execute("""
@@ -664,15 +998,20 @@ class AccountStore:
                 WHERE s.user_id=? AND s.device_id=? AND s.deleted_at IS NULL
                 GROUP BY s.id
                 ORDER BY s.last_message_at DESC LIMIT ?
-            """, (user_id, device_id, limit)).fetchall()
+            """, (target_user_id, device_id, limit)).fetchall()
         return [dict(row) for row in rows]
 
     def get_chat_messages(self, user_id, conversation_id):
         with self._lock:
-            session = self._db.execute(
-                """SELECT * FROM chat_sessions
-                   WHERE id=? AND user_id=? AND deleted_at IS NULL""",
-                (int(conversation_id), user_id)).fetchone()
+            if self.is_admin(user_id):
+                session = self._db.execute(
+                    "SELECT * FROM chat_sessions WHERE id=? AND deleted_at IS NULL",
+                    (int(conversation_id),)).fetchone()
+            else:
+                session = self._db.execute(
+                    """SELECT * FROM chat_sessions
+                       WHERE id=? AND user_id=? AND deleted_at IS NULL""",
+                    (int(conversation_id), user_id)).fetchone()
             if not session:
                 raise PermissionError("无权访问该会话")
             rows = self._db.execute("""
@@ -709,10 +1048,16 @@ class AccountStore:
         conversation_id = int(conversation_id)
         now = time.time()
         with self._lock, self._db:
-            row = self._db.execute("""
-                SELECT id,device_id,ended_at FROM chat_sessions
-                WHERE id=? AND user_id=? AND deleted_at IS NULL
-            """, (conversation_id, user_id)).fetchone()
+            if self.is_admin(user_id):
+                row = self._db.execute("""
+                    SELECT id,device_id,ended_at FROM chat_sessions
+                    WHERE id=? AND deleted_at IS NULL
+                """, (conversation_id,)).fetchone()
+            else:
+                row = self._db.execute("""
+                    SELECT id,device_id,ended_at FROM chat_sessions
+                    WHERE id=? AND user_id=? AND deleted_at IS NULL
+                """, (conversation_id, user_id)).fetchone()
             if not row:
                 raise PermissionError("无权访问该会话")
             if row["ended_at"] is None:
@@ -830,8 +1175,11 @@ class AccountStore:
 
     def list_conversations(self, user_id, device_id, limit=100, ascending=False):
         device_id = self.normalize_device_id(device_id)
-        if not self.user_owns_device(user_id, device_id):
+        if not self.user_can_access_device(user_id, device_id):
             raise PermissionError("无权访问该设备")
+        target_user_id = self.device_owner_id(device_id)
+        if target_user_id is None:
+            return []
         limit = max(1, min(500, int(limit)))
         with self._lock:
             rows = self._db.execute("""
@@ -851,6 +1199,6 @@ class AccountStore:
                        next_content AS assistant_text,created_at
                 FROM ordered WHERE role='user' AND next_role='assistant'
                 ORDER BY id DESC LIMIT ?
-            """, (user_id, device_id, limit)).fetchall()
+            """, (target_user_id, device_id, limit)).fetchall()
         result = [dict(row) for row in rows]
         return list(reversed(result)) if ascending else result

@@ -1,6 +1,8 @@
 # Private deployment configuration. Copy the example, then keep real values local.
 /private/local.yaml
+/private/test-server.yaml
 /backend/config.yaml
+/backend/config.test.yaml
 
 # ESP-IDF generated files and local dependencies
 /firmware/build/

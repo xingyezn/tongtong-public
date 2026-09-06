@@ -70,7 +70,9 @@ async def main():
                           "living-room", "客厅童童")
         store.bind_device(bob["id"], second["device_id"], second["binding_code"],
                           "private", "Bob device")
-        store.record_turn(first["device_id"], "你好", "你好，我是童童。")
+        store.record_turn(first["device_id"], "你好", "你好，我是童童。",
+                          usage={"input_tokens": 12, "output_tokens": 34,
+                                 "total_tokens": 46})
 
         config = {
             "server": {"public_ws_url": "ws://x/ws"},
@@ -103,6 +105,12 @@ async def main():
             r = await client.get("http://127.0.0.1:8099/", headers=headers)
             html = await r.text()
             assert r.status == 200 and "设备绑定与管理" in html and "对话记录" in html
+            assert 'id="memory-modal"' in html and 'id="usage-summary"' in html
+            assert 'id="test-led-color"' in html
+            assert 'id="test-led-hex"' in html
+            assert "syncLedRgbFromColor" in html
+            assert "syncLedRgbFromHex" in html
+            assert "RGB 指示灯没有独立亮度接口" in html
 
             r = await client.get("http://127.0.0.1:8099/api/status", headers=headers)
             data = await r.json()
@@ -187,6 +195,21 @@ async def main():
             r = await client.get("http://127.0.0.1:8099/api/memories", headers=headers)
             memories = (await r.json())["memories"]
             assert len(memories) == 1 and memories[0]["enabled"]
+            r = await client.post("http://127.0.0.1:8099/api/memories/update",
+                                  headers=headers, json={
+                                      "id": memories[0]["id"], "category": "习惯",
+                                      "label": "喜欢的颜色", "value": "绿色", "enabled": False,
+                                  })
+            updated = await r.json()
+            assert r.status == 200 and updated["memories"][0]["category"] == "习惯"
+            assert updated["memories"][0]["label"] == "喜欢的颜色"
+            assert not updated["memories"][0]["enabled"]
+
+            r = await client.get("http://127.0.0.1:8099/api/usage", headers=headers)
+            usage = await r.json()
+            assert r.status == 200 and usage["usage"]["all"] == {
+                "turns": 1, "input_tokens": 12, "output_tokens": 34, "total_tokens": 46}
+            assert usage["usage"]["today"]["turns"] == 1
 
             r = await client.post("http://127.0.0.1:8099/api/features", headers=headers,
                                   json={"device_id": first["device_id"],

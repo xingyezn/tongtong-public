@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import argparse
 import json
 import logging
 import os
@@ -18,7 +19,7 @@ from app.dashboard import BroadcastLogHandler, Dashboard
 from app.http_api import HttpApi
 from app.memory_service import MemoryService
 from app.omni_client import OmniClient
-from app.opus_codec import OpusCodec
+from app.opus_codec import OpusCodec, opus_available
 from app.ws_gateway import WsGateway
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -32,6 +33,14 @@ def load_config(path: str = None) -> dict:
     env_key = os.environ.get("DASHSCOPE_API_KEY")
     if env_key:
         cfg["dashscope"]["api_key"] = env_key
+    if os.environ.get("TONGTONG_SERVER_PORT"):
+        cfg.setdefault("server", {})["port"] = int(os.environ["TONGTONG_SERVER_PORT"])
+    if os.environ.get("TONGTONG_PUBLIC_WS_URL"):
+        cfg.setdefault("server", {})["public_ws_url"] = os.environ["TONGTONG_PUBLIC_WS_URL"]
+    if os.environ.get("TONGTONG_DATABASE"):
+        cfg.setdefault("storage", {})["database"] = os.environ["TONGTONG_DATABASE"]
+    if os.environ.get("TONGTONG_ENVIRONMENT"):
+        cfg["environment"] = os.environ["TONGTONG_ENVIRONMENT"]
     return cfg
 
 
@@ -53,13 +62,24 @@ def save_config(config: dict, path: str = None) -> None:
             config["dashscope"]["api_key"] = saved
 
 
-async def main():
-    config = load_config()
+async def main(config_path=None):
+    config_path = config_path or os.environ.get("TONGTONG_CONFIG") or os.path.join(
+        BASE_DIR, "config.yaml")
+    if not os.path.isabs(config_path):
+        config_path = os.path.abspath(config_path)
+    config = load_config(config_path)
 
     database_path = config.get("storage", {}).get("database", "data/tongtong.db")
     if not os.path.isabs(database_path):
         database_path = os.path.join(BASE_DIR, database_path)
     account_store = AccountStore(database_path)
+    bootstrap_username = os.environ.get("TONGTONG_ADMIN_USERNAME", "")
+    bootstrap_password = os.environ.get("TONGTONG_ADMIN_PASSWORD", "")
+    if bootstrap_username or bootstrap_password:
+        if not bootstrap_username or not bootstrap_password:
+            raise ValueError(
+                "TONGTONG_ADMIN_USERNAME and TONGTONG_ADMIN_PASSWORD must be set together")
+        account_store.ensure_admin(bootstrap_username, bootstrap_password)
     memory_service = MemoryService(config, account_store)
 
     log_format = "%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -68,6 +88,9 @@ async def main():
         format=log_format,
     )
     log = logging.getLogger("main")
+    config.setdefault("runtime", {})["opus_available"] = opus_available()
+    if not opus_available():
+        log.warning("未找到原生 libopus；管理接口可用，但设备语音编解码暂不可用")
 
     # 广播日志 handler（推给监控面板 SSE）
     log_handler = BroadcastLogHandler()
@@ -92,7 +115,8 @@ async def main():
     http_api.add_routes(app)  # /ota /activate /health
 
     dashboard = Dashboard(config, sessions, http_api, log_handler, gateway.device_history,
-                          save_config=save_config, account_store=account_store,
+                          save_config=lambda value: save_config(value, config_path),
+                          account_store=account_store,
                           gateway=gateway, memory_service=memory_service)
     dashboard.add_routes(app)  # /  /api/status /api/logs /ws/echo
 
@@ -107,6 +131,7 @@ async def main():
     log.info("tongtong-omni-backend 启动: http://%s:%d", 
              config["server"]["host"], config["server"]["port"])
     log.info("WS: %s", config["server"]["public_ws_url"])
+    log.info("环境: %s, 数据库: %s", config.get("environment", "production"), database_path)
 
     try:
         while True:
@@ -121,7 +146,10 @@ async def main():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run the Tongtong backend")
+    parser.add_argument("--config", help="path to an isolated runtime YAML configuration")
+    args = parser.parse_args()
     try:
-        asyncio.run(main())
+        asyncio.run(main(args.config))
     except KeyboardInterrupt:
         pass

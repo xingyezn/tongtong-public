@@ -405,6 +405,9 @@ class OmniClient:
                                 })
                                 completed_call_ids.add(call_id)
                         elif t == "response.done":
+                            usage = self._extract_usage(obj)
+                            if usage:
+                                yield {"type": "usage", **usage}
                             # Some compatible gateways include function calls
                             # only in response.done. Accept that representation
                             # as a fallback while preferring the dedicated event.
@@ -462,6 +465,27 @@ class OmniClient:
         except (TypeError, ValueError):
             return {}
         return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _extract_usage(response_done):
+        """Normalize OpenAI-compatible token usage without guessing values."""
+        response = response_done.get("response", {}) if isinstance(response_done, dict) else {}
+        usage = response.get("usage") or response_done.get("usage") or {}
+        if not isinstance(usage, dict):
+            return {}
+        def value(*names):
+            for name in names:
+                raw = usage.get(name)
+                if isinstance(raw, (int, float)) and raw >= 0:
+                    return int(raw)
+            return 0
+        input_tokens = value("input_tokens", "prompt_tokens")
+        output_tokens = value("output_tokens", "completion_tokens")
+        total_tokens = value("total_tokens") or input_tokens + output_tokens
+        if not (input_tokens or output_tokens or total_tokens):
+            return {}
+        return {"input_tokens": input_tokens, "output_tokens": output_tokens,
+                "total_tokens": total_tokens}
 
     async def _complete_tool_calls(self, ws, calls, tool_handler):
         """Execute device tools, return each result, then let the model reply."""

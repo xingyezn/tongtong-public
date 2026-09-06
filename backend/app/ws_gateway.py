@@ -104,6 +104,9 @@ class WsGateway:
             except ValueError as exc:
                 return web.Response(status=400, text=str(exc))
             device_id = device_record["device_id"]
+            if not device_record.get("is_active", True):
+                log.warning("disabled device connection rejected: %s", device_id)
+                return web.Response(status=403, text="device disabled")
         if not self._check_auth(request.headers):
             return web.Response(status=401, text="unauthorized")
 
@@ -128,11 +131,11 @@ class WsGateway:
         device_config = self._device_config(device_id)
         turn_recorder = None
         if self.account_store:
-            turn_recorder = lambda did, user_text, assistant_text: (
+            turn_recorder = lambda did, user_text, assistant_text, usage=None: (
                 self.account_store.record_turn(
                     did, user_text, assistant_text,
                     device_config.get("dashscope", {}).get(
-                        "conversation_timeout_minutes", 10)))
+                        "conversation_timeout_minutes", 10), usage))
         session = Session(
             ws, device_config, self.omni, device_id,
             conversation_memory=self._conversation_memory(device_id),

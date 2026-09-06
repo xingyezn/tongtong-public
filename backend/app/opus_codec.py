@@ -10,7 +10,16 @@
 import array
 import struct
 
-import opuslib
+try:
+    import opuslib
+    OPUS_IMPORT_ERROR = None
+except Exception as exc:  # Windows development machines may lack libopus.dll.
+    try:
+        import opuslib_next as opuslib
+        OPUS_IMPORT_ERROR = None
+    except Exception:
+        opuslib = None
+        OPUS_IMPORT_ERROR = exc
 
 try:
     import numpy as np
@@ -30,6 +39,10 @@ class OpusCodec:
 
     # ---- 编码 ----
     def _ensure_encoder(self):
+        if opuslib is None:
+            raise RuntimeError(
+                "Opus native library is unavailable; install libopus before testing audio"
+            ) from OPUS_IMPORT_ERROR
         if self._encoder is None:
             self._encoder = opuslib.Encoder(
                 self.sample_rate, self.channels, opuslib.APPLICATION_AUDIO
@@ -46,6 +59,10 @@ class OpusCodec:
 
     # ---- 解码 ----
     def _ensure_decoder(self):
+        if opuslib is None:
+            raise RuntimeError(
+                "Opus native library is unavailable; install libopus before testing audio"
+            ) from OPUS_IMPORT_ERROR
         if self._decoder is None:
             self._decoder = opuslib.Decoder(self.sample_rate, self.channels)
         return self._decoder
@@ -54,6 +71,10 @@ class OpusCodec:
         """OPUS 帧 -> PCM 16bit 小端"""
         dec = self._ensure_decoder()
         return dec.decode(opus, frame_ms * self.sample_rate // 1000)
+
+
+def opus_available() -> bool:
+    return opuslib is not None
 
 
 def resample_pcm(pcm: bytes, src_rate: int, dst_rate: int) -> bytes:

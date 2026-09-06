@@ -317,6 +317,9 @@ async def test_playback_prebuffer():
     config = {
         "dashscope": {"output_sample_rate": 24000},
         "vad": {"silence_duration_ms": 400, "energy_threshold": 100},
+        # Exercise the firmware-compatible minimum separately from the
+        # public-service default (900 ms) used to smooth model jitter.
+        "audio": {"tts_startup_buffer_ms": 240},
     }
     ws = FakeWebSocket()
     session = Session(ws, config, FakeOmni(), "prebuffer-device")
@@ -351,6 +354,7 @@ async def test_interrupt_mutes_audio_but_preserves_complete_text():
     config = {
         "dashscope": {"output_sample_rate": 24000},
         "vad": {"silence_duration_ms": 400, "energy_threshold": 100},
+        "audio": {"tts_startup_buffer_ms": 240},
     }
     ws = FakeWebSocket()
     omni = InterruptibleFakeOmni()

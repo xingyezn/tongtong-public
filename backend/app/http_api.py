@@ -65,7 +65,8 @@ class HttpApi:
                 "force": 0,
             },
             "activation": {
-                "message": "请登录管理页面并输入此绑定码" if binding_code else "tongtong-omni-backend ready",
+                "message": ("请登录管理页面并输入此绑定码：{}".format(binding_code)
+                            if binding_code else "tongtong-omni-backend ready"),
                 "code": binding_code,
                 "challenge": challenge,
                 "timeout_ms": 60000,
@@ -94,7 +95,15 @@ class HttpApi:
         app.router.add_route("GET", "/ota", self.ota)
         app.router.add_route("POST", "/ota", self.ota)
         app.router.add_post("/activate", self.activate)
+        # Firmware derives the activation URL as ota_url + "/activate" (see
+        # ota.cc::Activate), so also accept the suffixed path.
+        app.router.add_post("/ota/activate", self.activate)
         app.router.add_get("/health", self.health)
 
     async def health(self, request):
-        return web.json_response({"status": "ok", "time": time.time()})
+        return web.json_response({
+            "status": "ok",
+            "environment": self.config.get("environment", "production"),
+            "opus_available": self.config.get("runtime", {}).get("opus_available", True),
+            "time": time.time(),
+        })
