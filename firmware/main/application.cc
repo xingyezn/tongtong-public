@@ -974,7 +974,10 @@ void Application::Schedule(std::function<void()>&& callback) {
 void Application::AbortSpeaking(AbortReason reason) {
     ESP_LOGI(TAG, "Abort speaking");
     accepting_tts_audio_ = false;
-    audio_service_.FinishPlaybackStream();
+    // An interruption must drop audio already decoded/queued for DMA. Merely
+    // marking the stream finished lets that queue drain into the microphone
+    // after listening starts, which produces a false 0.7 s user utterance.
+    audio_service_.ResetDecoder();
     CancelPendingTtsResume();
     aborted_ = true;
     if (protocol_) {

@@ -37,6 +37,9 @@ AI_DISPLAY_UPDATE_INTERVAL_S = 0.18
 # Covers WebSocket transit and the device's decoder/DMA pipeline after the
 # model has finished generating its audio stream.
 TTS_PLAYBACK_TRANSPORT_MARGIN_S = 0.20
+VAD_POST_PLAYBACK_DISCARD_FRAMES = 4  # 240 ms of simplex speaker tail
+VAD_MIN_CONSECUTIVE_SPEECH_FRAMES = 3  # 180 ms of sustained energy
+VAD_PREROLL_FRAMES = 5  # keep 300 ms before confirmed speech
 
 
 class BinaryProtocolError(Exception):
@@ -131,6 +134,10 @@ class Session:
         self._vad_silence_frames = 0
         self._vad_started_at = 0.0
         self._vad_triggered = False            # 已触发 omni 防重复
+        self._vad_candidate_frames = 0
+        self._vad_max_energy = 0.0
+        self._listen_discard_frames = 0
+        self._next_listen_discard_frames = 0
 
     # VAD 参数（实时读取 config，可在监控面板动态调整，无需重启）
     def _vad_stop_silence_frames(self) -> int:
@@ -239,6 +246,11 @@ class Session:
                 self.listening = True
                 self.up_pcm.clear()
                 self._reset_vad_state()
+                self._listen_discard_frames = self._next_listen_discard_frames
+                self._next_listen_discard_frames = 0
+                if self._listen_discard_frames:
+                    log.info("device %s suppressing first %d post-playback audio frames",
+                             self.device_id, self._listen_discard_frames)
             elif state == "stop":
                 self.listening = False
                 log.info("device %s listen stop, up_pcm=%d bytes", self.device_id, len(self.up_pcm))
@@ -283,6 +295,8 @@ class Session:
         self._vad_speech = False
         self._vad_silence_frames = 0
         self._vad_triggered = False
+        self._vad_candidate_frames = 0
+        self._vad_max_energy = 0.0
         self._vad_started_at = time.time()
 
     @staticmethod
@@ -325,15 +339,24 @@ class Session:
         except Exception as e:
             log.warning("opus decode err: %s", e)
             return
+        if self._listen_discard_frames > 0:
+            self._listen_discard_frames -= 1
+            return
         self.up_pcm.extend(pcm)
 
         # 后端 VAD：按帧计算能量，跟踪说话/静音状态
         if not self._vad_triggered:
             energy = self._rms(bytes(pcm))
+            self._vad_max_energy = max(self._vad_max_energy, energy)
             if energy > self._vad_energy_threshold():
-                if not self._vad_speech:
+                self._vad_candidate_frames += 1
+                if (not self._vad_speech and self._vad_candidate_frames >=
+                        VAD_MIN_CONSECUTIVE_SPEECH_FRAMES):
                     self._vad_speech = True
-                self._vad_silence_frames = 0
+                    log.info("device %s sustained speech confirmed after %d frames",
+                             self.device_id, self._vad_candidate_frames)
+                if self._vad_speech:
+                    self._vad_silence_frames = 0
             else:
                 if self._vad_speech:
                     self._vad_silence_frames += 1
@@ -342,7 +365,12 @@ class Session:
                         return
                 else:
                     # 还没检测到说话：忽略静音，避免长静音误触发
-                    pass
+                    self._vad_candidate_frames = 0
+
+            if not self._vad_speech:
+                keep_bytes = len(pcm) * VAD_PREROLL_FRAMES
+                if len(self.up_pcm) > keep_bytes:
+                    del self.up_pcm[:-keep_bytes]
 
         if len(self.up_pcm) > self.up_pcm_max:
             # 防溢出：截断，只留最新
@@ -561,6 +589,7 @@ class Session:
                 log.info("waiting %.2fs before tts stop (audio=%.2fs, elapsed=%.2fs)",
                          delay, state["audio_duration_s"], elapsed)
                 await asyncio.sleep(delay)
+        self._next_listen_discard_frames = VAD_POST_PLAYBACK_DISCARD_FRAMES
         await self.send_json({"type": "tts", "state": "stop"})
         self.speaking = False
 
@@ -621,6 +650,8 @@ class Session:
     async def _abort_speaking(self):
         log.info("abort speaking immediately: device=%s", self.device_id)
         was_active = self.speaking or self.omni_busy
+        if was_active:
+            self._next_listen_discard_frames = VAD_POST_PLAYBACK_DISCARD_FRAMES
         await self.send_json({"type": "tts", "state": "stop"})
         self.speaking = False
         if was_active and hasattr(self.omni, "cancel_current_response"):
