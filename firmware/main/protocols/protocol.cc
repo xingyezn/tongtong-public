@@ -48,6 +48,12 @@ void Protocol::SendAbortSpeaking(AbortReason reason) {
     SendText(message);
 }
 
+void Protocol::SendEndConversation() {
+    std::string message = "{\"session_id\":\"" + session_id_ +
+        "\",\"type\":\"conversation\",\"action\":\"end\"}";
+    SendText(message);
+}
+
 void Protocol::SendWakeWordDetected(const std::string& wake_word) {
     std::string json = "{\"session_id\":\"" + session_id_ + 
                       "\",\"type\":\"listen\",\"state\":\"detect\",\"text\":\"" + wake_word + "\"}";

@@ -13,7 +13,7 @@ are kept separate**. Treat the following as three different layers:
 
 - Keep `public.yaml` exactly on its `your-server.example` placeholders.
 - Commit firmware and backend source, examples, scripts, and documentation.
-- Never commit real OTA/WS endpoints, server credentials, dashboard passwords,
+- Never commit real OTA/WS endpoints, server credentials, account databases,
   device tokens, API keys, generated configuration, build output, recordings,
   or production firmware binaries.
 - Before every push, follow [SHARING.md](SHARING.md).
@@ -52,6 +52,16 @@ cd firmware
 idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.private" set-target esp32s3
 idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.private" build
 ```
+
+推荐直接使用仓库脚本：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build_firmware.ps1
+# 刷写：
+powershell -ExecutionPolicy Bypass -File scripts/build_firmware.ps1 -Flash -Port COM3
+```
+
+固件 CMake 会拒绝 `your-server.example` 占位 OTA 地址；如果没有私有配置，构建会直接失败，不会生成可刷写的占位地址固件。
 
 The second defaults file is loaded last, so its real OTA endpoint overrides the
 tracked placeholder. A production binary therefore contains private deployment
@@ -110,6 +120,11 @@ terminal transcripts.
    to the server and restart the service.
 5. Never edit a tracked placeholder to make a deployment work.
 
+运行中的后端也可通过管理页面修改“模型连接复用（分钟）”（1～120，默认
+10）。该值只控制何时重建服务商 WebSocket；重建时仍会恢复当前待命周期内的
+上下文，不会切分对话记录。只有设备再次进入待命或设备连接重建，才结束本次
+会话并让下一次唤醒创建新会话。
+
 ### Secret rotation
 
 1. Update the API key in the server environment file, not in Git or the
@@ -159,7 +174,9 @@ git push -u origin feat/short-description
 ```
 
 Open a Pull Request and merge it after the author has verified the relevant
-tests and the sharing scan. **At the current project stage, peer approval is
+tests and the sharing scan. For a firmware change that controls real hardware,
+first keep the feature branch local and complete a supervised hardware test;
+only then push it and open the PR. **At the current project stage, peer approval is
 not required:** the branch author may merge their own PR when it is ready.
 Squash merge is preferred to keep `main` history concise. Delete the merged
 feature branch, then update local `main` before starting the next task.
@@ -180,5 +197,8 @@ git pull --ff-only origin main
 - Each developer keeps their own ignored `private/local.yaml` and generated
   files. Never use Git to share private runtime configuration.
 - Before merging firmware changes, compile the target board when practical.
-  Before merging backend changes, run the affected backend tests. Always run
-  the sharing scan before a public push.
+  For changes that affect motors, power, relays, or other physical actuators,
+  also perform a supervised hardware test (start with the mechanism unloaded
+  or wheels off the ground) before the first remote push. Before merging backend
+  changes, run the affected backend tests. Always run the sharing scan before a
+  public push.

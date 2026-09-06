@@ -96,11 +96,66 @@ class FakeOmni:
         })
         assert json.loads(result) == {"result": ["true"]}
 
+        yield {"type": "input_text", "text": "请打开灯"}
         pcm24 = b"\x01\x00" * 1440
         yield {"type": "audio", "audio_b64": base64.b64encode(pcm24[:1200]).decode(), "sample_rate": 24000}
         yield {"type": "audio", "audio_b64": base64.b64encode(pcm24[1200:]).decode(), "sample_rate": 24000}
         yield {"type": "text", "text": "已打开"}
         yield {"type": "done"}
+
+
+class InterruptibleFakeOmni:
+    """Pause mid-response so playback can be interrupted deterministically."""
+
+    api_key = "test-key"
+
+    def __init__(self):
+        self.reached_interrupt_point = asyncio.Event()
+        self.continue_response = asyncio.Event()
+
+    async def chat_stream(self, _pcm, tools=None, tool_handler=None):
+        yield {"type": "input_text", "text": "请把刚才的话说完"}
+        yield {"type": "text", "text": "前半句"}
+        frame = b"\x03\x00" * 1440
+        for _ in range(4):
+            yield {
+                "type": "audio",
+                "audio_b64": base64.b64encode(frame).decode(),
+                "sample_rate": 24000,
+            }
+        self.reached_interrupt_point.set()
+        await self.continue_response.wait()
+        yield {"type": "text", "text": "，后半句。"}
+        yield {
+            "type": "audio",
+            "audio_b64": base64.b64encode(frame).decode(),
+            "sample_rate": 24000,
+        }
+        yield {"type": "done"}
+
+
+class FarewellFakeOmni:
+    api_key = "test-key"
+
+    def __init__(self):
+        self.reset_count = 0
+
+    async def chat_stream(self, _pcm, tools=None, tool_handler=None):
+        names = {tool["function"]["name"] for tool in tools}
+        assert "server.conversation.end" in names
+        result = await tool_handler({
+            "type": "tool_call",
+            "id": "call-end-1",
+            "name": "server.conversation.end",
+            "arguments": {},
+        })
+        assert json.loads(result)["accepted"]
+        yield {"type": "input_text", "text": "你可以退下了"}
+        yield {"type": "text", "text": "好的，需要时再叫我。"}
+        yield {"type": "done"}
+
+    async def reset_conversation(self):
+        self.reset_count += 1
 
 
 class FakeRealtimeMessage:
@@ -112,10 +167,15 @@ class FakeRealtimeMessage:
 
 class FakeRealtimeWebSocket:
     def __init__(self):
+        self.closed = False
         self.sent = []
         self.response_creates = 0
         self.events = [
             {"type": "session.updated"},
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "transcript": "打开灯",
+            },
             {
                 "type": "response.function_call_arguments.done",
                 "call_id": "call-lamp-2",
@@ -138,6 +198,7 @@ class FakeRealtimeWebSocket:
             if self.response_creates == 2:
                 pcm24 = b"\x02\x00" * 1440
                 self.events.extend([
+                    {"type": "response.audio_transcript.done", "transcript": "已打开"},
                     {"type": "response.audio.delta", "delta": base64.b64encode(pcm24).decode()},
                     {"type": "response.done", "response": {"output": []}},
                 ])
@@ -146,14 +207,19 @@ class FakeRealtimeWebSocket:
         assert self.events, "Realtime client waited for an unexpected event"
         return FakeRealtimeMessage(self.events.pop(0))
 
+    async def close(self):
+        self.closed = True
+
 
 class FakeHttpSession:
     closed = False
 
     def __init__(self, websocket):
         self.websocket = websocket
+        self.connect_calls = 0
 
     def ws_connect(self, *_args, **_kwargs):
+        self.connect_calls += 1
         return self.websocket
 
 
@@ -164,6 +230,7 @@ async def test_realtime_tool_event_loop():
             "model": "qwen3.5-omni-flash-realtime",
             "workspace_id": "test-workspace",
             "realtime_url": "wss://{workspace}.example/realtime",
+            "language": "zh",
             "voice": "Ethan",
             "instructions": "test",
             "input_sample_rate": 16000,
@@ -172,7 +239,11 @@ async def test_realtime_tool_event_loop():
     }
     websocket = FakeRealtimeWebSocket()
     client = OmniClient(config)
-    client._session = FakeHttpSession(websocket)
+    assert client.conversation_timeout == 600.0
+    config["dashscope"]["conversation_timeout_minutes"] = 2
+    assert client.conversation_timeout == 120.0
+    http_session = FakeHttpSession(websocket)
+    client._session = http_session
     calls = []
 
     async def tool_handler(call):
@@ -191,21 +262,209 @@ async def test_realtime_tool_event_loop():
         b"\x00\x00" * 1600, tools=tools, tool_handler=tool_handler)]
 
     assert calls == [{"type": "tool_call", "id": "call-lamp-2", "name": "self.lamp.turn_on", "arguments": {}}]
-    assert [event["type"] for event in events] == ["audio", "done"]
+    assert [event["type"] for event in events] == ["input_text", "text", "audio", "done"]
+    assert events[1]["text"] == "已打开"
     assert websocket.sent[0]["session"]["tools"] == tools
+    assert websocket.sent[0]["session"]["input_audio_transcription"]["language"] == "zh"
     assert any(item.get("type") == "conversation.item.create" for item in websocket.sent)
     assert websocket.response_creates == 2
+
+    # A second turn on the same device reuses the model WebSocket while still
+    # issuing a fresh session update and response request.
+    websocket.events.extend([
+        {"type": "session.updated"},
+        {"type": "response.done", "response": {"output": []}},
+    ])
+    second_events = [event async for event in client.chat_stream(b"\x00\x00" * 1600)]
+    assert [event["type"] for event in second_events] == ["done"]
+    assert http_session.connect_calls == 1
+    event_ids = [item["event_id"] for item in websocket.sent if "event_id" in item]
+    assert len(event_ids) == len(set(event_ids))
+
+    # If the provider closes between turns, reconnect and inject the text
+    # history collected from input/output transcription events.
+    websocket.closed = True
+    replacement = FakeRealtimeWebSocket()
+    replacement.events = [
+        {"type": "session.updated"},
+        {"type": "response.done", "response": {"output": []}},
+    ]
+    http_session.websocket = replacement
+    third_events = [event async for event in client.chat_stream(b"\x00\x00" * 1600)]
+    assert [event["type"] for event in third_events] == ["done"]
+    assert http_session.connect_calls == 2
+    assert "User: 打开灯" in replacement.sent[0]["session"]["instructions"]
+    assert "Assistant: 已打开" in replacement.sent[0]["session"]["instructions"]
+
+    # Omni can speak Dutch, Urdu, Hebrew, and Persian, while the auxiliary ASR
+    # language hint cannot. These options must still work via ASR auto-detect.
+    client.config["dashscope"]["language"] = "fa"
+    replacement.closed = True
+    persian_ws = FakeRealtimeWebSocket()
+    persian_ws.events = [
+        {"type": "session.updated"},
+        {"type": "response.done", "response": {"output": []}},
+    ]
+    http_session.websocket = persian_ws
+    persian_events = [event async for event in client.chat_stream(b"\x00\x00" * 1600)]
+    assert [event["type"] for event in persian_events] == ["done"]
+    transcription = persian_ws.sent[0]["session"]["input_audio_transcription"]
+    assert "language" not in transcription
+    assert "فارسی" in persian_ws.sent[0]["session"]["instructions"]
+
+
+async def test_playback_prebuffer():
+    config = {
+        "dashscope": {"output_sample_rate": 24000},
+        "vad": {"silence_duration_ms": 400, "energy_threshold": 100},
+    }
+    ws = FakeWebSocket()
+    session = Session(ws, config, FakeOmni(), "prebuffer-device")
+    session.device_encoder = FakeEncoder()
+    state = {
+        "pcm": bytearray(),
+        "started": False,
+        "started_at": None,
+        "audio_duration_s": 0.0,
+        "next_frame_send_at": None,
+    }
+    frame = b"\x01\x00" * 1440
+
+    await session._stream_omni_audio({
+        "type": "audio",
+        "audio_b64": base64.b64encode(frame * 3).decode(),
+        "sample_rate": 24000,
+    }, state)
+    assert not ws.text_messages
+    assert not ws.binary_messages
+
+    await session._stream_omni_audio({
+        "type": "audio",
+        "audio_b64": base64.b64encode(frame).decode(),
+        "sample_rate": 24000,
+    }, state)
+    assert [m.get("state") for m in ws.text_messages] == ["start"]
+    assert len(ws.binary_messages) == 4
+
+
+async def test_interrupt_mutes_audio_but_preserves_complete_text():
+    config = {
+        "dashscope": {"output_sample_rate": 24000},
+        "vad": {"silence_duration_ms": 400, "energy_threshold": 100},
+    }
+    ws = FakeWebSocket()
+    omni = InterruptibleFakeOmni()
+    persisted = []
+    session = Session(
+        ws, config, omni, "interrupt-device",
+        turn_recorder=lambda *args: persisted.append(args),
+    )
+    session.device_encoder = FakeEncoder()
+
+    session.omni_busy = True
+    turn_task = asyncio.create_task(
+        session._run_omni_turn_task(b"\x00\x00" * 1600))
+    await asyncio.wait_for(omni.reached_interrupt_point.wait(), timeout=1)
+    assert len(ws.binary_messages) == 4
+
+    await session._abort_speaking()
+    assert not turn_task.done(), "interrupt must not cancel model generation"
+    assert session._suppress_current_audio
+    audio_count_at_interrupt = len(ws.binary_messages)
+
+    omni.continue_response.set()
+    await asyncio.wait_for(turn_task, timeout=1)
+
+    assert len(ws.binary_messages) == audio_count_at_interrupt
+    assert persisted == [(
+        "interrupt-device", "请把刚才的话说完", "前半句，后半句。",
+    )]
+    assert any(
+        message.get("type") == "tts" and message.get("state") == "stop"
+        for message in ws.text_messages
+    )
+    assert any(
+        message.get("type") == "tts"
+        and message.get("state") == "sentence_start"
+        and message.get("text") == "前半句，后半句。"
+        for message in ws.text_messages
+    )
+    await session.close()
+
+
+async def test_model_farewell_enters_standby_after_text_is_saved():
+    config = {
+        "dashscope": {"output_sample_rate": 24000},
+        "vad": {"silence_duration_ms": 400, "energy_threshold": 100},
+    }
+    ws = FakeWebSocket()
+    omni = FarewellFakeOmni()
+    events = []
+
+    def record_turn(*args):
+        events.append(("record", args))
+        return {"conversation_id": 7, "ended_conversation_id": None}
+
+    def end_conversation(device_id):
+        events.append(("end", device_id))
+        return 7
+
+    session = Session(
+        ws, config, omni, "farewell-device",
+        turn_recorder=record_turn,
+        conversation_ender=end_conversation,
+    )
+    session.device_encoder = FakeEncoder()
+    await session._run_omni_turn(b"\x00\x00" * 1600)
+
+    assert events == [
+        ("record", ("farewell-device", "你可以退下了", "好的，需要时再叫我。")),
+        ("end", "farewell-device"),
+    ]
+    assert omni.reset_count == 1
+    assert not session.listening
+    assert ws.text_messages[-1] == {"type": "system", "command": "standby"}
+    await session.close()
+
+
+async def test_direct_mcp_bench_call():
+    sent = []
+    bridge = None
+
+    async def send_json(message):
+        sent.append(message)
+        await asyncio.sleep(0)
+        bridge.on_device_mcp({
+            "id": message["payload"]["id"],
+            "result": {"content": [{"type": "text", "text": "ok"}]},
+        })
+
+    bridge = McpBridge(send_json)
+    result = await bridge.call_tool("self.chassis.go_forward", {"speed": 30}, timeout=1)
+    assert result["content"][0]["text"] == "ok"
+    assert sent[0]["payload"]["method"] == "tools/call"
+    assert sent[0]["payload"]["params"] == {
+        "name": "self.chassis.go_forward", "arguments": {"speed": 30},
+    }
 
 
 async def main():
     await test_realtime_tool_event_loop()
+    await test_direct_mcp_bench_call()
+    await test_playback_prebuffer()
+    await test_interrupt_mutes_audio_but_preserves_complete_text()
+    await test_model_farewell_enters_standby_after_text_is_saved()
 
     config = {
         "dashscope": {"output_sample_rate": 24000},
         "vad": {"silence_duration_ms": 400, "energy_threshold": 100},
     }
     ws = FakeWebSocket()
-    session = Session(ws, config, FakeOmni(), "test-device")
+    persisted = []
+    session = Session(
+        ws, config, FakeOmni(), "test-device",
+        turn_recorder=lambda *args: persisted.append(args),
+    )
     session.device_encoder = FakeEncoder()
     session.set_mcp(ImmediateMcp())
 
@@ -214,7 +473,11 @@ async def main():
     mcp_calls = [m for m in ws.text_messages if m.get("type") == "mcp"]
     tts_states = [m.get("state") for m in ws.text_messages if m.get("type") == "tts"]
     assert mcp_calls and mcp_calls[0]["payload"]["params"]["name"] == "self.lamp.turn_on"
-    assert tts_states == ["start", "stop"]
+    assert tts_states == ["sentence_start", "start", "stop"]
+    assistant_updates = [m.get("text") for m in ws.text_messages
+                         if m.get("type") == "tts" and m.get("state") == "sentence_start"]
+    assert assistant_updates == ["已打开"]
+    assert persisted == [("test-device", "请打开灯", "已打开")]
     assert len(ws.binary_messages) == 1
     assert ws.binary_messages[0].endswith(b"fake-opus")
     assert not session.speaking

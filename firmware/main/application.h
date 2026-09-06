@@ -7,6 +7,8 @@
 #include <esp_timer.h>
 
 #include <string>
+#include <atomic>
+#include <chrono>
 #include <mutex>
 #include <deque>
 #include <memory>
@@ -31,6 +33,7 @@
 #define MAIN_EVENT_START_LISTENING      (1 << 10)
 #define MAIN_EVENT_STOP_LISTENING       (1 << 11)
 #define MAIN_EVENT_STATE_CHANGED        (1 << 12)
+#define MAIN_EVENT_END_CONVERSATION     (1 << 13)
 
 
 enum AecMode {
@@ -102,6 +105,7 @@ public:
      * Sends MAIN_EVENT_STOP_LISTENING to be handled in Run()
      */
     void StopListening();
+    void EndConversation();
 
     void Reboot();
     void WakeWordInvoke(const std::string& wake_word);
@@ -129,6 +133,7 @@ private:
     std::unique_ptr<Protocol> protocol_;
     EventGroupHandle_t event_group_ = nullptr;
     esp_timer_handle_t clock_timer_handle_ = nullptr;
+    esp_timer_handle_t tts_resume_timer_handle_ = nullptr;
     DeviceStateMachine state_machine_;
     ListeningMode listening_mode_ = kListeningModeAutoStop;
     AecMode aec_mode_ = kAecOff;
@@ -140,6 +145,16 @@ private:
     bool aborted_ = false;
     bool assets_version_checked_ = false;
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
+    bool tts_resume_pending_ = false;
+    bool tts_playback_drained_ = false;
+    bool standby_after_tts_ = false;
+    std::atomic<bool> accepting_tts_audio_{false};
+    bool network_connected_ = false;
+    bool automatic_interrupt_enabled_ = true;
+    bool button_interrupt_enabled_ = true;
+    bool double_click_end_enabled_ = true;
+    int protocol_reconnect_attempts_ = 0;
+    std::chrono::steady_clock::time_point next_protocol_reconnect_at_{};
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
 
@@ -149,10 +164,12 @@ private:
     void HandleToggleChatEvent();
     void HandleStartListeningEvent();
     void HandleStopListeningEvent();
+    void HandleEndConversationEvent();
     void HandleNetworkConnectedEvent();
     void HandleNetworkDisconnectedEvent();
     void HandleActivationDoneEvent();
     void HandleWakeWordDetectedEvent();
+    void MaintainProtocolConnection();
 
     // Activation task (runs in background)
     void ActivationTask();
@@ -163,6 +180,9 @@ private:
     void InitializeProtocol();
     void ShowActivationCode(const std::string& code, const std::string& message);
     void SetListeningMode(ListeningMode mode);
+    void HandleTtsStopped();
+    void ResumeListeningAfterPlayback();
+    void CancelPendingTtsResume();
     
     // State change handler called by state machine
     void OnStateChanged(DeviceState old_state, DeviceState new_state);

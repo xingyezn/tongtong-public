@@ -392,15 +392,28 @@ bool Esp32Camera::Capture() {
         return false;
     }
 
-    for (int i = 0; i < 3; i++) {
-        struct v4l2_buffer buf = {};
+    // USB UVC on the N16R8 uses one PSRAM frame buffer.  Unlike parallel
+    // camera sensors, its MJPEG output is already a complete frame, so
+    // discarding three frames makes capture unnecessarily fragile.  Retry a
+    // short time for the next completed frame instead.
+    struct v4l2_buffer buf = {};
+    bool dequeued = false;
+    for (int attempt = 0; attempt < 20; ++attempt) {
+        memset(&buf, 0, sizeof(buf));
         buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         buf.memory = V4L2_MEMORY_MMAP;
-        if (ioctl(video_fd_, VIDIOC_DQBUF, &buf) != 0) {
-            ESP_LOGE(TAG, "VIDIOC_DQBUF failed");
-            return false;
+        if (ioctl(video_fd_, VIDIOC_DQBUF, &buf) == 0) {
+            dequeued = true;
+            break;
         }
-        if (i == 2) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (!dequeued) {
+        ESP_LOGE(TAG, "VIDIOC_DQBUF failed after waiting for a UVC frame");
+        return false;
+    }
+
+    {
             // 保存帧副本到PSRAM
             if (frame_.data) {
                 heap_caps_free(frame_.data);
@@ -450,6 +463,19 @@ bool Esp32Camera::Capture() {
                            MIN(mmap_buffers_[buf.index].length, frame_.len));
 #endif  // CONFIG_XIAOZHI_ENABLE_CAMERA_ENDIANNESS_SWAP
                     frame_.format = sensor_format_;
+#ifdef CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT
+                    // UVC devices may report a buffer length that includes
+                    // padding after the JPEG EOI marker. Trim it so the
+                    // multipart upload contains a standards-compliant JPEG.
+                    if (frame_.format == V4L2_PIX_FMT_JPEG && frame_.len >= 2) {
+                        for (size_t i = frame_.len - 1; i > 0; --i) {
+                            if (frame_.data[i - 1] == 0xff && frame_.data[i] == 0xd9) {
+                                frame_.len = i + 1;
+                                break;
+                            }
+                        }
+                    }
+#endif  // CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT
                     break;
                 case V4L2_PIX_FMT_YUV422P: {
                     // 这个格式是 422 YUYV，不是 planer
@@ -725,7 +751,17 @@ bool Esp32Camera::Capture() {
         if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
             ESP_LOGE(TAG, "VIDIOC_QBUF failed");
         }
+
+    // The bread board has a 128x32 monochrome OLED. Decoding a 1280x720 JPEG
+    // solely for an on-device preview consumes a large extra PSRAM buffer and
+    // is neither visible nor needed for the dashboard upload path. Keep the
+    // original JPEG in frame_ for Explain(), and skip that preview conversion.
+#ifdef CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT
+    if (frame_.format == V4L2_PIX_FMT_JPEG) {
+        ESP_LOGI(TAG, "Captured JPEG frame: %u bytes", static_cast<unsigned>(frame_.len));
+        return true;
     }
+#endif
 
     // 显示预览图片
     auto display = dynamic_cast<LvglDisplay*>(Board::GetInstance().GetDisplay());
@@ -834,6 +870,30 @@ bool Esp32Camera::Capture() {
 
         auto image = std::make_unique<LvglAllocatedImage>(data, lvgl_image_size, w, h, stride, color_format);
         display->SetPreviewImage(std::move(image));
+    }
+    return true;
+}
+
+bool Esp32Camera::ProbeFrame() {
+    if (!streaming_on_ || video_fd_ < 0) {
+        ESP_LOGE(TAG, "Camera frame probe failed: stream is not ready");
+        return false;
+    }
+
+    struct v4l2_buffer buf = {};
+    buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    buf.memory = V4L2_MEMORY_MMAP;
+    if (ioctl(video_fd_, VIDIOC_DQBUF, &buf) != 0) {
+        ESP_LOGE(TAG, "Camera frame probe DQBUF failed, errno=%d(%s)", errno, strerror(errno));
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Camera frame probe succeeded: %u bytes, %ux%u, format=0x%08lx",
+             static_cast<unsigned>(buf.bytesused), frame_.width, frame_.height,
+             static_cast<unsigned long>(sensor_format_));
+    if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
+        ESP_LOGE(TAG, "Camera frame probe QBUF failed, errno=%d(%s)", errno, strerror(errno));
+        return false;
     }
     return true;
 }

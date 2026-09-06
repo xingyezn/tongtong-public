@@ -1,3 +1,12 @@
+# A local build must never produce a firmware image with the public placeholder
+# endpoint. The private defaults are intentionally ignored by Git and must be
+# supplied through SDKCONFIG_DEFAULTS before configuring the project.
+if(CONFIG_OTA_URL MATCHES "your-server\\.example")
+    message(FATAL_ERROR
+        "CONFIG_OTA_URL still uses the public placeholder. Run scripts/configure_local.py "
+        "and configure with sdkconfig.defaults.private before building firmware.")
+endif()
+
 # Define source files
 set(SOURCES "audio/audio_codec.cc"
             "audio/audio_service.cc"
@@ -35,6 +44,9 @@ set(SOURCES "audio/audio_codec.cc"
             "settings.cc"
             "device_state_machine.cc"
             "assets.cc"
+            "face_detection_test.cc"
+            "face_tracking_controller.cc"
+            "face_tracking_controller_test.cc"
             "main.cc"
             )
 
@@ -710,6 +722,12 @@ if(NOT LANG_DIR STREQUAL "en-US")
 endif()
 
 file(GLOB COMMON_SOUNDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/common/*.ogg)
+file(GLOB FACE_TEST_IMAGES ${CMAKE_CURRENT_SOURCE_DIR}/assets/common/face_test.jpg)
+
+set(MODEL_REQUIRES)
+if(CONFIG_FACE_DETECTION_TEST_ON_BOOT)
+    list(APPEND MODEL_REQUIRES human_face_detect)
+endif()
 
 # If target chip is ESP32, exclude specific files to avoid build errors
 if(CONFIG_IDF_TARGET_ESP32)
@@ -724,8 +742,9 @@ if(CONFIG_IDF_TARGET_ESP32)
 endif()
 
 idf_component_register(SRCS ${SOURCES}
-                    EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS}
+                    EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS} ${FACE_TEST_IMAGES}
                     INCLUDE_DIRS ${INCLUDE_DIRS}
+                    REQUIRES ${MODEL_REQUIRES}
                     WHOLE_ARCHIVE
                     )
 

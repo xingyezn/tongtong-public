@@ -6,6 +6,24 @@ config OTA_URL
     help
         The application will access this URL to check for new firmwares and server address.
 
+config FACE_DETECTION_TEST_ON_BOOT
+    bool "Run ESP-DL face detection fixture on boot"
+    default n
+    depends on IDF_TARGET_ESP32S3
+    help
+        Decode assets/common/face_test.jpg and run HumanFaceDetect once after
+        application initialization. Results and inference latency are printed
+        to the serial console.
+
+config USB_CAMERA_BOOT_PROBE
+    bool "Probe one USB camera frame on boot"
+    default n
+    depends on IDF_TARGET_ESP32S3 && ESP_VIDEO_ENABLE_USB_UVC_VIDEO_DEVICE
+    help
+        Read and immediately return one UVC frame after startup. This verifies
+        that the USB camera has enumerated and is producing video without
+        retaining an image in memory. Intended for supervised hardware tests.
+
 choice
     prompt "Flash Assets"
     default FLASH_DEFAULT_ASSETS

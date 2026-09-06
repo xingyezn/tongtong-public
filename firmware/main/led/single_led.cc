@@ -63,6 +63,7 @@ void SingleLed::TurnOn() {
     esp_timer_stop(blink_timer_);
     led_strip_set_pixel(led_strip_, 0, r_, g_, b_);
     led_strip_refresh(led_strip_);
+    is_on_ = true;
 }
 
 void SingleLed::TurnOff() {
@@ -73,6 +74,7 @@ void SingleLed::TurnOff() {
     std::lock_guard<std::mutex> lock(mutex_);
     esp_timer_stop(blink_timer_);
     led_strip_clear(led_strip_);
+    is_on_ = false;
 }
 
 void SingleLed::BlinkOnce() {

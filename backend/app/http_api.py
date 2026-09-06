@@ -5,6 +5,7 @@
 参考源码 ota.cc::CheckVersion()。
 """
 
+import hashlib
 import json
 import logging
 import time
@@ -16,8 +17,9 @@ log = logging.getLogger("http")
 
 
 class HttpApi:
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, account_store=None):
         self.config = config
+        self.account_store = account_store
         # 设备 token 表: mac -> token
         self.device_tokens: dict = {}
 
@@ -43,6 +45,19 @@ class HttpApi:
         # 设备请求 OTA 配置（首次启动/周期检查）
         # 设备会在 headers 里带 Device-Id（MAC）/ Client-Id（UUID）
         device_id = request.headers.get("Device-Id", request.headers.get("Client-Id", ""))
+        client_id = request.headers.get("Client-Id", "")
+        device = None
+        if self.account_store and device_id:
+            try:
+                device = self.account_store.touch_device(device_id, client_id)
+            except ValueError as exc:
+                return web.json_response({"error": str(exc)}, status=400)
+        binding_code = device.get("binding_code") if device and not device.get("owner_user_id") else None
+        challenge = None
+        if binding_code:
+            challenge = hashlib.sha256(
+                (device["device_id"] + ":tongtong-bind").encode("utf-8")
+            ).hexdigest()
         resp = {
             "firmware": {
                 "version": "0.0.1",
@@ -50,9 +65,9 @@ class HttpApi:
                 "force": 0,
             },
             "activation": {
-                "message": "tongtong-omni-backend ready",
-                "code": None,
-                "challenge": None,
+                "message": "请登录管理页面并输入此绑定码" if binding_code else "tongtong-omni-backend ready",
+                "code": binding_code,
+                "challenge": challenge,
                 "timeout_ms": 60000,
             },
             "websocket": self._ws_config(device_id),
@@ -64,8 +79,14 @@ class HttpApi:
         return web.json_response(resp)
 
     async def activate(self, request: web.Request):
-        data = await request.json()
-        log.info("activate: %s", data)
+        device_id = request.headers.get("Device-Id", "")
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        log.info("activate: device=%s payload_keys=%s", device_id, sorted(data))
+        if self.account_store and not self.account_store.device_owner_id(device_id):
+            return web.json_response({"message": "waiting for device binding"}, status=202)
         return web.json_response({"message": "ok"})
 
     # ---- 路由（挂到主 app，不创建 subapp）----
