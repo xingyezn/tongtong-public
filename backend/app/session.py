@@ -127,6 +127,9 @@ class Session:
         self.omni_busy = False
         self._latest_call_id = 0
         self._omni_task = None
+        self._suppress_current_audio = False
+        self._active_stream_state = None
+        self._end_conversation_pending = False
         self._keepalive_task = asyncio.create_task(self._keepalive_loop())
 
         # 后端 VAD（静音自动结束）：说话中/静音计时
@@ -273,9 +276,12 @@ class Session:
                 return
             self.listening = False
             await self._abort_speaking()
-            conversation_id = (self.conversation_ender(self.device_id)
-                               if self.conversation_ender else None)
-            self._schedule_conversation_summary(conversation_id)
+            if self.omni_busy:
+                # Keep receiving the muted response so its complete text is
+                # recorded before this conversation is closed/summarized.
+                self._end_conversation_pending = True
+            else:
+                self._end_current_conversation()
         elif mtype == "mcp":
             if self._mcp:
                 self._mcp.on_device_mcp(msg.get("payload", {}))
@@ -315,7 +321,7 @@ class Session:
         """后端 VAD：说话结束后静音足够久 -> 自动触发 omni。
         auto 模式下设备不主动发 listen stop，由服务器端判断。
         """
-        if not self.listening or self._vad_triggered or self.omni_busy:
+        if not self.listening or self._vad_triggered:
             return
         # 有音频才可能判定结束（避免没说话就触发）
         if not self.up_pcm:
@@ -400,8 +406,18 @@ class Session:
             log.exception("omni turn failed")
         finally:
             self.omni_busy = False
+            self._active_stream_state = None
+            if self._end_conversation_pending:
+                self._end_conversation_pending = False
+                self.up_pcm.clear()
+                self._end_current_conversation()
+            elif self.up_pcm and (self._vad_triggered or not self.listening):
+                # A user may finish speaking while the interrupted response is
+                # still completing silently. Submit that buffered utterance now.
+                self._maybe_start_omni()
 
     async def _run_omni_turn(self, pcm: bytes):
+        self._suppress_current_audio = False
         # 无百炼 Key 时走回环模式，验证完整链路（说话→上行→下行→播放）
         if not self.omni.api_key:
             await self._echo_mode(pcm)
@@ -418,6 +434,7 @@ class Session:
             "audio_duration_s": 0.0,
             "next_frame_send_at": None,
         }
+        self._active_stream_state = stream_state
         text_parts = []
         input_transcript = ""
         last_display_update = 0.0
@@ -448,7 +465,8 @@ class Session:
                     log.info("user transcript: %s", input_transcript)
                     await self.send_json({"type": "stt", "text": input_transcript})
             elif et == "audio":
-                await self._stream_omni_audio(evt, stream_state)
+                if not self._suppress_current_audio:
+                    await self._stream_omni_audio(evt, stream_state)
             elif et == "done":
                 break
 
@@ -492,6 +510,8 @@ class Session:
             frame_bytes = self.server_sample_rate * DEVICE_FRAME_MS // 1000 * 2
             frame_dur = DEVICE_FRAME_MS / 1000.0
             for i in range(0, len(pcm24), frame_bytes):
+                if self._suppress_current_audio:
+                    break
                 chunk = pcm24[i:i + frame_bytes]
                 if len(chunk) < frame_bytes:
                     chunk = chunk + b"\x00" * (frame_bytes - len(chunk))
@@ -576,6 +596,10 @@ class Session:
 
     async def _finish_omni_audio(self, state: dict):
         """Flush a partial PCM frame and stop device playback exactly once."""
+        if self._suppress_current_audio:
+            state["pcm"].clear()
+            self.speaking = False
+            return
         await self._send_buffered_omni_frames(state, final=True)
 
         # The model can emit audio faster than real time. Do not use tts stop
@@ -648,21 +672,20 @@ class Session:
     # 打断
     # ------------------------------------------------------------------
     async def _abort_speaking(self):
-        log.info("abort speaking immediately: device=%s", self.device_id)
+        log.info("mute speaking; preserve response text: device=%s", self.device_id)
         was_active = self.speaking or self.omni_busy
         if was_active:
+            self._suppress_current_audio = True
             self._next_listen_discard_frames = VAD_POST_PLAYBACK_DISCARD_FRAMES
+            if self._active_stream_state is not None:
+                self._active_stream_state["pcm"].clear()
         await self.send_json({"type": "tts", "state": "stop"})
         self.speaking = False
-        if was_active and hasattr(self.omni, "cancel_current_response"):
-            await self.omni.cancel_current_response()
-        task = self._omni_task
-        if was_active and task and not task.done() and task is not asyncio.current_task():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+
+    def _end_current_conversation(self):
+        conversation_id = (self.conversation_ender(self.device_id)
+                           if self.conversation_ender else None)
+        self._schedule_conversation_summary(conversation_id)
 
     def _schedule_conversation_summary(self, conversation_id):
         if not conversation_id or not self.conversation_ended_callback:

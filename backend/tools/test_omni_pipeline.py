@@ -104,6 +104,36 @@ class FakeOmni:
         yield {"type": "done"}
 
 
+class InterruptibleFakeOmni:
+    """Pause mid-response so playback can be interrupted deterministically."""
+
+    api_key = "test-key"
+
+    def __init__(self):
+        self.reached_interrupt_point = asyncio.Event()
+        self.continue_response = asyncio.Event()
+
+    async def chat_stream(self, _pcm, tools=None, tool_handler=None):
+        yield {"type": "input_text", "text": "请把刚才的话说完"}
+        yield {"type": "text", "text": "前半句"}
+        frame = b"\x03\x00" * 1440
+        for _ in range(4):
+            yield {
+                "type": "audio",
+                "audio_b64": base64.b64encode(frame).decode(),
+                "sample_rate": 24000,
+            }
+        self.reached_interrupt_point.set()
+        await self.continue_response.wait()
+        yield {"type": "text", "text": "，后半句。"}
+        yield {
+            "type": "audio",
+            "audio_b64": base64.b64encode(frame).decode(),
+            "sample_rate": 24000,
+        }
+        yield {"type": "done"}
+
+
 class FakeRealtimeMessage:
     type = WSMsgType.TEXT
 
@@ -293,6 +323,51 @@ async def test_playback_prebuffer():
     assert len(ws.binary_messages) == 4
 
 
+async def test_interrupt_mutes_audio_but_preserves_complete_text():
+    config = {
+        "dashscope": {"output_sample_rate": 24000},
+        "vad": {"silence_duration_ms": 400, "energy_threshold": 100},
+    }
+    ws = FakeWebSocket()
+    omni = InterruptibleFakeOmni()
+    persisted = []
+    session = Session(
+        ws, config, omni, "interrupt-device",
+        turn_recorder=lambda *args: persisted.append(args),
+    )
+    session.device_encoder = FakeEncoder()
+
+    session.omni_busy = True
+    turn_task = asyncio.create_task(
+        session._run_omni_turn_task(b"\x00\x00" * 1600))
+    await asyncio.wait_for(omni.reached_interrupt_point.wait(), timeout=1)
+    assert len(ws.binary_messages) == 4
+
+    await session._abort_speaking()
+    assert not turn_task.done(), "interrupt must not cancel model generation"
+    assert session._suppress_current_audio
+    audio_count_at_interrupt = len(ws.binary_messages)
+
+    omni.continue_response.set()
+    await asyncio.wait_for(turn_task, timeout=1)
+
+    assert len(ws.binary_messages) == audio_count_at_interrupt
+    assert persisted == [(
+        "interrupt-device", "请把刚才的话说完", "前半句，后半句。",
+    )]
+    assert any(
+        message.get("type") == "tts" and message.get("state") == "stop"
+        for message in ws.text_messages
+    )
+    assert any(
+        message.get("type") == "tts"
+        and message.get("state") == "sentence_start"
+        and message.get("text") == "前半句，后半句。"
+        for message in ws.text_messages
+    )
+    await session.close()
+
+
 async def test_direct_mcp_bench_call():
     sent = []
     bridge = None
@@ -318,6 +393,7 @@ async def main():
     await test_realtime_tool_event_loop()
     await test_direct_mcp_bench_call()
     await test_playback_prebuffer()
+    await test_interrupt_mutes_audio_but_preserves_complete_text()
 
     config = {
         "dashscope": {"output_sample_rate": 24000},
