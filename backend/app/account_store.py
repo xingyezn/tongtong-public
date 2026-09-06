@@ -99,7 +99,9 @@ class AccountStore:
                     started_at REAL NOT NULL,
                     last_message_at REAL NOT NULL,
                     ended_at REAL,
-                    memory_updated_at REAL
+                    memory_updated_at REAL,
+                    deleted_at REAL,
+                    deleted_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_device
                     ON chat_sessions(user_id, device_id, last_message_at DESC);
@@ -137,6 +139,15 @@ class AccountStore:
             if "interruption_settings" not in columns:
                 self._db.execute(
                     "ALTER TABLE devices ADD COLUMN interruption_settings TEXT NOT NULL DEFAULT '{}'")
+            chat_columns = {
+                row["name"] for row in self._db.execute("PRAGMA table_info(chat_sessions)")
+            }
+            if "deleted_at" not in chat_columns:
+                self._db.execute(
+                    "ALTER TABLE chat_sessions ADD COLUMN deleted_at REAL")
+            if "deleted_by_user_id" not in chat_columns:
+                self._db.execute(
+                    "ALTER TABLE chat_sessions ADD COLUMN deleted_by_user_id INTEGER")
             self._repair_binding_codes_locked()
             self._db.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_binding_code
@@ -583,10 +594,10 @@ class AccountStore:
         if owner_id is None:
             return None
         now = time.time()
-        try:
-            timeout = max(60, min(7200, float(timeout_minutes) * 60))
-        except (TypeError, ValueError):
-            timeout = 600
+        # Kept in the signature for compatibility with older callers. A chat
+        # is now bounded only by standby -> active conversation -> standby,
+        # never by elapsed time between two turns.
+        _ = timeout_minutes
         with self._lock, self._db:
             self._db.execute("""
                 INSERT INTO conversation_turns(user_id,device_id,user_text,assistant_text,created_at)
@@ -597,12 +608,6 @@ class AccountStore:
                 WHERE user_id=? AND device_id=? AND ended_at IS NULL
                 ORDER BY id DESC LIMIT 1
             """, (owner_id, device_id)).fetchone()
-            ended_id = None
-            if row and now - row["last_message_at"] > timeout:
-                ended_id = row["id"]
-                self._db.execute(
-                    "UPDATE chat_sessions SET ended_at=? WHERE id=?", (now, ended_id))
-                row = None
             if row is None:
                 cursor = self._db.execute("""
                     INSERT INTO chat_sessions(user_id,device_id,title,started_at,last_message_at)
@@ -620,7 +625,7 @@ class AccountStore:
                 "UPDATE chat_sessions SET last_message_at=? WHERE id=?",
                 (now, conversation_id))
         return {"conversation_id": conversation_id,
-                "ended_conversation_id": ended_id}
+                "ended_conversation_id": None}
 
     def end_conversation(self, device_id):
         device_id = self.normalize_device_id(device_id)
@@ -636,6 +641,16 @@ class AccountStore:
                 "UPDATE chat_sessions SET ended_at=? WHERE id=?", (now, row["id"]))
             return row["id"]
 
+    def active_conversation_id(self, device_id):
+        device_id = self.normalize_device_id(device_id)
+        with self._lock:
+            row = self._db.execute("""
+                SELECT id FROM chat_sessions
+                WHERE device_id=? AND ended_at IS NULL AND deleted_at IS NULL
+                ORDER BY id DESC LIMIT 1
+            """, (device_id,)).fetchone()
+        return row["id"] if row else None
+
     def list_chat_sessions(self, user_id, device_id, limit=100):
         device_id = self.normalize_device_id(device_id)
         if not self.user_owns_device(user_id, device_id):
@@ -646,7 +661,8 @@ class AccountStore:
                 SELECT s.id,s.device_id,s.title,s.started_at,s.last_message_at,s.ended_at,
                        COUNT(m.id) AS message_count
                 FROM chat_sessions s LEFT JOIN chat_messages m ON m.conversation_id=s.id
-                WHERE s.user_id=? AND s.device_id=? GROUP BY s.id
+                WHERE s.user_id=? AND s.device_id=? AND s.deleted_at IS NULL
+                GROUP BY s.id
                 ORDER BY s.last_message_at DESC LIMIT ?
             """, (user_id, device_id, limit)).fetchall()
         return [dict(row) for row in rows]
@@ -654,7 +670,8 @@ class AccountStore:
     def get_chat_messages(self, user_id, conversation_id):
         with self._lock:
             session = self._db.execute(
-                "SELECT * FROM chat_sessions WHERE id=? AND user_id=?",
+                """SELECT * FROM chat_sessions
+                   WHERE id=? AND user_id=? AND deleted_at IS NULL""",
                 (int(conversation_id), user_id)).fetchone()
             if not session:
                 raise PermissionError("无权访问该会话")
@@ -668,7 +685,8 @@ class AccountStore:
     def conversation_for_memory(self, conversation_id):
         with self._lock:
             session = self._db.execute(
-                "SELECT * FROM chat_sessions WHERE id=?", (int(conversation_id),)
+                "SELECT * FROM chat_sessions WHERE id=? AND deleted_at IS NULL",
+                (int(conversation_id),)
             ).fetchone()
             if not session:
                 return None
@@ -682,16 +700,67 @@ class AccountStore:
     def mark_memory_updated(self, conversation_id):
         with self._lock, self._db:
             self._db.execute(
-                "UPDATE chat_sessions SET memory_updated_at=? WHERE id=?",
+                """UPDATE chat_sessions SET memory_updated_at=?
+                   WHERE id=? AND deleted_at IS NULL""",
                 (time.time(), int(conversation_id)))
 
-    def list_memories(self, user_id, enabled_only=False):
-        clause = " AND enabled=1" if enabled_only else ""
+    def soft_delete_conversation(self, user_id, conversation_id):
+        """Hide an ended chat from its owner while retaining an audit copy."""
+        conversation_id = int(conversation_id)
+        now = time.time()
+        with self._lock, self._db:
+            row = self._db.execute("""
+                SELECT id,device_id,ended_at FROM chat_sessions
+                WHERE id=? AND user_id=? AND deleted_at IS NULL
+            """, (conversation_id, user_id)).fetchone()
+            if not row:
+                raise PermissionError("无权访问该会话")
+            if row["ended_at"] is None:
+                raise AccountError("请先结束当前会话，再删除这条记录")
+            self._db.execute("""
+                UPDATE chat_sessions SET deleted_at=?,deleted_by_user_id=? WHERE id=?
+            """, (now, user_id, conversation_id))
+        return {"id": conversation_id, "device_id": row["device_id"],
+                "deleted_at": now}
+
+    def list_deleted_chat_sessions(self, limit=100):
+        """Internal administrative/audit view; never exposed to user APIs."""
+        limit = max(1, min(1000, int(limit)))
         with self._lock:
             rows = self._db.execute("""
-                SELECT id,category,label,value,enabled,source_conversation_id,
-                       created_at,updated_at FROM user_memories
-                WHERE user_id=?{} ORDER BY category,label
+                SELECT id,user_id,device_id,title,started_at,last_message_at,
+                       ended_at,memory_updated_at,deleted_at,deleted_by_user_id
+                FROM chat_sessions WHERE deleted_at IS NOT NULL
+                ORDER BY deleted_at DESC LIMIT ?
+            """, (limit,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_chat_messages_for_admin(self, conversation_id):
+        """Internal audit access, including user-deleted conversations."""
+        with self._lock:
+            session = self._db.execute(
+                "SELECT * FROM chat_sessions WHERE id=?", (int(conversation_id),)
+            ).fetchone()
+            if not session:
+                return None
+            messages = self._db.execute("""
+                SELECT id,role,content,created_at FROM chat_messages
+                WHERE conversation_id=? ORDER BY id
+            """, (int(conversation_id),)).fetchall()
+        return {"conversation": dict(session),
+                "messages": [dict(row) for row in messages]}
+
+    def list_memories(self, user_id, enabled_only=False):
+        clause = " AND um.enabled=1" if enabled_only else ""
+        with self._lock:
+            rows = self._db.execute("""
+                SELECT um.id,um.category,um.label,um.value,um.enabled,
+                       um.source_conversation_id,um.created_at,um.updated_at
+                FROM user_memories um
+                LEFT JOIN chat_sessions source ON source.id=um.source_conversation_id
+                WHERE um.user_id=?
+                  AND (um.source_conversation_id IS NULL OR source.deleted_at IS NULL)
+                  {} ORDER BY um.category,um.label
             """.format(clause), (user_id,)).fetchall()
         result = [dict(row) for row in rows]
         for item in result:
@@ -766,8 +835,21 @@ class AccountStore:
         limit = max(1, min(500, int(limit)))
         with self._lock:
             rows = self._db.execute("""
-                SELECT id, device_id, user_text, assistant_text, created_at
-                FROM conversation_turns WHERE user_id=? AND device_id=?
+                WITH ordered AS (
+                    SELECT m.id,s.device_id,m.role,m.content,m.created_at,
+                           LEAD(m.role) OVER (
+                               PARTITION BY m.conversation_id ORDER BY m.id
+                           ) AS next_role,
+                           LEAD(m.content) OVER (
+                               PARTITION BY m.conversation_id ORDER BY m.id
+                           ) AS next_content
+                    FROM chat_sessions s
+                    JOIN chat_messages m ON m.conversation_id=s.id
+                    WHERE s.user_id=? AND s.device_id=? AND s.deleted_at IS NULL
+                )
+                SELECT id,device_id,content AS user_text,
+                       next_content AS assistant_text,created_at
+                FROM ordered WHERE role='user' AND next_role='assistant'
                 ORDER BY id DESC LIMIT ?
             """, (user_id, device_id, limit)).fetchall()
         result = [dict(row) for row in rows]

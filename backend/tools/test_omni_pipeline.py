@@ -134,6 +134,30 @@ class InterruptibleFakeOmni:
         yield {"type": "done"}
 
 
+class FarewellFakeOmni:
+    api_key = "test-key"
+
+    def __init__(self):
+        self.reset_count = 0
+
+    async def chat_stream(self, _pcm, tools=None, tool_handler=None):
+        names = {tool["function"]["name"] for tool in tools}
+        assert "server.conversation.end" in names
+        result = await tool_handler({
+            "type": "tool_call",
+            "id": "call-end-1",
+            "name": "server.conversation.end",
+            "arguments": {},
+        })
+        assert json.loads(result)["accepted"]
+        yield {"type": "input_text", "text": "你可以退下了"}
+        yield {"type": "text", "text": "好的，需要时再叫我。"}
+        yield {"type": "done"}
+
+    async def reset_conversation(self):
+        self.reset_count += 1
+
+
 class FakeRealtimeMessage:
     type = WSMsgType.TEXT
 
@@ -368,6 +392,41 @@ async def test_interrupt_mutes_audio_but_preserves_complete_text():
     await session.close()
 
 
+async def test_model_farewell_enters_standby_after_text_is_saved():
+    config = {
+        "dashscope": {"output_sample_rate": 24000},
+        "vad": {"silence_duration_ms": 400, "energy_threshold": 100},
+    }
+    ws = FakeWebSocket()
+    omni = FarewellFakeOmni()
+    events = []
+
+    def record_turn(*args):
+        events.append(("record", args))
+        return {"conversation_id": 7, "ended_conversation_id": None}
+
+    def end_conversation(device_id):
+        events.append(("end", device_id))
+        return 7
+
+    session = Session(
+        ws, config, omni, "farewell-device",
+        turn_recorder=record_turn,
+        conversation_ender=end_conversation,
+    )
+    session.device_encoder = FakeEncoder()
+    await session._run_omni_turn(b"\x00\x00" * 1600)
+
+    assert events == [
+        ("record", ("farewell-device", "你可以退下了", "好的，需要时再叫我。")),
+        ("end", "farewell-device"),
+    ]
+    assert omni.reset_count == 1
+    assert not session.listening
+    assert ws.text_messages[-1] == {"type": "system", "command": "standby"}
+    await session.close()
+
+
 async def test_direct_mcp_bench_call():
     sent = []
     bridge = None
@@ -394,6 +453,7 @@ async def main():
     await test_direct_mcp_bench_call()
     await test_playback_prebuffer()
     await test_interrupt_mutes_audio_but_preserves_complete_text()
+    await test_model_farewell_enters_standby_after_text_is_saved()
 
     config = {
         "dashscope": {"output_sample_rate": 24000},

@@ -250,6 +250,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .conversation-list { max-height:520px; overflow:auto; display:flex; flex-direction:column; gap:7px; }
   .conversation-item { border:1px solid #dceaf2; border-radius:10px; padding:9px 11px; background:#f8fcfe; cursor:pointer; }
   .conversation-item.active { border-color:var(--acc); background:#edf7ff; }
+  .conversation-delete { float:right; padding:4px 8px; margin-left:8px; font-size:11px; }
   .chat-messages { max-height:520px; overflow:auto; padding:12px; border:1px solid #dceaf2; border-radius:12px; background:#f8fbfd; display:flex; flex-direction:column; gap:10px; }
   .chat-message { max-width:78%; padding:9px 12px; border-radius:14px; white-space:pre-wrap; overflow-wrap:anywhere; }
   .chat-message.user { align-self:flex-end; background:#dff1ff; border-bottom-right-radius:4px; }
@@ -464,9 +465,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <textarea id="cfg-instructions" rows="4" placeholder="你是童童，一个友好、热情的语音助手……" style="flex:1;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4;resize:vertical;font-family:Consolas,monospace;font-size:12px"></textarea>
     </div>
     <div class="row" style="margin-bottom:10px">
-      <label class="muted" style="min-width:130px">对话连续时长（分钟）</label>
+      <label class="muted" style="min-width:130px">模型连接复用（分钟）</label>
       <input type="number" id="cfg-conversation-timeout" min="1" max="120" step="1" value="10" style="flex:1;max-width:140px;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4">
-      <span class="muted">无新对话超过此时长后重置</span>
+      <span class="muted">超时后重连模型，但保留本次会话上下文</span>
     </div>
     <div class="row">
       <button class="btn" id="save-model-btn" onclick="saveModel()">保存模型 / 语言 / 音色 / 设定</button>
@@ -474,7 +475,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
     <div class="hint">
       修改后<b>下一轮对话生效</b>，并持久化保存（重启仍生效）。语言会同时约束语音识别和模型回复。
-      对话连续时长可设置为 1～120 分钟，默认 10 分钟。
+      一次会话严格从离开待命开始，到再次进入待命结束；模型连接复用时长可设置为 1～120 分钟。
       模型需为百炼 Realtime 系列（如 qwen3.5-omni-flash-realtime / qwen3.5-omni-plus-realtime）。
     </div>
   </div>
@@ -486,7 +487,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <label class="row"><input type="checkbox" id="feature-button-interrupt"> 单击复位待命键：打断并继续聆听</label>
     <label class="row"><input type="checkbox" id="feature-double-end"> 双击复位待命键：结束本次会话</label>
     <div class="row" style="margin-top:10px"><button class="btn" onclick="saveFeatures()">保存功能设置</button><span class="muted" id="feature-status"></span></div>
-    <div class="hint">无回声消除的设备无法可靠地在扬声器播放时检测任意语音，因此自动模式使用唤醒词打断；按键打断始终能立即取消模型生成与播放。</div>
+    <div class="hint">无回声消除的设备无法可靠地在扬声器播放时检测任意语音，因此自动模式使用唤醒词打断；按键打断会立即停止音频播放，但仍会保留模型生成的完整文本。</div>
   </div>
 
   <div class="card">
@@ -1089,6 +1090,16 @@ async function loadConversations() {
           new Date(conversation.last_message_at * 1000).toLocaleString() + ' · ' + conversation.message_count + ' 条消息' +
           (conversation.ended_at ? '' : ' · 进行中') + '</div>';
         item.onclick = () => { activeConversationId = conversation.id; loadConversationMessages(); loadConversations(); };
+        if (conversation.ended_at) {
+          const remove = document.createElement("button");
+          remove.className = "btn warn conversation-delete";
+          remove.textContent = "删除";
+          remove.onclick = event => {
+            event.stopPropagation();
+            deleteConversation(conversation.id);
+          };
+          item.prepend(remove);
+        }
         box.appendChild(item);
       });
       await loadConversationMessages();
@@ -1118,10 +1129,22 @@ async function endConversation() {
   try {
     const data = await apiJson("/api/conversations/end", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({device_id:activeDeviceId})});
     activeConversationId = data.conversation_id || activeConversationId;
-    showToast(data.conversation_id ? "会话已结束，正在整理长期记忆" : "当前没有进行中的会话", "ok");
+    showToast(data.pending ? "将在当前文本保存后结束会话" :
+      (data.conversation_id ? "会话已结束，正在整理长期记忆" : "当前没有进行中的会话"), "ok");
     await loadConversations();
     setTimeout(loadMemories, 2500);
   } catch (e) { showToast("结束会话失败：" + e.message, "err"); }
+}
+
+async function deleteConversation(id) {
+  if (!confirm("删除这次会话记录？删除后将不再用于对话上下文或长期记忆。")) return;
+  try {
+    await apiJson("/api/conversations/delete", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({conversation_id:id})});
+    if (String(activeConversationId) === String(id)) activeConversationId = null;
+    showToast("会话记录已删除", "ok");
+    await loadConversations();
+    await loadMemories();
+  } catch (e) { showToast("删除失败：" + e.message, "err"); }
 }
 
 async function loadFeatures() {
@@ -1225,6 +1248,7 @@ class Dashboard:
         app.router.add_post("/api/devices/unbind", self.api_device_unbind)
         app.router.add_get("/api/conversations", self.api_conversations)
         app.router.add_post("/api/conversations/end", self.api_conversation_end)
+        app.router.add_post("/api/conversations/delete", self.api_conversation_delete)
         app.router.add_get("/api/memories", self.api_memories)
         app.router.add_post("/api/memories", self.api_memory_create)
         app.router.add_post("/api/memories/update", self.api_memory_update)
@@ -1485,17 +1509,36 @@ class Dashboard:
                                   "turns": turns})
 
     async def api_conversation_end(self, request):
-        user = self._require_user(request)
+        self._require_user(request)
         data = await request.json()
         device_id = data.get("device_id", "")
         self._require_owned_device(request, device_id)
-        conversation_id = self.account_store.end_conversation(device_id)
+        conversation_id = self.account_store.active_conversation_id(device_id)
         session = self.sessions.get(device_id)
         if session:
-            await session._abort_speaking()
-        if conversation_id and self.gateway:
+            pending = bool(session.omni_busy)
+            ended_now = await session.request_end_conversation()
+            conversation_id = ended_now or conversation_id
+        else:
+            pending = False
+            conversation_id = self.account_store.end_conversation(device_id)
+        if conversation_id and self.gateway and not session:
             asyncio.create_task(self.gateway.summarize_conversation(conversation_id))
-        return web.json_response({"conversation_id": conversation_id})
+        return web.json_response({"conversation_id": conversation_id,
+                                  "pending": pending})
+
+    async def api_conversation_delete(self, request):
+        user = self._require_user(request)
+        try:
+            data = await request.json()
+            deleted = self.account_store.soft_delete_conversation(
+                user["id"], data.get("conversation_id"))
+        except PermissionError as exc:
+            return web.json_response({"error": str(exc)}, status=403)
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        self._refresh_user_sessions(user["id"])
+        return web.json_response({"deleted": deleted})
 
     async def api_memories(self, request):
         user = self._require_user(request)

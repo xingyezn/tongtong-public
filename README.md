@@ -16,10 +16,12 @@ and hardware diagnostics dashboard.
   name, which the user can customize later.
 - Binding attempts are rate-limited by both account and source IP, and an atomic
   database claim guarantees that one device can belong to only one user.
-- Independent model, language, voice, persona, conversation timeout, and VAD
+- Independent model, language, voice, persona, model-connection reuse, and VAD
   settings for every bound device.
 - GPT-style conversation history: one saved conversation contains an ordered
-  stream of separate user and assistant messages rather than paired turn cards.
+  stream of user and assistant messages from leaving standby until returning to it.
+- Users can soft-delete completed conversations. Deleted content remains available
+  for administrative audit but is hidden from users, model context, and memory jobs.
 - Opt-in permanent user memory. Completed conversations can be conservatively
   summarized by `qwen3.8-max`; users can view, edit, disable, or delete every
   fact and independently allow memory use on each device.
@@ -27,17 +29,20 @@ and hardware diagnostics dashboard.
 - Lower turn latency by uploading captured audio without a second paced replay.
 - Persistent model WebSocket reuse between turns whenever the provider keeps the
   connection open.
-- Per-device conversation continuity for the latest 20 complete turns, including
-  recovery after a device or backend restart.
-- Configurable conversation idle timeout from 1 to 120 minutes (10 minutes by
-  default).
+- Per-device continuity for the latest 20 complete turns in the current standby
+  cycle, including context recovery after a model WebSocket reconnect.
+- Configurable model-connection reuse from 1 to 120 minutes; this does not split
+  the persisted conversation.
 - A 240 ms startup jitter buffer on both the server and device, plus deadline-based
   frame pacing to reduce broken or stuttering speech.
 - Automatic device WebSocket reconnection with exponential backoff up to 30 seconds.
-- True barge-in cancels model generation and device playback immediately. The
+- True barge-in stops device playback immediately while model generation continues
+  and its complete text is retained. The
   standby button interrupts and resumes listening on one click, or ends the
   conversation on a double click; wake-word interruption and all three controls
   are configurable per device.
+- When a user clearly says goodbye, asks to end the conversation, or dismisses the
+  assistant, the device enters standby automatically after the final reply finishes.
 - 29 officially supported speech-output languages, plus automatic language
   detection. The dashboard displays every option as a Chinese name followed by
   its native name.
@@ -61,12 +66,12 @@ qwen3.5-omni-plus-realtime
 
 The device performs local VAD and sends one captured utterance to the backend.
 The backend forwards it to the model, streams the generated audio back, and keeps
-conversation state by user and device. A conversation is closed explicitly or
-after its configured idle timeout; its ordered messages remain one chat record.
+conversation state by user and device. One conversation begins when the device
+leaves standby and ends only when it returns to standby; its ordered messages remain one chat record.
 Enabled long-term memories are injected as a delimited part of the system prompt
 only for devices whose owner allowed it. Model-side WebSocket state is reused when
-possible; recent transcriptions stored in SQLite restore context after provider,
-device, or backend reconnects. Assistant transcript deltas are also forwarded to
+possible; recent turns from the active standby cycle restore context after a provider
+reconnect. A device reconnect creates a new standby boundary. Assistant transcript deltas are also forwarded to
 the device display while speech is playing.
 
 ## Repository layout
@@ -188,9 +193,11 @@ Default routes include:
 - `GET|POST /register` and `/login` — account registration and login.
 - `GET|POST /api/devices/*` — account-owned device binding and management.
 - `GET|POST /api/model?device_id=...` — per-device model, language, voice,
-  persona, and conversation-timeout settings.
+  persona, and model-connection-reuse settings.
 - `GET /api/conversations?device_id=...` — conversation list; add
   `conversation_id=...` to read its ordered messages.
+- `POST /api/conversations/end|delete` — end the active conversation or soft-delete
+  a completed conversation.
 - `GET|POST /api/memories*` — view and manage the signed-in user's permanent memory.
 - `GET|POST /api/features?device_id=...` — per-device memory and interruption controls.
 

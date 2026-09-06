@@ -87,6 +87,12 @@ class MemoryService:
             content = result["choices"][0]["message"]["content"]
             parsed = json.loads(content) if isinstance(content, str) else content
             memories = parsed.get("memories", []) if isinstance(parsed, dict) else []
+            # The user may delete the conversation while the model request is
+            # in flight. Never write memories derived from a now-hidden chat.
+            if not self.store.conversation_for_memory(conversation_id):
+                log.info("memory summary discarded after conversation deletion: %s",
+                         conversation_id)
+                return []
             saved = []
             limit = int(self.config.get("memory", {}).get("max_memories_per_run", 12))
             for item in memories[:max(1, min(30, limit))]:

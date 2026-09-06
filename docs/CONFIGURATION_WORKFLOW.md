@@ -120,9 +120,10 @@ terminal transcripts.
    to the server and restart the service.
 5. Never edit a tracked placeholder to make a deployment work.
 
-运行中的后端也可通过管理页面修改“对话连续时长（分钟）”（1～120，默认
-10）。该值写入后端运行配置，后续新一轮对话会按新值判断空闲超时；设备重连
-仍会立即创建全新的模型会话。
+运行中的后端也可通过管理页面修改“模型连接复用（分钟）”（1～120，默认
+10）。该值只控制何时重建服务商 WebSocket；重建时仍会恢复当前待命周期内的
+上下文，不会切分对话记录。只有设备再次进入待命或设备连接重建，才结束本次
+会话并让下一次唤醒创建新会话。
 
 ### Secret rotation
 

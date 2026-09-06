@@ -226,6 +226,13 @@ class OmniClient:
         if self._session and not self._session.closed:
             await self._session.close()
 
+    async def reset_conversation(self):
+        """Start the next wake cycle with no prior chat-session context."""
+        self._conversation_memory["turns"] = []
+        self._conversation_memory["last_activity"] = 0.0
+        await self._reset_realtime()
+        log.info("omni: conversation context reset for standby")
+
     async def _reset_realtime(self):
         ws = self._ws
         self._ws = None
@@ -279,8 +286,6 @@ class OmniClient:
         if not self.workspace:
             yield {"type": "error", "message": "未配置 workspace_id"}
             return
-
-        self._expire_conversation_memory()
 
         session = await self.ensure_session()
         headers = {

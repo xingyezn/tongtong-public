@@ -593,6 +593,7 @@ void Application::InitializeProtocol() {
                 audio_service_.PreparePlaybackStream();
                 Schedule([this]() {
                     aborted_ = false;
+                    standby_after_tts_ = false;
                     CancelPendingTtsResume();
                     SetDeviceState(kDeviceStateSpeaking);
                 });
@@ -658,6 +659,21 @@ void Application::InitializeProtocol() {
                     ESP_LOGI(TAG, "Conversation config: auto=%d button=%d double_end=%d",
                         automatic_interrupt_enabled_, button_interrupt_enabled_,
                         double_click_end_enabled_);
+                } else if (strcmp(command->valuestring, "standby") == 0) {
+                    // The server sends this only after the assistant's final
+                    // farewell text has been saved and its TTS stream closed.
+                    // If audio is still draining locally, defer idle until the
+                    // decoder/DMA path is genuinely complete.
+                    Schedule([this]() {
+                        standby_after_tts_ = true;
+                        if (GetDeviceState() != kDeviceStateSpeaking) {
+                            standby_after_tts_ = false;
+                            CancelPendingTtsResume();
+                            SetDeviceState(kDeviceStateIdle);
+                        } else if (!tts_resume_pending_) {
+                            HandleTtsStopped();
+                        }
+                    });
                 } else {
                     ESP_LOGW(TAG, "Unknown system command: %s", command->valuestring);
                 }
@@ -808,6 +824,8 @@ void Application::HandleEndConversationEvent() {
         protocol_->SendStopListening();
     }
     protocol_->SendEndConversation();
+    standby_after_tts_ = false;
+    CancelPendingTtsResume();
     SetDeviceState(kDeviceStateIdle);
 }
 
@@ -979,6 +997,7 @@ void Application::AbortSpeaking(AbortReason reason) {
     // after listening starts, which produces a false 0.7 s user utterance.
     audio_service_.ResetDecoder();
     CancelPendingTtsResume();
+    standby_after_tts_ = false;
     aborted_ = true;
     if (protocol_) {
         protocol_->SendAbortSpeaking(reason);
@@ -1038,8 +1057,14 @@ void Application::ResumeListeningAfterPlayback() {
 
     tts_resume_pending_ = false;
     tts_playback_drained_ = false;
-    ESP_LOGI(TAG, "Echo guard complete; resuming automatic listening");
-    SetListeningMode(kListeningModeAutoStop);
+    if (standby_after_tts_) {
+        standby_after_tts_ = false;
+        ESP_LOGI(TAG, "Final farewell complete; entering standby");
+        SetDeviceState(kDeviceStateIdle);
+    } else {
+        ESP_LOGI(TAG, "Echo guard complete; resuming automatic listening");
+        SetListeningMode(kListeningModeAutoStop);
+    }
 }
 
 void Application::Reboot() {

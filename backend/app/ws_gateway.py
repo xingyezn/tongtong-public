@@ -47,39 +47,26 @@ class WsGateway:
         return config
 
     def _conversation_memory(self, device_id: str) -> dict:
-        now = time.time()
-        device_config = self._device_config(device_id)
-        try:
-            timeout = float(
-                device_config.get("dashscope", {}).get("conversation_timeout_minutes", 10)
-            ) * 60.0
-        except (TypeError, ValueError):
-            timeout = 600.0
-        timeout = max(60.0, min(7200.0, timeout))
         owner_id = (self.account_store.device_owner_id(device_id)
                     if self.account_store else None)
-        memory = self.device_conversations.get(device_id)
-        if memory is None or (
-                memory.get("owner_user_id") != owner_id or
-                memory.get("last_activity", 0.0)
-                and now - memory["last_activity"] > timeout):
-            memory = {
-                "turns": [],
-                "last_activity": 0.0,
-                "owner_user_id": owner_id,
-            }
-            if self.account_store:
-                if owner_id is not None:
-                    rows = self.account_store.list_conversations(
-                        owner_id, device_id, limit=20, ascending=True)
-                    memory["turns"] = [
-                        {"user": row["user_text"], "assistant": row["assistant_text"]}
-                        for row in rows
-                    ]
-                    if rows:
-                        memory["last_activity"] = rows[-1]["created_at"]
-            self.device_conversations[device_id] = memory
+        # A device WebSocket opens while the device is in standby. Previous
+        # chat sessions are deliberately not restored: only permanent memory
+        # crosses a standby boundary.
+        memory = {
+            "turns": [],
+            "last_activity": 0.0,
+            "owner_user_id": owner_id,
+        }
+        self.device_conversations[device_id] = memory
         return memory
+
+    def _end_disconnected_conversation(self, device_id):
+        if not self.account_store:
+            return None
+        conversation_id = self.account_store.end_conversation(device_id)
+        if conversation_id and self.memory_service:
+            asyncio.create_task(self.summarize_conversation(conversation_id))
+        return conversation_id
 
     async def summarize_conversation(self, conversation_id):
         if not self.memory_service:
@@ -130,6 +117,9 @@ class WsGateway:
                 await old.close()
             except Exception:
                 pass
+            # Reconnection puts the firmware into standby, so it is also an
+            # explicit boundary for the persisted chat session.
+            self._end_disconnected_conversation(device_id)
 
         binding_code = (
             device_record.get("binding_code")
@@ -191,9 +181,12 @@ class WsGateway:
         finally:
             # A reconnect may already have installed a newer Session for this
             # device. Do not let the old connection remove the replacement.
-            if self.sessions.get(device_id) is session:
+            was_current = self.sessions.get(device_id) is session
+            if was_current:
                 self.sessions.pop(device_id, None)
             await session.close()
+            if was_current:
+                self._end_disconnected_conversation(device_id)
             if device_id in self.device_history:
                 self.device_history[device_id]["last_seen"] = time.time()
             log.info("device %s disconnected", device_id)

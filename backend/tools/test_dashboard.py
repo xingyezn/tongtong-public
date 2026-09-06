@@ -166,6 +166,21 @@ async def main():
             messages = (await r.json())["messages"]
             assert [message["role"] for message in messages] == ["user", "assistant"]
 
+            store.end_conversation(first["device_id"])
+            r = await client.post(
+                "http://127.0.0.1:8099/api/conversations/delete",
+                headers=headers, json={"conversation_id": conversations[0]["id"]})
+            assert r.status == 200
+            r = await client.get(
+                "http://127.0.0.1:8099/api/conversations?device_id=" + first["device_id"],
+                headers=headers)
+            hidden = await r.json()
+            assert hidden["conversations"] == [] and hidden["turns"] == []
+            r = await client.get(
+                "http://127.0.0.1:8099/api/conversations?conversation_id=" +
+                str(conversations[0]["id"]), headers=headers)
+            assert r.status == 403
+
             r = await client.post("http://127.0.0.1:8099/api/memories", headers=headers,
                                   json={"category": "偏好", "label": "颜色", "value": "蓝色"})
             assert r.status == 200 and (await r.json())["value"] == "蓝色"

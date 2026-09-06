@@ -40,6 +40,20 @@ TTS_PLAYBACK_TRANSPORT_MARGIN_S = 0.20
 VAD_POST_PLAYBACK_DISCARD_FRAMES = 4  # 240 ms of simplex speaker tail
 VAD_MIN_CONSECUTIVE_SPEECH_FRAMES = 3  # 180 ms of sustained energy
 VAD_PREROLL_FRAMES = 5  # keep 300 ms before confirmed speech
+CONVERSATION_END_TOOL_NAME = "server.conversation.end"
+CONVERSATION_END_TOOL = {
+    "type": "function",
+    "function": {
+        "name": CONVERSATION_END_TOOL_NAME,
+        "description": (
+            "仅当用户明确表示要结束当前对话、让助手退下或告别时调用。"
+            "用户只是在讨论如何结束对话、引用别人的话或意图不明确时不要调用。"
+            "调用成功后仍要给用户一句简短自然的告别回复；系统会等该回复的"
+            "音频播放完、文本保存完之后再进入待命状态。"
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
 
 
 class BinaryProtocolError(Exception):
@@ -130,6 +144,7 @@ class Session:
         self._suppress_current_audio = False
         self._active_stream_state = None
         self._end_conversation_pending = False
+        self._standby_after_response = False
         self._keepalive_task = asyncio.create_task(self._keepalive_loop())
 
         # 后端 VAD（静音自动结束）：说话中/静音计时
@@ -274,14 +289,7 @@ class Session:
         elif mtype == "conversation" and msg.get("action") == "end":
             if not self.config.get("features", {}).get("double_click_end", True):
                 return
-            self.listening = False
-            await self._abort_speaking()
-            if self.omni_busy:
-                # Keep receiving the muted response so its complete text is
-                # recorded before this conversation is closed/summarized.
-                self._end_conversation_pending = True
-            else:
-                self._end_current_conversation()
+            await self.request_end_conversation()
         elif mtype == "mcp":
             if self._mcp:
                 self._mcp.on_device_mcp(msg.get("payload", {}))
@@ -410,7 +418,7 @@ class Session:
             if self._end_conversation_pending:
                 self._end_conversation_pending = False
                 self.up_pcm.clear()
-                self._end_current_conversation()
+                await self._enter_standby()
             elif self.up_pcm and (self._vad_triggered or not self.listening):
                 # A user may finish speaking while the interrupted response is
                 # still completing silently. Submit that buffered utterance now.
@@ -418,6 +426,7 @@ class Session:
 
     async def _run_omni_turn(self, pcm: bytes):
         self._suppress_current_audio = False
+        self._standby_after_response = False
         # 无百炼 Key 时走回环模式，验证完整链路（说话→上行→下行→播放）
         if not self.omni.api_key:
             await self._echo_mode(pcm)
@@ -441,6 +450,7 @@ class Session:
         last_display_text = ""
 
         tools = self._mcp.make_omni_tools() if self._mcp else []
+        tools.append(CONVERSATION_END_TOOL)
         async for evt in self.omni.chat_stream(
                 pcm, tools=tools, tool_handler=self._handle_tool_call):
             et = evt.get("type")
@@ -488,6 +498,8 @@ class Session:
             except Exception:
                 log.exception("failed to persist conversation turn for %s", self.device_id)
         await self._finish_omni_audio(stream_state)
+        if self._standby_after_response:
+            await self._enter_standby()
         log.info("omni turn done, streamed=%s", stream_state["started"])
 
     async def _echo_mode(self, pcm: bytes):
@@ -630,6 +642,13 @@ class Session:
         name = evt.get("name")
         arguments = evt.get("arguments") or {}
         call_id = evt.get("id")
+        if name == CONVERSATION_END_TOOL_NAME:
+            self._standby_after_response = True
+            log.info("model requested standby after response: device=%s", self.device_id)
+            return json.dumps({
+                "accepted": True,
+                "instruction": "请给出简短告别回复；播放和保存完成后系统将进入待命。",
+            }, ensure_ascii=False)
         if not name or not self._mcp:
             return None
 
@@ -682,10 +701,30 @@ class Session:
         await self.send_json({"type": "tts", "state": "stop"})
         self.speaking = False
 
-    def _end_current_conversation(self):
+    async def request_end_conversation(self):
+        """End by button/dashboard, preserving an in-flight response's text."""
+        self.listening = False
+        await self._abort_speaking()
+        if self.omni_busy:
+            self._end_conversation_pending = True
+            return None
+        return await self._enter_standby()
+
+    async def _enter_standby(self):
+        self._standby_after_response = False
+        self._end_conversation_pending = False
+        self.listening = False
+        self.up_pcm.clear()
+        await self.send_json({"type": "system", "command": "standby"})
+        return await self._end_current_conversation()
+
+    async def _end_current_conversation(self):
         conversation_id = (self.conversation_ender(self.device_id)
                            if self.conversation_ender else None)
+        if hasattr(self.omni, "reset_conversation"):
+            await self.omni.reset_conversation()
         self._schedule_conversation_summary(conversation_id)
+        return conversation_id
 
     def _schedule_conversation_summary(self, conversation_id):
         if not conversation_id or not self.conversation_ended_callback:

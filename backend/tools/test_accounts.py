@@ -46,6 +46,15 @@ def main():
         messages = store.get_chat_messages(alice["id"], chats[0]["id"])["messages"]
         assert [(item["role"], item["content"]) for item in messages] == [
             ("user", "hello"), ("assistant", "world")]
+        # Elapsed time no longer splits a chat. Only returning to standby
+        # (end_conversation) creates the boundary.
+        with store._lock, store._db:
+            store._db.execute(
+                "UPDATE chat_sessions SET last_message_at=? WHERE id=?",
+                (time.time() - 7200, chats[0]["id"]))
+        second_turn = store.record_turn(
+            dev["device_id"], "still there", "yes", timeout_minutes=1)
+        assert second_turn["conversation_id"] == chats[0]["id"]
         memory = store.upsert_memory(
             alice["id"], "偏好", "喜欢的颜色", "蓝色")
         assert store.memory_prompt(alice["id"]) == "- 喜欢的颜色：蓝色"
@@ -57,6 +66,34 @@ def main():
         assert features["button_interrupt"] and features["double_click_end"]
         ended_id = store.end_conversation(dev["device_id"])
         assert ended_id == chats[0]["id"]
+        sourced = store.upsert_memory(
+            alice["id"], "偏好", "常用问候", "hello",
+            source_conversation_id=ended_id)
+        assert any(item["id"] == sourced["id"] for item in store.list_memories(alice["id"]))
+        deleted = store.soft_delete_conversation(alice["id"], ended_id)
+        assert deleted["id"] == ended_id
+        assert store.list_chat_sessions(alice["id"], dev["device_id"]) == []
+        assert store.list_conversations(alice["id"], dev["device_id"]) == []
+        assert all(item["id"] != sourced["id"] for item in store.list_memories(alice["id"]))
+        assert store.conversation_for_memory(ended_id) is None
+        assert store.list_deleted_chat_sessions()[0]["id"] == ended_id
+        audit = store.get_chat_messages_for_admin(ended_id)
+        assert audit["conversation"]["deleted_at"] is not None
+        assert [item["content"] for item in audit["messages"]] == [
+            "hello", "world", "still there", "yes"]
+        try:
+            store.get_chat_messages(alice["id"], ended_id)
+            raise AssertionError("deleted conversation remained visible to its owner")
+        except PermissionError:
+            pass
+        try:
+            store.soft_delete_conversation(bob["id"], ended_id)
+            raise AssertionError("cross-user conversation deletion was accepted")
+        except PermissionError:
+            pass
+
+        next_chat = store.record_turn(dev["device_id"], "new wake", "new chat")
+        assert next_chat["conversation_id"] != ended_id
         try:
             store.list_conversations(bob["id"], dev["device_id"])
             raise AssertionError("cross-user conversation access was accepted")

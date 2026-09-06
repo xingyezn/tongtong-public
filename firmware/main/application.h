@@ -147,6 +147,7 @@ private:
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
     bool tts_resume_pending_ = false;
     bool tts_playback_drained_ = false;
+    bool standby_after_tts_ = false;
     std::atomic<bool> accepting_tts_audio_{false};
     bool network_connected_ = false;
     bool automatic_interrupt_enabled_ = true;
