@@ -141,11 +141,16 @@ LOGIN_HTML = r"""<!DOCTYPE html>
            transition:transform .18s, box-shadow .18s; }
   button:hover { transform:translateY(-1px); box-shadow:0 11px 20px rgba(45,140,240,.28); }
   .error { margin-bottom:12px; color:#d9435b; font-size:13px; text-align:center; }
+  .env-warning { margin:0 auto 16px; padding:12px 14px; border:2px solid #c93636; border-radius:10px;
+                 color:#8b1717; background:#fff0f0; font-size:13px; font-weight:800; line-height:1.45;
+                 text-align:center; box-shadow:0 4px 12px rgba(201,54,54,.14); position:fixed; top:16px;
+                 left:50%; z-index:20; width:min(420px, calc(100vw - 32px)); transform:translateX(-50%); }
   .switch { margin:16px 0 0; color:var(--muted); font-size:13px; text-align:center; }
   .switch a { color:var(--blue-deep); text-decoration:none; font-weight:700; }
 </style>
 </head>
 <body>
+<!--ENV_WARNING-->
 <div class="box">
   <p class="eyebrow">TONGTONG · CONTROL CENTER</p>
   <h1>童童监控中心</h1>
@@ -239,13 +244,22 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .test-actions { display:flex; flex-wrap:wrap; gap:7px; }
   .test-actions .btn { padding:7px 10px; font-size:12px; }
   .test-input { width:72px; padding:6px 7px !important; }
-  #hardware-test-result { min-height:42px; max-height:180px; overflow:auto; margin-top:12px; padding:9px 11px; border:1px solid #dceaf2; border-radius:9px; background:#f7fbfd; color:#3b5265; font:12px/1.5 Consolas,monospace; white-space:pre-wrap; }
+  #hardware-test-result { min-height:42px; overflow:visible; margin-top:12px; padding:9px 11px; border:1px solid #dceaf2; border-radius:9px; background:#f7fbfd; color:#3b5265; font:12px/1.5 Consolas,monospace; white-space:pre-wrap; }
   #camera-preview { display:none; margin-top:12px; padding:10px; border:1px solid #dceaf2; border-radius:9px; background:#f8fcfe; }
-  #camera-preview img { display:block; width:min(100%, 640px); max-height:420px; object-fit:contain; border-radius:6px; background:#edf4f8; }
+  #camera-preview img { display:block; width:min(100%, 640px); height:auto; object-fit:contain; border-radius:6px; background:#edf4f8; }
+  .face-result { position:relative; width:min(100%, 640px); margin-top:8px; background:#edf4f8; }
+  .face-result img { display:block; width:100%; height:auto; }
+  .face-result svg { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+  .face-box { fill:rgba(40,210,130,.12); stroke:#19b879; stroke-width:2; }
+  .face-label { fill:#19b879; font:700 13px "Segoe UI","Microsoft YaHei",sans-serif; }
+  .result-json { margin:10px 0 0; padding:9px; border:1px solid #dceaf2; border-radius:8px; background:#fff; overflow:visible; white-space:pre-wrap; word-break:break-word; }
   .muted { color:var(--muted); font-size:12px; }
   .empty { color:var(--muted); font-size:13px; padding:8px 0; }
   .hint { font-size:12px; color:var(--muted); margin-top:8px; }
   .badge { padding:3px 9px; border-radius:20px; color:#527087; font-size:11px; background:#e8f3f8; }
+  .env-warning { margin:0 clamp(18px, 4vw, 48px); padding:13px 18px; border:2px solid #c93636; border-radius:12px;
+                 color:#8b1717; background:#fff0f0; font-size:14px; font-weight:800; line-height:1.45;
+                 text-align:center; box-shadow:0 5px 14px rgba(201,54,54,.14); position:sticky; top:82px; z-index:9; }
   .chat-layout { display:grid; grid-template-columns:minmax(180px,26%) 1fr; gap:12px; min-height:360px; }
   .conversation-list { max-height:520px; overflow:auto; display:flex; flex-direction:column; gap:7px; }
   .conversation-item { border:1px solid #dceaf2; border-radius:10px; padding:9px 11px; background:#f8fcfe; cursor:pointer; }
@@ -289,6 +303,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button class="btn" onclick="refresh()">刷新</button>
   <a class="btn" href="/logout">退出</a>
 </header>
+<!--ENV_WARNING-->
 
 <main>
   <div class="card full">
@@ -332,7 +347,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
     <div class="hint" id="hardware-test-status">等待设备上线…</div>
     <div id="hardware-test-groups" class="test-grid"></div>
-    <pre id="hardware-test-result">尚未执行测试。</pre>
+    <div id="hardware-test-result">尚未执行测试。</div>
     <div id="camera-preview"><div class="muted" style="margin-bottom:7px">最近拍摄的照片（仅保存在后端内存，重启后自动清除）</div><img id="camera-preview-image" alt="设备最近拍摄的照片"></div>
     <div class="hint">所有按钮通过设备 MCP 通道执行；运动测试必须先让车轮悬空。设备未声明的摄像头、舵机或屏幕工具会显示为不可用，不会伪造测试结果。</div>
   </div>
@@ -867,7 +882,7 @@ const HARDWARE_TEST_GROUPS = [
     ["self.chassis.turn_left", "左转"], ["self.chassis.turn_right", "右转"],
     ["self.chassis.spin", "原地转圈"], ["self.chassis.stop", "停止"]
   ]},
-  { title: "摄像头", items: [["self.camera.take_photo", "拍照测试"]] },
+  { title: "摄像头", items: [["self.camera.take_photo", "拍照测试"], ["self.camera.face_detect_local", "本地 ESP-DL 人脸检测"]] },
   { title: "舵机 / 云台", items: [
     ["self.gimbal.center", "云台回中"], ["self.gimbal.pan", "水平舵机"],
     ["self.gimbal.tilt", "俯仰舵机"], ["self.face_tracking.get_state", "跟随状态"]
@@ -905,7 +920,7 @@ function hardwareArgs(name) {
              duration_ms: parseInt($("test-duration").value, 10) || 500 };
   }
   if (name === "self.camera.take_photo") {
-    return { question: $("test-camera-question").value.trim() || "检查摄像头是否能正常拍照" };
+    return { question: "检查摄像头是否能正常拍照" };
   }
   if (name === "self.screen.set_brightness") {
     return { brightness: parseInt($("test-brightness").value, 10) || 50 };
@@ -921,7 +936,7 @@ function renderHardwareTests() {
   const device = selectedHardwareDevice();
   const canRun = !!device;
   const previousValues = {};
-  ["test-speed", "test-duration", "test-brightness", "test-theme", "test-camera-question", "test-led-red", "test-led-green", "test-led-blue"].forEach(id => {
+  ["test-speed", "test-duration", "test-brightness", "test-theme", "test-led-red", "test-led-green", "test-led-blue"].forEach(id => {
     const input = $(id);
     if (input) previousValues[id] = input.value;
   });
@@ -929,12 +944,7 @@ function renderHardwareTests() {
     box.innerHTML = '<div class="empty">没有在线设备。</div>';
     return;
   }
-  let html = '<div class="row" style="grid-column:1/-1;margin-bottom:2px">' +
-    '<label class="muted">电机速度 <input class="test-input" id="test-speed" type="number" min="0" max="100" value="30"></label>' +
-    '<label class="muted">持续时间(ms) <input class="test-input" id="test-duration" type="number" min="1" max="10000" value="500"></label>' +
-    '<label class="muted">屏幕亮度 <input class="test-input" id="test-brightness" type="number" min="0" max="100" value="50"></label>' +
-    '<label class="muted">主题 <select id="test-theme"><option value="light">浅色</option><option value="dark">深色</option></select></label>' +
-    '<label class="muted" style="flex:1;min-width:220px">拍照问题 <input id="test-camera-question" value="检查摄像头是否能正常拍照" style="width:100%;padding:6px 8px"></label></div>';
+  let html = '';
   html += HARDWARE_TEST_GROUPS.map(group => {
     const actions = group.items.map(([name, label]) => {
       const available = !!hardwareTools[name];
@@ -944,11 +954,18 @@ function renderHardwareTests() {
         ' onclick=\'runHardwareTest("' + name + '", this)\'>' + label +
         (available ? "" : "（不可用）") + '</button>';
     }).join("");
-    const colorInputs = group.title === "RGB 指示灯"
+    const groupInputs = group.items.some(item => item[0].indexOf("self.chassis.") === 0)
+      ? '<div class="row" style="margin-bottom:8px"><label class="muted">速度 <input class="test-input" id="test-speed" type="number" min="0" max="100" value="30"></label>' +
+        '<label class="muted">持续时间(ms) <input class="test-input" id="test-duration" type="number" min="1" max="10000" value="500"></label></div>'
+      : group.items.some(item => item[0].indexOf("self.screen.") === 0)
+        ? '<div class="row" style="margin-bottom:8px"><label class="muted">亮度 <input class="test-input" id="test-brightness" type="number" min="0" max="100" value="50"></label>' +
+          '<label class="muted">主题 <select id="test-theme"><option value="light">浅色</option><option value="dark">深色</option></select></label></div>'
+        : '';
+    const colorInputs = group.items.some(item => item[0].indexOf("self.led.") === 0)
       ? '<div class="row" style="margin-bottom:8px"><label class="muted">R <input class="test-input" id="test-led-red" type="number" min="0" max="255" value="0"></label>' +
-        '<label class="muted">G <input class="test-input" id="test-led-green" type="number" min="0" max="255" value="160"></label>' +
+        '<label class="muted">G <input class="test-input" id="test-led-green" type="number" min="0" max="255" value="0"></label>' +
         '<label class="muted">B <input class="test-input" id="test-led-blue" type="number" min="0" max="255" value="255"></label></div>' : '';
-    return '<div class="test-group"><h3>' + group.title + '</h3>' + colorInputs + '<div class="test-actions">' + actions + '</div></div>';
+    return '<div class="test-group"><h3>' + group.title + '</h3>' + groupInputs + colorInputs + '<div class="test-actions">' + actions + '</div></div>';
   }).join("");
   box.innerHTML = html;
   Object.entries(previousValues).forEach(([id, value]) => {
@@ -987,7 +1004,11 @@ async function runHardwareTest(name, button) {
       body: JSON.stringify({ device_id: device.device_id, name: name, arguments: hardwareArgs(name), timeout_ms: 15000 }) });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || "调用失败");
-    $("hardware-test-result").textContent = JSON.stringify(data.result, null, 2);
+    if (name === "self.camera.face_detect_local") {
+      renderLocalFaceResult(data.result);
+    } else {
+      $("hardware-test-result").textContent = JSON.stringify(data.result, null, 2);
+    }
     if (name === "self.camera.take_photo") showCameraPreview(device.device_id);
     showToast(name + " 测试完成", "ok");
   } catch (e) {
@@ -996,6 +1017,30 @@ async function runHardwareTest(name, button) {
   } finally {
     renderHardwareTests();
   }
+}
+
+function renderLocalFaceResult(result) {
+  const text = result && result.content && result.content[0] ? result.content[0].text : "";
+  let item;
+  try { item = JSON.parse(text); } catch (_) { $("hardware-test-result").textContent = text || "检测结果为空"; return; }
+  const width = Number(item.width) || 1, height = Number(item.height) || 1;
+  const faces = Array.isArray(item.faces) ? item.faces : [];
+  const image = typeof item.image_jpeg_base64 === "string" ? item.image_jpeg_base64 : "";
+  if (!image) { $("hardware-test-result").textContent = JSON.stringify(item, null, 2); return; }
+  const boxes = faces.map((face, index) => {
+    const b = Array.isArray(face.box) ? face.box.map(Number) : [];
+    if (b.length < 4 || b.some(Number.isNaN)) return "";
+    const score = Number(face.confidence);
+    const label = "#" + (index + 1) + " " + (Number.isFinite(score) ? score.toFixed(3) : "?");
+    const labelY = Math.max(16, b[1] - 4);
+    return '<rect class="face-box" x="' + b[0] + '" y="' + b[1] + '" width="' + Math.max(0, b[2]-b[0]) + '" height="' + Math.max(0, b[3]-b[1]) + '"></rect>' +
+      '<text class="face-label" x="' + b[0] + '" y="' + labelY + '">' + label + '</text>';
+  }).join("");
+  const jsonItem = Object.assign({}, item);
+  delete jsonItem.image_jpeg_base64;
+  $("hardware-test-result").innerHTML = '<div>检测到 <b>' + faces.length + '</b> 张人脸，耗时 ' + (Number(item.elapsed_ms) || 0) + ' ms</div>' +
+    '<div class="face-result"><img src="data:image/jpeg;base64,' + image + '" alt="本地人脸检测画面"><svg viewBox="0 0 ' + width + ' ' + height + '" preserveAspectRatio="none">' + boxes + '</svg></div>' +
+    '<pre class="result-json">' + esc(JSON.stringify(jsonItem, null, 2)) + '</pre>';
 }
 
 async function loadModel() {
@@ -1234,6 +1279,18 @@ class Dashboard:
         # are lost on restart and never written to disk.
         self._camera_photos = {}
 
+    def _render_page(self, template):
+        """Add a prominent warning to the non-production dashboard only."""
+        port = self.config.get("server", {}).get("port")
+        warning = ""
+        if str(port) == "8081":
+            warning = (
+                '<div class="env-warning" role="alert">'
+                '⚠️ 当前为测试页面（8081），禁止登录主测试/生产后端账号，避免误操作真实设备和数据。'
+                '</div>'
+            )
+        return template.replace("<!--ENV_WARNING-->", warning)
+
     def add_routes(self, app: web.Application):
         app.router.add_get("/", self.index)
         app.router.add_get("/login", self.login_page)
@@ -1299,7 +1356,7 @@ class Dashboard:
     async def login_page(self, request):
         if self._check_cookie(request):
             raise web.HTTPFound("/")
-        return web.Response(text=LOGIN_HTML, content_type="text/html", charset="utf-8")
+        return web.Response(text=self._render_page(LOGIN_HTML), content_type="text/html", charset="utf-8")
 
     async def login(self, request):
         data = await request.post()
@@ -1308,10 +1365,10 @@ class Dashboard:
         user = self.account_store.authenticate(username, password) if self.account_store else None
         if user is None:
             log.warning("dashboard 登录失败 (username=%s ip=%s)", username, request.remote)
-            return web.Response(text=LOGIN_HTML.replace(
+            return web.Response(text=self._render_page(LOGIN_HTML.replace(
                 "<!--ERROR-->",
                 '<div class="error">用户名或密码错误</div>'
-            ), content_type="text/html", charset="utf-8")
+            )), content_type="text/html", charset="utf-8")
         log.info("dashboard 登录成功 (user=%s ip=%s)", user["username"], request.remote)
         token = self.account_store.create_session(user["id"], self.session_ttl)
         resp = web.HTTPFound("/")
@@ -1324,7 +1381,7 @@ class Dashboard:
             raise web.HTTPFound("/")
         if not self.registration_enabled:
             raise web.HTTPForbidden(text="registration disabled")
-        return web.Response(text=REGISTER_HTML, content_type="text/html", charset="utf-8")
+        return web.Response(text=self._render_page(REGISTER_HTML), content_type="text/html", charset="utf-8")
 
     async def register(self, request):
         if not self.registration_enabled:
@@ -1334,10 +1391,10 @@ class Dashboard:
             user = self.account_store.register_user(
                 data.get("username", ""), data.get("password", ""))
         except ValueError as exc:
-            return web.Response(text=REGISTER_HTML.replace(
+            return web.Response(text=self._render_page(REGISTER_HTML.replace(
                 "<!--ERROR-->", '<div class="error">{}</div>'.format(
                     str(exc).replace("<", "&lt;").replace(">", "&gt;"))
-            ), content_type="text/html", charset="utf-8", status=400)
+            )), content_type="text/html", charset="utf-8", status=400)
         token = self.account_store.create_session(user["id"], self.session_ttl)
         log.info("dashboard 用户注册成功 (user=%s ip=%s)", user["username"], request.remote)
         resp = web.HTTPFound("/")
@@ -1358,7 +1415,7 @@ class Dashboard:
     async def index(self, request):
         if not self._check_cookie(request):
             raise web.HTTPFound("/login")
-        return web.Response(text=DASHBOARD_HTML, content_type="text/html", charset="utf-8")
+        return web.Response(text=self._render_page(DASHBOARD_HTML), content_type="text/html", charset="utf-8")
 
     def _effective_model_settings(self, device_id):
         settings = {
@@ -1749,6 +1806,7 @@ class Dashboard:
                             "self.servo.", "self.face_tracking.", "self.led.")
         allowed_names = {
             "self.camera.take_photo",
+            "self.camera.face_detect_local",
             "self.screen.get_info",
             "self.screen.set_brightness",
             "self.screen.set_theme",

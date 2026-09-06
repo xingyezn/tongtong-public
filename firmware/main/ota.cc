@@ -128,6 +128,7 @@ esp_err_t Ota::CheckVersion() {
         if (cJSON_IsString(code)) {
             activation_code_ = code->valuestring;
             has_activation_code_ = true;
+            ESP_LOGI(TAG, "Device binding code: %s", activation_code_.c_str());
         }
         cJSON* challenge = cJSON_GetObjectItem(activation, "challenge");
         if (cJSON_IsString(challenge)) {
@@ -443,11 +444,18 @@ esp_err_t Ota::Activate() {
     }
 
     std::string url = GetCheckVersionUrl();
-    if (url.back() != '/') {
-        url += "/activate";
-    } else {
-        url += "activate";
+    // The OTA check endpoint is /ota, while the backend activation endpoint
+    // is /activate. Strip the endpoint suffix before building the URL.
+    while (!url.empty() && url.back() == '/') {
+        url.pop_back();
     }
+    if (url.size() >= 4 && url.compare(url.size() - 4, 4, "/ota") == 0) {
+        url.resize(url.size() - 4);
+    }
+    if (url.empty() || url.back() != '/') {
+        url += "/";
+    }
+    url += "activate";
 
     auto http = SetupHttp();
 

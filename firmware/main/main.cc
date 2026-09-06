@@ -9,8 +9,6 @@
 
 #include "application.h"
 #include "system_info.h"
-#include "face_detection_test.h"
-#include "face_tracking_controller_test.h"
 
 #define TAG "main"
 
@@ -28,9 +26,5 @@ extern "C" void app_main(void)
     // Initialize and run the application
     auto& app = Application::GetInstance();
     app.Initialize();
-#if CONFIG_FACE_DETECTION_TEST_ON_BOOT
-    RunFaceDetectionTest();
-    RunFaceTrackingControllerTest();
-#endif
     app.Run();  // This function runs the main event loop and never returns
 }

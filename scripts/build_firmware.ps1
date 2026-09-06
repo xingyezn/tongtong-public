@@ -35,6 +35,19 @@ if (-not (Select-String -Path $uvcDriver -SimpleMatch "#define UVC_DEVICE_FRAME_
     }
 }
 
+# ESP-SR and ESP-DL on ESP32-S3 currently share conflicting conv2d symbols in
+# the registry libdl_lib.a. Use the tested replacement from the repository.
+$espSrLib = Join-Path $firmware "managed_components\espressif__esp-sr\lib\esp32s3\libdl_lib.a"
+$espSrFix = Join-Path $repo "firmware\vendor\esp-sr-libdl-fix\libdl_lib.a"
+if (-not (Test-Path -LiteralPath $espSrFix)) {
+    throw "ESP-SR/ESP-DL compatibility library is missing: $espSrFix"
+}
+if (-not (Test-Path -LiteralPath $espSrLib)) {
+    throw "ESP-SR library was not restored by Component Manager: $espSrLib"
+}
+Copy-Item -LiteralPath $espSrFix -Destination $espSrLib -Force
+Write-Output "Applied ESP-SR/ESP-DL compatibility library: $espSrFix"
+
 idf.py -D "SDKCONFIG_DEFAULTS=$defaults" build
 
 if ($Flash) {

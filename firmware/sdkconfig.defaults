@@ -36,7 +36,6 @@ CONFIG_SR_MN_CN_MULTINET7_QUANT=y
 # ESP-DL face detection model is loaded from the dedicated Flash data partition.
 CONFIG_HUMAN_FACE_DETECT_MODEL_IN_FLASH_PARTITION=y
 CONFIG_HUMAN_FACE_DETECT_MSRMNP_S8_V1=y
-CONFIG_FACE_DETECTION_TEST_ON_BOOT=y
 
 # USB webcam connected through the ESP32-S3 native USB OTG host port.
 # The selected camera supports MJPEG; accepting JPEG avoids a costly

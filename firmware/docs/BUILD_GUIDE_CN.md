@@ -162,7 +162,74 @@ python -m esptool --chip esp32s3 -p COM3 -b 460800 --before default_reset --afte
 
 ---
 
-## 9. 常见问题
+## 9. 串口读取与调试
+
+### 9.1 找串口号
+
+Windows 在“设备管理器 → 端口(COM 和 LPT)”查看 CH343/串口对应的 COMx；或命令行：
+
+```powershell
+# 用 IDF venv 里的 python 列出可用串口
+& "C:\Espressif\python_env\idf5.5_py3.11_env\Scripts\python.exe" -m serial.tools.list_ports
+```
+
+示例输出 `COM3`。注意：USB 转串口(调试)与本机 USB OTG 摄像头是两路，烧录/日志用 CH343
+串口，不要占用摄像头那条。
+
+### 9.2 打开串口日志
+
+```powershell
+cd D:\AdamData\esp32\tongtong-public\firmware
+idf.py -p COM3 monitor            # 只读日志
+idf.py -p COM3 flash monitor      # 烧录后直接看启动日志
+```
+
+常用操作（esp-idf-monitor）：
+- `Ctrl+]` 退出 monitor；
+- `Ctrl+T` 后 `Ctrl+H` 查看帮助；`Ctrl+T` 后 `Ctrl+R` 复位设备；
+- `Ctrl+T` 后 `Ctrl+L`/输入过滤词可过滤输出；
+- 串口被 monitor 独占，**不要同时开两个 monitor/esptool**。
+
+把日志存盘（便于回传分析）：
+
+```powershell
+idf.py -p COM3 monitor 2>&1 | Out-File monitor.log -Encoding utf8
+```
+
+### 9.3 日志级别与关键 TAG
+
+monitor 默认显示 INFO 及以上；`ESP_LOGD` 的调试信息默认不显示。查看某 TAG 的 DEBUG 日志，
+可先临时在代码里设：
+
+```cpp
+esp_log_level_set("AudioService", ESP_LOG_DEBUG);   // 例：开 AudioService 调试
+```
+
+或改 `sdkconfig.defaults`/menuconfig 的 `CONFIG_LOG_DEFAULT_LEVEL` 为 DEBUG 后重编（量产固件请保持 INFO）。
+
+本固件排查用到的关键 TAG：
+
+| TAG | 说明 | 级别 |
+|---|---|---|
+| `CustomWakeWord` | 唤醒词初始化/命中（`Custom wake word detected`） | INFO |
+| `AudioService` | 唤醒喂音/音频任务 | INFO/DEBUG |
+| `FaceDetectLocal` | **本地 ESP-DL 人脸检测**结果 | INFO |
+| `ServerDetect` | **远程 8090 人脸检测**结果/上传耗时 | INFO |
+| `EspdlProbe` / `wake self-test` | 自检（需开 `FACE_WAKE_SELFTEST_ON_BOOT`） | INFO |
+| `Heartbeat` | 后端心跳（每 15s，正常为 DEBUG `status=200`；错误为 WARN） | DEBUG |
+| `Esp32Camera` / `ServerDetect bench` | 相机流、远程基准 | INFO |
+
+心跳每 15s 打一次 DEBUG，若要在 monitor 里确认“心跳正在上报”，临时把 `Heartbeat` TAG 的
+`ESP_LOGD` 改为 `ESP_LOGI`，或整体日志级别调 DEBUG 后重编一次。
+
+### 9.4 判断思路
+
+1. 设备不上线/后端看不到 → 看 `Network connected` 后是否有 `Heartbeat`；再对后端面板确认端口。
+2. 唤醒词不触发 → 看 `CustomWakeWord: Command` 是否存在、自检 `wake self-test: HIT/MISS`。
+3. 拍照测试不返回 → 看设备 `CameraTest: camera test done mode=...` 与后端面板返回 `mode`。
+4. 崩溃/看门狗 → 搜索 `Guru Meditation` / `panic` / `wdt`，连同 backtrace 一起留存分析。
+
+## 10. 常见问题
 
 | 现象 | 处理 |
 |---|---|

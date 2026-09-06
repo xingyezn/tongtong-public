@@ -44,7 +44,6 @@ set(SOURCES "audio/audio_codec.cc"
             "settings.cc"
             "device_state_machine.cc"
             "assets.cc"
-            "face_detection_test.cc"
             "face_tracking_controller.cc"
             "face_tracking_controller_test.cc"
             "main.cc"
@@ -56,6 +55,13 @@ set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg"
 file(GLOB BOARD_COMMON_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/boards/common/*.cc)
 list(APPEND SOURCES ${BOARD_COMMON_SOURCES})
 list(APPEND INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/boards/common)
+
+# The live local face detector is only needed for camera-capable builds. Keep
+# it out of unrelated boards so they do not require the ESP-DL model component.
+if(NOT CONFIG_ESP_VIDEO_ENABLE_USB_UVC_VIDEO_DEVICE)
+    list(REMOVE_ITEM SOURCES
+         "${CMAKE_CURRENT_SOURCE_DIR}/boards/common/camera_face_detect_local.cc")
+endif()
 
 idf_build_get_property(build_components BUILD_COMPONENTS)
 # Function to find component dynamically by pattern
@@ -722,10 +728,8 @@ if(NOT LANG_DIR STREQUAL "en-US")
 endif()
 
 file(GLOB COMMON_SOUNDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/common/*.ogg)
-file(GLOB FACE_TEST_IMAGES ${CMAKE_CURRENT_SOURCE_DIR}/assets/common/face_test.jpg)
-
 set(MODEL_REQUIRES)
-if(CONFIG_FACE_DETECTION_TEST_ON_BOOT)
+if(CONFIG_ESP_VIDEO_ENABLE_USB_UVC_VIDEO_DEVICE)
     list(APPEND MODEL_REQUIRES human_face_detect)
 endif()
 
@@ -742,7 +746,7 @@ if(CONFIG_IDF_TARGET_ESP32)
 endif()
 
 idf_component_register(SRCS ${SOURCES}
-                    EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS} ${FACE_TEST_IMAGES}
+                    EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS}
                     INCLUDE_DIRS ${INCLUDE_DIRS}
                     REQUIRES ${MODEL_REQUIRES}
                     WHOLE_ARCHIVE
