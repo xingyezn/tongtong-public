@@ -21,6 +21,7 @@
 /backend/venv/
 /backend/env/
 /backend/*.log
+/backend/data/
 /backend/tools/*.wav
 /backend/tools/*.opus
 /scripts/__pycache__/

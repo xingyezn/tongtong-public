@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import copy
 import json
 import logging
 import time
@@ -18,29 +19,82 @@ log = logging.getLogger("ws")
 
 
 class WsGateway:
-    def __init__(self, config: dict, omni, sessions: dict):
+    def __init__(self, config: dict, omni, sessions: dict, account_store=None,
+                 memory_service=None):
         self.config = config
         self.omni = omni
         self.sessions: dict = sessions  # device_id -> Session
         self.device_history: dict = {}   # device_id -> {last_seen, connected_at, client_id}
         self.device_conversations: dict = {}  # device_id -> persistent text memory
+        self.account_store = account_store
+        self.memory_service = memory_service
+
+    def _device_config(self, device_id: str) -> dict:
+        config = copy.deepcopy(self.config)
+        if self.account_store:
+            config.setdefault("dashscope", {}).update(
+                self.account_store.get_model_settings(device_id))
+            config.setdefault("vad", {}).update(
+                self.account_store.get_vad_settings(device_id))
+            features = self.account_store.get_device_features(device_id)
+            config["features"] = features
+            owner_id = self.account_store.device_owner_id(device_id)
+            if owner_id is not None and features.get("memory_enabled"):
+                config.setdefault("dashscope", {})["user_memory_prompt"] = (
+                    self.account_store.memory_prompt(owner_id))
+            else:
+                config.setdefault("dashscope", {}).pop("user_memory_prompt", None)
+        return config
 
     def _conversation_memory(self, device_id: str) -> dict:
         now = time.time()
+        device_config = self._device_config(device_id)
         try:
             timeout = float(
-                self.config.get("dashscope", {}).get("conversation_timeout_minutes", 10)
+                device_config.get("dashscope", {}).get("conversation_timeout_minutes", 10)
             ) * 60.0
         except (TypeError, ValueError):
             timeout = 600.0
         timeout = max(60.0, min(7200.0, timeout))
+        owner_id = (self.account_store.device_owner_id(device_id)
+                    if self.account_store else None)
         memory = self.device_conversations.get(device_id)
         if memory is None or (
+                memory.get("owner_user_id") != owner_id or
                 memory.get("last_activity", 0.0)
                 and now - memory["last_activity"] > timeout):
-            memory = {"turns": [], "last_activity": 0.0}
+            memory = {
+                "turns": [],
+                "last_activity": 0.0,
+                "owner_user_id": owner_id,
+            }
+            if self.account_store:
+                if owner_id is not None:
+                    rows = self.account_store.list_conversations(
+                        owner_id, device_id, limit=20, ascending=True)
+                    memory["turns"] = [
+                        {"user": row["user_text"], "assistant": row["assistant_text"]}
+                        for row in rows
+                    ]
+                    if rows:
+                        memory["last_activity"] = rows[-1]["created_at"]
             self.device_conversations[device_id] = memory
         return memory
+
+    async def summarize_conversation(self, conversation_id):
+        if not self.memory_service:
+            return []
+        saved = await self.memory_service.summarize_conversation(conversation_id)
+        data = (self.account_store.conversation_for_memory(conversation_id)
+                if self.account_store else None)
+        if data:
+            device_id = data["conversation"]["device_id"]
+            session = self.sessions.get(device_id)
+            if session:
+                updated = self._device_config(device_id)
+                session.config["dashscope"] = updated["dashscope"]
+                session.config["features"] = updated.get("features", {})
+        return saved
 
     def _check_auth(self, headers) -> bool:
         if not self.config["devices"]["enabled"]:
@@ -52,8 +106,17 @@ class WsGateway:
         return token in tokens.values()
 
     async def handle(self, request: web.Request):
-        device_id = request.headers.get("Device-Id", "unknown")
+        device_id = request.headers.get("Device-Id", "").strip()
+        if not device_id:
+            return web.Response(status=400, text="Device-Id header is required")
         client_id = request.headers.get("Client-Id", "")
+        device_record = None
+        if self.account_store:
+            try:
+                device_record = self.account_store.touch_device(device_id, client_id)
+            except ValueError as exc:
+                return web.Response(status=400, text=str(exc))
+            device_id = device_record["device_id"]
         if not self._check_auth(request.headers):
             return web.Response(status=401, text="unauthorized")
 
@@ -68,9 +131,28 @@ class WsGateway:
             except Exception:
                 pass
 
+        binding_code = (
+            device_record.get("binding_code")
+            if device_record and device_record.get("owner_user_id") is None else None
+        )
+        device_config = self._device_config(device_id)
+        turn_recorder = None
+        if self.account_store:
+            turn_recorder = lambda did, user_text, assistant_text: (
+                self.account_store.record_turn(
+                    did, user_text, assistant_text,
+                    device_config.get("dashscope", {}).get(
+                        "conversation_timeout_minutes", 10)))
         session = Session(
-            ws, self.config, self.omni, device_id,
+            ws, device_config, self.omni, device_id,
             conversation_memory=self._conversation_memory(device_id),
+            binding_code=binding_code,
+            turn_recorder=turn_recorder,
+            conversation_ender=(self.account_store.end_conversation
+                                if self.account_store else None),
+            conversation_ended_callback=(
+                self.summarize_conversation
+                if self.memory_service else None),
         )
         mcp = McpBridge(session.send_json)
         session.set_mcp(mcp)
@@ -79,6 +161,7 @@ class WsGateway:
         self.device_history[device_id] = {
             "last_seen": time.time(),
             "client_id": client_id,
+            "owner_user_id": device_record.get("owner_user_id") if device_record else None,
         }
         log.info("device %s connected (client=%s)", device_id, client_id)
 
@@ -86,8 +169,11 @@ class WsGateway:
         # 设备连上后会立即发 hello；这里在 on_text 里自动回 ack
 
         # 初始化 MCP：拿设备工具表
-        await session.send_json(mcp.make_initialize(session.camera_capabilities()))
-        await session.send_json(mcp.make_tools_list())
+        if not binding_code:
+            await session.send_json(mcp.make_initialize(session.camera_capabilities()))
+            await session.send_json(mcp.make_tools_list())
+        else:
+            log.info("device %s is waiting for user binding", device_id)
 
         try:
             async for msg in ws:

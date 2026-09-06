@@ -13,7 +13,7 @@ are kept separate**. Treat the following as three different layers:
 
 - Keep `public.yaml` exactly on its `your-server.example` placeholders.
 - Commit firmware and backend source, examples, scripts, and documentation.
-- Never commit real OTA/WS endpoints, server credentials, dashboard passwords,
+- Never commit real OTA/WS endpoints, server credentials, account databases,
   device tokens, API keys, generated configuration, build output, recordings,
   or production firmware binaries.
 - Before every push, follow [SHARING.md](SHARING.md).

@@ -96,6 +96,7 @@ class FakeOmni:
         })
         assert json.loads(result) == {"result": ["true"]}
 
+        yield {"type": "input_text", "text": "请打开灯"}
         pcm24 = b"\x01\x00" * 1440
         yield {"type": "audio", "audio_b64": base64.b64encode(pcm24[:1200]).decode(), "sample_rate": 24000}
         yield {"type": "audio", "audio_b64": base64.b64encode(pcm24[1200:]).decode(), "sample_rate": 24000}
@@ -207,7 +208,8 @@ async def test_realtime_tool_event_loop():
         b"\x00\x00" * 1600, tools=tools, tool_handler=tool_handler)]
 
     assert calls == [{"type": "tool_call", "id": "call-lamp-2", "name": "self.lamp.turn_on", "arguments": {}}]
-    assert [event["type"] for event in events] == ["input_text", "audio", "done"]
+    assert [event["type"] for event in events] == ["input_text", "text", "audio", "done"]
+    assert events[1]["text"] == "已打开"
     assert websocket.sent[0]["session"]["tools"] == tools
     assert websocket.sent[0]["session"]["input_audio_transcription"]["language"] == "zh"
     assert any(item.get("type") == "conversation.item.create" for item in websocket.sent)
@@ -322,7 +324,11 @@ async def main():
         "vad": {"silence_duration_ms": 400, "energy_threshold": 100},
     }
     ws = FakeWebSocket()
-    session = Session(ws, config, FakeOmni(), "test-device")
+    persisted = []
+    session = Session(
+        ws, config, FakeOmni(), "test-device",
+        turn_recorder=lambda *args: persisted.append(args),
+    )
     session.device_encoder = FakeEncoder()
     session.set_mcp(ImmediateMcp())
 
@@ -331,7 +337,11 @@ async def main():
     mcp_calls = [m for m in ws.text_messages if m.get("type") == "mcp"]
     tts_states = [m.get("state") for m in ws.text_messages if m.get("type") == "tts"]
     assert mcp_calls and mcp_calls[0]["payload"]["params"]["name"] == "self.lamp.turn_on"
-    assert tts_states == ["start", "stop"]
+    assert tts_states == ["sentence_start", "start", "stop"]
+    assistant_updates = [m.get("text") for m in ws.text_messages
+                         if m.get("type") == "tts" and m.get("state") == "sentence_start"]
+    assert assistant_updates == ["已打开"]
+    assert persisted == [("test-device", "请打开灯", "已打开")]
     assert len(ws.binary_messages) == 1
     assert ws.binary_messages[0].endswith(b"fake-opus")
     assert not session.speaking

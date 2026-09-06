@@ -13,8 +13,10 @@ import os
 import yaml
 from aiohttp import web
 
+from app.account_store import AccountStore
 from app.dashboard import BroadcastLogHandler, Dashboard
 from app.http_api import HttpApi
+from app.memory_service import MemoryService
 from app.omni_client import OmniClient
 from app.opus_codec import OpusCodec
 from app.ws_gateway import WsGateway
@@ -54,6 +56,12 @@ def save_config(config: dict, path: str = None) -> None:
 async def main():
     config = load_config()
 
+    database_path = config.get("storage", {}).get("database", "data/tongtong.db")
+    if not os.path.isabs(database_path):
+        database_path = os.path.join(BASE_DIR, database_path)
+    account_store = AccountStore(database_path)
+    memory_service = MemoryService(config, account_store)
+
     log_format = "%(asctime)s %(levelname)s %(name)s: %(message)s"
     logging.basicConfig(
         level=getattr(logging, config["logging"]["level"].upper(), logging.INFO),
@@ -75,15 +83,17 @@ async def main():
 
     omni = OmniClient(config, audio_codec)
     sessions: dict = {}
-    gateway = WsGateway(config, omni, sessions)
-    http_api = HttpApi(config)
+    gateway = WsGateway(config, omni, sessions, account_store=account_store,
+                        memory_service=memory_service)
+    http_api = HttpApi(config, account_store=account_store)
 
     app = web.Application()
     app.router.add_route("GET", "/ws", gateway.handle)
     http_api.add_routes(app)  # /ota /activate /health
 
     dashboard = Dashboard(config, sessions, http_api, log_handler, gateway.device_history,
-                          save_config=save_config)
+                          save_config=save_config, account_store=account_store,
+                          gateway=gateway, memory_service=memory_service)
     dashboard.add_routes(app)  # /  /api/status /api/logs /ws/echo
 
     loop = asyncio.get_event_loop()
@@ -105,7 +115,9 @@ async def main():
         pass
     finally:
         await omni.close()
+        await memory_service.close()
         await runner.cleanup()
+        account_store.close()
 
 
 if __name__ == "__main__":

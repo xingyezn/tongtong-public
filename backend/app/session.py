@@ -33,6 +33,7 @@ DEVICE_SAMPLE_RATE = 16000
 DEVICE_FRAME_MS = 60
 # Four frames give the device 240 ms of jitter headroom before playback.
 TTS_PLAYBACK_PREBUFFER_FRAMES = 4
+AI_DISPLAY_UPDATE_INTERVAL_S = 0.18
 # Covers WebSocket transit and the device's decoder/DMA pipeline after the
 # model has finished generating its audio stream.
 TTS_PLAYBACK_TRANSPORT_MARGIN_S = 0.20
@@ -83,14 +84,19 @@ class Session:
     """单设备会话。"""
 
     def __init__(self, ws, config: dict, omni: OmniClient, device_id: str,
-                 conversation_memory=None):
+                 conversation_memory=None, binding_code=None, turn_recorder=None,
+                 conversation_ender=None, conversation_ended_callback=None):
         self.ws = ws
         self.config = config
         # Each device gets an isolated Realtime client while its text memory is
         # shared across reconnects for that same device only.
-        self.omni = (omni.new_for_session(conversation_memory)
+        self.omni = (omni.new_for_session(conversation_memory, config)
                      if hasattr(omni, "new_for_session") else omni)
         self.device_id = device_id
+        self.binding_code = binding_code
+        self.turn_recorder = turn_recorder
+        self.conversation_ender = conversation_ender
+        self.conversation_ended_callback = conversation_ended_callback
         self.session_id = uuid.uuid4().hex
         # This token only lives for the current WebSocket connection. It lets
         # the camera upload a photo without firmware storing a dashboard
@@ -118,6 +124,7 @@ class Session:
         self.omni_busy = False
         self._latest_call_id = 0
         self._omni_task = None
+        self._keepalive_task = asyncio.create_task(self._keepalive_loop())
 
         # 后端 VAD（静音自动结束）：说话中/静音计时
         self._vad_speech = False
@@ -167,6 +174,23 @@ class Session:
                 "frame_duration": DEVICE_FRAME_MS,
             },
         })
+        features = self.config.get("features", {})
+        await self.send_json({
+            "type": "system",
+            "command": "conversation_config",
+            "automatic_interrupt": bool(features.get("automatic_interrupt", True)),
+            "button_interrupt": bool(features.get("button_interrupt", True)),
+            "double_click_end": bool(features.get("double_click_end", True)),
+        })
+
+    async def _keepalive_loop(self):
+        """Keep idle device channels alive without affecting conversation state."""
+        try:
+            while True:
+                await asyncio.sleep(45)
+                await self.send_json({"type": "system", "command": "keepalive"})
+        except asyncio.CancelledError:
+            pass
 
     def camera_capabilities(self):
         """Return the per-connection camera upload capability for MCP init."""
@@ -198,6 +222,16 @@ class Session:
         if mtype == "hello":
             self._handle_hello(msg)
             await self.send_hello_ack()
+            if self.binding_code:
+                await self.send_json({
+                    "type": "tts", "state": "sentence_start",
+                    "text": "设备绑定码：{}".format(self.binding_code),
+                })
+        elif self.binding_code:
+            # An unbound device may connect only so the screen can show its
+            # one-time binding code. Audio and MCP commands stay disabled.
+            log.info("unbound device %s message ignored: %s", self.device_id, mtype)
+            return
         elif mtype == "listen":
             state = msg.get("state")
             log.info("device %s listen state=%s mode=%s", self.device_id, state, msg.get("mode", ""))
@@ -215,7 +249,21 @@ class Session:
                 pass
         elif mtype == "abort":
             self.listening = False
+            reason = msg.get("reason", "button")
+            features = self.config.get("features", {})
+            allowed = (features.get("automatic_interrupt", True)
+                       if reason in ("wake_word", "wake_word_detected", "automatic")
+                       else features.get("button_interrupt", True))
+            if allowed:
+                await self._abort_speaking()
+        elif mtype == "conversation" and msg.get("action") == "end":
+            if not self.config.get("features", {}).get("double_click_end", True):
+                return
+            self.listening = False
             await self._abort_speaking()
+            conversation_id = (self.conversation_ender(self.device_id)
+                               if self.conversation_ender else None)
+            self._schedule_conversation_summary(conversation_id)
         elif mtype == "mcp":
             if self._mcp:
                 self._mcp.on_device_mcp(msg.get("payload", {}))
@@ -344,6 +392,8 @@ class Session:
         }
         text_parts = []
         input_transcript = ""
+        last_display_update = 0.0
+        last_display_text = ""
 
         tools = self._mcp.make_omni_tools() if self._mcp else []
         async for evt in self.omni.chat_stream(
@@ -353,7 +403,17 @@ class Session:
                 log.error("omni error: %s", evt.get("message"))
                 break
             elif et == "text":
-                text_parts.append(evt.get("text", ""))
+                delta = evt.get("text", "")
+                text_parts.append(delta)
+                now = time.monotonic()
+                if delta and now - last_display_update >= AI_DISPLAY_UPDATE_INTERVAL_S:
+                    display_text = "".join(text_parts)
+                    await self.send_json({
+                        "type": "tts", "state": "sentence_start",
+                        "text": display_text,
+                    })
+                    last_display_update = now
+                    last_display_text = display_text
             elif et == "input_text":
                 input_transcript = evt.get("text", "")
                 if input_transcript:
@@ -364,8 +424,23 @@ class Session:
             elif et == "done":
                 break
 
-        if text_parts:
-            log.info("omni reply: %s", "".join(text_parts))
+        assistant_text = "".join(text_parts).strip()
+        if assistant_text and assistant_text != last_display_text:
+            await self.send_json({
+                "type": "tts", "state": "sentence_start", "text": assistant_text,
+            })
+        if assistant_text:
+            log.info("omni reply: %s", assistant_text)
+        if input_transcript and assistant_text and self.turn_recorder:
+            try:
+                result = self.turn_recorder(
+                    self.device_id, input_transcript, assistant_text)
+                if result:
+                    self._schedule_conversation_summary(
+                        result.get("ended_conversation_id")
+                        if isinstance(result, dict) else None)
+            except Exception:
+                log.exception("failed to persist conversation turn for %s", self.device_id)
         await self._finish_omni_audio(stream_state)
         log.info("omni turn done, streamed=%s", stream_state["started"])
 
@@ -544,16 +619,56 @@ class Session:
     # 打断
     # ------------------------------------------------------------------
     async def _abort_speaking(self):
-        # TODO: 取消进行中的 Omni 流式任务
-        log.info("abort speaking (TODO: cancel omni stream)")
+        log.info("abort speaking immediately: device=%s", self.device_id)
+        was_active = self.speaking or self.omni_busy
         await self.send_json({"type": "tts", "state": "stop"})
+        self.speaking = False
+        if was_active and hasattr(self.omni, "cancel_current_response"):
+            await self.omni.cancel_current_response()
+        task = self._omni_task
+        if was_active and task and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    def _schedule_conversation_summary(self, conversation_id):
+        if not conversation_id or not self.conversation_ended_callback:
+            return
+        try:
+            result = self.conversation_ended_callback(conversation_id)
+            if hasattr(result, "__await__"):
+                asyncio.create_task(result)
+        except Exception:
+            log.exception("failed to schedule memory summary: conversation=%s",
+                          conversation_id)
 
     async def close(self):
+        keepalive = self._keepalive_task
+        if keepalive and not keepalive.done():
+            keepalive.cancel()
+            try:
+                await keepalive
+            except asyncio.CancelledError:
+                pass
+        task = self._omni_task
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         try:
             await self.send_json({"type": "tts", "state": "stop"})
         except Exception:
             pass
         try:
             await self.omni.close()
+        except Exception:
+            pass
+        try:
+            if self.ws is not None and not self.ws.closed:
+                await self.ws.close()
         except Exception:
             pass

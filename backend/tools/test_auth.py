@@ -1,84 +1,77 @@
-"""本地验证 dashboard 鉴权（启用密码时）。"""
+"""本地验证多用户注册、登录与会话 cookie。"""
 import asyncio
 import sys
-from aiohttp import web, ClientSession
+import tempfile
+from pathlib import Path
+
+from aiohttp import ClientSession, web
 
 sys.path.insert(0, ".")
+from app.account_store import AccountStore  # noqa: E402
 from app.dashboard import BroadcastLogHandler, Dashboard  # noqa: E402
 
 
 class FakeHttpApi:
-    device_tokens = {"AA:BB:CC": "tok1"}
-
-
-class FakeSession:
-    device_id = "AA:BB:CC"
-    session_id = "sess-123"
-    bin_version = 3
-    listening = False
-    speaking = False
-    omni_busy = False
-    connected_at = 100.0
+    device_tokens = {}
 
 
 async def main():
-    config = {
-        "server": {"public_ws_url": "ws://x/ws"},
-        "dashscope": {"api_key": "", "model": "m",
-                      "base_url": "b", "output_sample_rate": 24000},
-        "devices": {"enabled": False},
-        "dashboard": {"password": "test-pass-123", "session_ttl": 86400},
-    }
-    sessions = {"AA:BB:CC": FakeSession()}
-    log_handler = BroadcastLogHandler()
-    log_handler.attach(asyncio.get_event_loop())
-    dash = Dashboard(config, sessions, FakeHttpApi(), log_handler)
+    with tempfile.TemporaryDirectory() as tmp:
+        store = AccountStore(Path(tmp) / "accounts.db")
+        config = {
+            "server": {"public_ws_url": "ws://x/ws"},
+            "dashscope": {"api_key": "", "model": "m", "language": "zh",
+                          "voice": "Ethan", "instructions": "test",
+                          "realtime_url": "wss://example", "output_sample_rate": 24000},
+            "devices": {"enabled": False},
+            "vad": {},
+            "dashboard": {"session_ttl": 86400, "registration_enabled": True},
+        }
+        log_handler = BroadcastLogHandler()
+        log_handler.attach(asyncio.get_event_loop())
+        dash = Dashboard(config, {}, FakeHttpApi(), log_handler, account_store=store)
+        app = web.Application()
+        dash.add_routes(app)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        await web.TCPSite(runner, "127.0.0.1", 8098).start()
 
-    app = web.Application()
-    dash.add_routes(app)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", 8098)
-    await site.start()
+        async with ClientSession() as client:
+            r = await client.get("http://127.0.0.1:8098/", allow_redirects=False)
+            assert r.status == 302 and "/login" in r.headers["Location"]
+            r = await client.get("http://127.0.0.1:8098/api/status")
+            assert r.status == 401
 
-    async with ClientSession() as c:
-        # 未登录访问 / 应 302 到 /login
-        r = await c.get("http://127.0.0.1:8098/", allow_redirects=False)
-        assert r.status == 302 and "/login" in r.headers["Location"], r.status
-        print("no-auth GET / -> 302 /login : ok")
+            r = await client.post("http://127.0.0.1:8098/register", data={
+                "username": "alice", "password": "strong-pass-123",
+            }, allow_redirects=False)
+            assert r.status == 302
+            auth_cookie = r.headers["Set-Cookie"].split(";", 1)[0]
 
-        # 未登录访问 /api/status 应 401
-        r = await c.get("http://127.0.0.1:8098/api/status")
-        assert r.status == 401
-        print("no-auth GET /api/status -> 401 : ok")
+            r = await client.get("http://127.0.0.1:8098/api/me",
+                                 headers={"Cookie": auth_cookie})
+            assert r.status == 200 and (await r.json())["username"] == "alice"
 
-        # 错误密码
-        r = await c.post("http://127.0.0.1:8098/login", data={"password": "wrong"})
-        assert "密码错误" in await r.text()
-        print("wrong password -> 密码错误 : ok")
+            r = await client.post("http://127.0.0.1:8098/login", data={
+                "username": "alice", "password": "wrong-pass",
+            })
+            assert "用户名或密码错误" in await r.text()
 
-        # 正确密码 -> 302 + set-cookie
-        r = await c.post("http://127.0.0.1:8098/login", data={"password": "test-pass-123"},
-                         allow_redirects=False)
-        assert r.status == 302
-        set_cookie = r.headers.get("Set-Cookie", "")
-        assert "tongtong_auth" in set_cookie
-        print("correct password -> 302 + cookie : ok")
+            r = await client.get("http://127.0.0.1:8098/logout",
+                                 headers={"Cookie": auth_cookie}, allow_redirects=False)
+            assert r.status == 302
+            r = await client.get("http://127.0.0.1:8098/api/me",
+                                 headers={"Cookie": auth_cookie})
+            assert r.status == 401
 
-        # 手动提取 cookie（模拟浏览器保存）
-        auth_cookie = set_cookie.split(";")[0]
+            r = await client.post("http://127.0.0.1:8098/login", data={
+                "username": "alice", "password": "strong-pass-123",
+            }, allow_redirects=False)
+            assert r.status == 302 and "tongtong_auth" in r.headers.get("Set-Cookie", "")
 
-        # 登录后访问首页和 API
-        r = await c.get("http://127.0.0.1:8098/", headers={"Cookie": auth_cookie})
-        assert "Tongtong Backend Monitor" in await r.text()
-        print("auth GET / : ok")
-        r = await c.get("http://127.0.0.1:8098/api/status", headers={"Cookie": auth_cookie})
-        data = await r.json()
-        assert data["health"]["status"] == "ok"
-        print("auth GET /api/status : ok")
-
-    await runner.cleanup()
-    print("ALL AUTH TESTS PASSED")
+        await runner.cleanup()
+        store.close()
+    print("ALL MULTI-USER AUTH TESTS PASSED")
 
 
 if __name__ == "__main__":

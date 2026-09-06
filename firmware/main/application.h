@@ -33,6 +33,7 @@
 #define MAIN_EVENT_START_LISTENING      (1 << 10)
 #define MAIN_EVENT_STOP_LISTENING       (1 << 11)
 #define MAIN_EVENT_STATE_CHANGED        (1 << 12)
+#define MAIN_EVENT_END_CONVERSATION     (1 << 13)
 
 
 enum AecMode {
@@ -104,6 +105,7 @@ public:
      * Sends MAIN_EVENT_STOP_LISTENING to be handled in Run()
      */
     void StopListening();
+    void EndConversation();
 
     void Reboot();
     void WakeWordInvoke(const std::string& wake_word);
@@ -147,6 +149,9 @@ private:
     bool tts_playback_drained_ = false;
     std::atomic<bool> accepting_tts_audio_{false};
     bool network_connected_ = false;
+    bool automatic_interrupt_enabled_ = true;
+    bool button_interrupt_enabled_ = true;
+    bool double_click_end_enabled_ = true;
     int protocol_reconnect_attempts_ = 0;
     std::chrono::steady_clock::time_point next_protocol_reconnect_at_{};
     int clock_ticks_ = 0;
@@ -158,6 +163,7 @@ private:
     void HandleToggleChatEvent();
     void HandleStartListeningEvent();
     void HandleStopListeningEvent();
+    void HandleEndConversationEvent();
     void HandleNetworkConnectedEvent();
     void HandleNetworkDisconnectedEvent();
     void HandleActivationDoneEvent();

@@ -130,9 +130,9 @@ class OmniClient:
             "last_activity": 0.0,
         }
 
-    def new_for_session(self, conversation_memory=None):
+    def new_for_session(self, conversation_memory=None, config=None):
         """Create an isolated model client for one device WebSocket session."""
-        return OmniClient(self.config, conversation_memory=conversation_memory)
+        return OmniClient(config or self.config, conversation_memory=conversation_memory)
 
     @property
     def model(self) -> str:
@@ -167,6 +167,11 @@ class OmniClient:
 
     def effective_instructions(self, include_history: bool = False) -> str:
         parts = [self.instructions.strip(), LANGUAGE_PROMPTS[self.language]]
+        user_memory = self.config.get("dashscope", {}).get("user_memory_prompt", "")
+        if user_memory:
+            parts.append(
+                "以下是用户确认或明确表达的长期信息。仅在相关时自然使用，"
+                "不要逐条复述，也不要声称你在读取数据库：\n" + user_memory)
         turns = self._conversation_memory.get("turns", []) if include_history else []
         if turns:
             history_lines = [
@@ -228,6 +233,21 @@ class OmniClient:
         self._last_activity = 0.0
         if ws is not None and not getattr(ws, "closed", False):
             await ws.close()
+
+    async def cancel_current_response(self):
+        """Cancel model generation while keeping the reusable socket alive."""
+        ws = self._ws
+        if ws is None or getattr(ws, "closed", False):
+            return
+        try:
+            await ws.send_json({
+                "event_id": self._next_event_id("cancel"),
+                "type": "response.cancel",
+            })
+            log.info("omni: current response cancelled")
+        except Exception:
+            log.exception("omni: failed to cancel response; resetting realtime socket")
+            await self._reset_realtime()
 
     def _next_event_id(self, prefix: str) -> str:
         self._event_seq += 1
@@ -360,6 +380,9 @@ class OmniClient:
                             yield {"type": "text", "text": delta}
                         elif t in ("response.audio_transcript.done", "response.text.done"):
                             assistant_transcript = obj.get("transcript", obj.get("text", ""))
+                            if assistant_transcript and not assistant_text_parts:
+                                assistant_text_parts.append(assistant_transcript)
+                                yield {"type": "text", "text": assistant_transcript}
                         elif t == "conversation.item.input_audio_transcription.completed":
                             user_transcript = obj.get("transcript", "").strip()
                             if user_transcript:

@@ -113,6 +113,9 @@ private:
             }
             app.ToggleChatState();
         });
+        boot_button_.OnDoubleClick([]() {
+            Application::GetInstance().EndConversation();
+        });
         touch_button_.OnPressDown([this]() {
             Application::GetInstance().StartListening();
         });

@@ -196,6 +196,7 @@ void Application::Run() {
         MAIN_EVENT_TOGGLE_CHAT |
         MAIN_EVENT_START_LISTENING |
         MAIN_EVENT_STOP_LISTENING |
+        MAIN_EVENT_END_CONVERSATION |
         MAIN_EVENT_ACTIVATION_DONE |
         MAIN_EVENT_STATE_CHANGED;
 
@@ -233,6 +234,10 @@ void Application::Run() {
 
         if (bits & MAIN_EVENT_STOP_LISTENING) {
             HandleStopListeningEvent();
+        }
+
+        if (bits & MAIN_EVENT_END_CONVERSATION) {
+            HandleEndConversationEvent();
         }
 
         if (bits & MAIN_EVENT_SEND_AUDIO) {
@@ -635,6 +640,24 @@ void Application::InitializeProtocol() {
                     Schedule([this]() {
                         Reboot();
                     });
+                } else if (strcmp(command->valuestring, "keepalive") == 0) {
+                    // Receiving this message refreshes Protocol::last_incoming_time_.
+                } else if (strcmp(command->valuestring, "conversation_config") == 0) {
+                    auto automatic_interrupt = cJSON_GetObjectItem(root, "automatic_interrupt");
+                    auto button_interrupt = cJSON_GetObjectItem(root, "button_interrupt");
+                    auto double_click_end = cJSON_GetObjectItem(root, "double_click_end");
+                    if (cJSON_IsBool(automatic_interrupt)) {
+                        automatic_interrupt_enabled_ = cJSON_IsTrue(automatic_interrupt);
+                    }
+                    if (cJSON_IsBool(button_interrupt)) {
+                        button_interrupt_enabled_ = cJSON_IsTrue(button_interrupt);
+                    }
+                    if (cJSON_IsBool(double_click_end)) {
+                        double_click_end_enabled_ = cJSON_IsTrue(double_click_end);
+                    }
+                    ESP_LOGI(TAG, "Conversation config: auto=%d button=%d double_end=%d",
+                        automatic_interrupt_enabled_, button_interrupt_enabled_,
+                        double_click_end_enabled_);
                 } else {
                     ESP_LOGW(TAG, "Unknown system command: %s", command->valuestring);
                 }
@@ -730,6 +753,10 @@ void Application::StopListening() {
     xEventGroupSetBits(event_group_, MAIN_EVENT_STOP_LISTENING);
 }
 
+void Application::EndConversation() {
+    xEventGroupSetBits(event_group_, MAIN_EVENT_END_CONVERSATION);
+}
+
 void Application::HandleToggleChatEvent() {
     auto state = GetDeviceState();
     
@@ -761,10 +788,27 @@ void Application::HandleToggleChatEvent() {
 
         SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
     } else if (state == kDeviceStateSpeaking) {
-        AbortSpeaking(kAbortReasonNone);
+        if (button_interrupt_enabled_) {
+            AbortSpeaking(kAbortReasonNone);
+            SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop
+                                                  : kListeningModeRealtime);
+        }
     } else if (state == kDeviceStateListening) {
         protocol_->CloseAudioChannel();
     }
+}
+
+void Application::HandleEndConversationEvent() {
+    if (!protocol_ || !double_click_end_enabled_) {
+        return;
+    }
+    if (GetDeviceState() == kDeviceStateSpeaking) {
+        AbortSpeaking(kAbortReasonNone);
+    } else if (GetDeviceState() == kDeviceStateListening) {
+        protocol_->SendStopListening();
+    }
+    protocol_->SendEndConversation();
+    SetDeviceState(kDeviceStateIdle);
 }
 
 void Application::HandleStartListeningEvent() {
@@ -849,7 +893,11 @@ void Application::HandleWakeWordDetectedEvent() {
         SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
 #endif
     } else if (state == kDeviceStateSpeaking) {
-        AbortSpeaking(kAbortReasonWakeWordDetected);
+        if (automatic_interrupt_enabled_) {
+            AbortSpeaking(kAbortReasonWakeWordDetected);
+            SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop
+                                                  : kListeningModeRealtime);
+        }
     } else if (state == kDeviceStateActivating) {
         // Restart the activation check if the wake word is detected during activation
         SetDeviceState(kDeviceStateIdle);

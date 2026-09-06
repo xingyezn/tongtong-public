@@ -32,14 +32,17 @@ def main():
     parser.add_argument("--tool", help="MCP tool name, e.g. self.chassis.go_forward")
     parser.add_argument("--arguments", default="{}", help="JSON object passed to the MCP tool")
     parser.add_argument("--timeout-ms", type=int, default=8000)
-    parser.add_argument("--password", help="Dashboard password; omit to enter it without echo")
+    parser.add_argument("--username", required=True, help="Dashboard username")
+    parser.add_argument("--password", help="User password; omit to enter it without echo")
     args = parser.parse_args()
 
     base_url = args.base_url.rstrip("/")
-    password = args.password or getpass.getpass("Dashboard password: ")
+    password = args.password or getpass.getpass("User password: ")
     cookie_jar = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
-    login_data = urllib.parse.urlencode({"password": password}).encode("utf-8")
+    login_data = urllib.parse.urlencode({
+        "username": args.username, "password": password,
+    }).encode("utf-8")
     try:
         opener.open(urllib.request.Request(base_url + "/login", data=login_data), timeout=20).read()
         if not args.tool:

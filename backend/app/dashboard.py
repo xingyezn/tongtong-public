@@ -7,7 +7,6 @@
 """
 
 import asyncio
-import hashlib
 import hmac
 import json
 import logging
@@ -29,6 +28,8 @@ MODEL_LANGUAGE_CODES = {
     "th", "id", "ar", "vi", "tr", "fi", "pl", "hi", "nl", "cs", "ur",
     "fil", "sv", "da", "he", "is", "ms", "no", "fa",
 }
+BINDING_ATTEMPT_WINDOW_SECONDS = 10 * 60
+BINDING_ATTEMPT_LIMIT = 5
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +141,8 @@ LOGIN_HTML = r"""<!DOCTYPE html>
            transition:transform .18s, box-shadow .18s; }
   button:hover { transform:translateY(-1px); box-shadow:0 11px 20px rgba(45,140,240,.28); }
   .error { margin-bottom:12px; color:#d9435b; font-size:13px; text-align:center; }
+  .switch { margin:16px 0 0; color:var(--muted); font-size:13px; text-align:center; }
+  .switch a { color:var(--blue-deep); text-decoration:none; font-weight:700; }
 </style>
 </head>
 <body>
@@ -149,13 +152,24 @@ LOGIN_HTML = r"""<!DOCTYPE html>
   <p class="sub">欢迎回来，连接你的语音助手</p>
   <!--ERROR-->
   <form method="post" action="/login">
-    <input type="password" name="password" placeholder="访问口令" autofocus required>
+    <input type="text" name="username" placeholder="用户名" autocomplete="username" autofocus required>
+    <input type="password" name="password" placeholder="密码" autocomplete="current-password" required>
     <button type="submit">登 录</button>
   </form>
+  <p class="switch">还没有账号？<a href="/register">立即注册</a></p>
 </div>
 </body>
 </html>
 """
+
+REGISTER_HTML = (LOGIN_HTML
+    .replace("登录 · Tongtong Monitor", "注册 · Tongtong Monitor")
+    .replace("欢迎回来，连接你的语音助手", "创建账号，管理属于你的设备")
+    .replace('action="/login"', 'action="/register"')
+    .replace('autocomplete="current-password"', 'autocomplete="new-password"')
+    .replace("登 录", "注 册")
+    .replace('还没有账号？<a href="/register">立即注册</a>',
+             '已有账号？<a href="/login">返回登录</a>'))
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +246,17 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .empty { color:var(--muted); font-size:13px; padding:8px 0; }
   .hint { font-size:12px; color:var(--muted); margin-top:8px; }
   .badge { padding:3px 9px; border-radius:20px; color:#527087; font-size:11px; background:#e8f3f8; }
+  .chat-layout { display:grid; grid-template-columns:minmax(180px,26%) 1fr; gap:12px; min-height:360px; }
+  .conversation-list { max-height:520px; overflow:auto; display:flex; flex-direction:column; gap:7px; }
+  .conversation-item { border:1px solid #dceaf2; border-radius:10px; padding:9px 11px; background:#f8fcfe; cursor:pointer; }
+  .conversation-item.active { border-color:var(--acc); background:#edf7ff; }
+  .chat-messages { max-height:520px; overflow:auto; padding:12px; border:1px solid #dceaf2; border-radius:12px; background:#f8fbfd; display:flex; flex-direction:column; gap:10px; }
+  .chat-message { max-width:78%; padding:9px 12px; border-radius:14px; white-space:pre-wrap; overflow-wrap:anywhere; }
+  .chat-message.user { align-self:flex-end; background:#dff1ff; border-bottom-right-radius:4px; }
+  .chat-message.assistant { align-self:flex-start; background:#fff; border:1px solid #dceaf2; border-bottom-left-radius:4px; }
+  .chat-message .speaker { font-size:10px; color:var(--muted); font-weight:800; margin-bottom:3px; }
+  .memory-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:9px; margin-top:10px; }
+  .memory-item { border:1px solid #dceaf2; border-radius:10px; padding:10px; background:#f8fcfe; }
   input:not([type="checkbox"]), select, textarea { border:1px solid #d5e6ef !important; border-radius:9px !important; background:#fbfeff !important;
           color:var(--fg) !important; box-shadow:none; transition:border-color .18s, box-shadow .18s; }
   input:not([type="checkbox"]):focus, select:focus, textarea:focus { outline:none; border-color:#72b7f4 !important; box-shadow:0 0 0 3px rgba(45,140,240,.11) !important; }
@@ -245,7 +270,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   #toast.err { border-color:#f0a8b2; color:#c4475a; background:#fff6f7; }
   .toast-icon { display:grid; place-items:center; flex:0 0 26px; width:26px; height:26px; border-radius:50%; color:#fff; font-size:15px; }
   #toast.ok .toast-icon { background:var(--ok); } #toast.err .toast-icon { background:var(--bad); }
-  @media (max-width:760px) { header { align-items:flex-start; } .header-spacer { display:none; } main { grid-template-columns:1fr; padding-top:18px; }
+  @media (max-width:760px) { header { align-items:flex-start; } .header-spacer { display:none; } main { grid-template-columns:1fr; padding-top:18px; } .chat-layout { grid-template-columns:1fr; }
     .card, .card.full { grid-column:1; } .card:hover { transform:none; } #card-devices { overflow-x:auto; } }
 </style>
 </head>
@@ -258,16 +283,36 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <span id="health"><span class="dot bad"></span>检查中…</span>
   <span class="badge" id="uptime">—</span>
   <span class="header-spacer"></span>
+  <span class="badge" id="current-user">—</span>
   <label class="muted"><input type="checkbox" id="autorefresh" checked> 自动刷新</label>
   <button class="btn" onclick="refresh()">刷新</button>
+  <a class="btn" href="/logout">退出</a>
 </header>
 
 <main>
-  <div class="card" id="card-devices">
+  <div class="card full">
+    <h2>设备绑定与管理</h2>
+    <div class="row" style="margin-bottom:10px">
+      <label class="muted">当前设备</label>
+      <select id="active-device" onchange="onDeviceChanged()" style="min-width:220px"></select>
+      <input id="device-edit-identifier" maxlength="40" placeholder="设备识别码，如 living-room" style="padding:7px 9px">
+      <input id="device-edit-name" maxlength="64" placeholder="自定义名称，如 客厅童童" style="padding:7px 9px">
+      <button class="btn" onclick="updateDevice()">保存名称</button>
+      <button class="btn warn" onclick="unbindDevice()">解绑</button>
+    </div>
+    <div class="row">
+      <input id="bind-code" maxlength="8" inputmode="numeric" autocomplete="one-time-code"
+             placeholder="输入设备屏幕上的 8 位绑定码" style="flex:1;max-width:300px;padding:7px 9px">
+      <button class="btn" onclick="bindDevice()">绑定设备</button>
+    </div>
+    <div class="hint">无需输入设备 ID。绑定码 10 分钟内有效且只能使用一次；连续输错会触发安全限速。绑定成功后可在上方修改自动生成的设备名称和识别码。</div>
+  </div>
+
+  <div class="card full" id="card-devices">
     <h2>设备状态</h2>
     <table>
-      <thead><tr><th>设备</th><th>版本</th><th>状态</th><th>在线/最后活跃</th><th>Session</th></tr></thead>
-      <tbody id="device-body"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody>
+      <thead><tr><th>名称</th><th>识别码</th><th>硬件 ID（诊断）</th><th>版本</th><th>状态</th><th>在线/最后活跃</th><th>Session</th></tr></thead>
+      <tbody id="device-body"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
     </table>
     <div class="hint" id="ota-hint"></div>
     <div class="hint">说明：设备待机时按省电设计断开连接（显示"待机中"），唤醒对话时自动上线。</div>
@@ -292,7 +337,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
 
   <div class="card">
-    <h2>语音检测 (VAD) 控制</h2>
+    <h2>当前设备 · 语音检测 (VAD)</h2>
     <div class="row" style="margin-bottom:10px">
       <label class="muted" style="min-width:130px">静音结束时长(ms)</label>
       <input type="number" id="vad-silence" min="200" max="6000" step="100" value="400" style="flex:1;max-width:160px;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4">
@@ -313,7 +358,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
 
   <div class="card">
-    <h2>模型 / 语言 / 音色 / 人物设定</h2>
+    <h2>当前设备 · 模型 / 语言 / 音色 / 人物设定</h2>
     <div class="row" style="margin-bottom:10px">
       <label class="muted" style="min-width:130px">模型</label>
       <input type="text" id="cfg-model" placeholder="qwen3.5-omni-flash-realtime" style="flex:1;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4">
@@ -419,11 +464,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <textarea id="cfg-instructions" rows="4" placeholder="你是童童，一个友好、热情的语音助手……" style="flex:1;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4;resize:vertical;font-family:Consolas,monospace;font-size:12px"></textarea>
     </div>
     <div class="row" style="margin-bottom:10px">
-      <label class="muted" style="min-width:130px">输入/输出采样率</label>
-      <input type="number" id="cfg-in-rate" min="8000" max="48000" step="8000" value="16000" style="flex:1;max-width:140px;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4">
-      <input type="number" id="cfg-out-rate" min="8000" max="48000" step="8000" value="24000" style="flex:1;max-width:140px;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4">
-    </div>
-    <div class="row" style="margin-bottom:10px">
       <label class="muted" style="min-width:130px">对话连续时长（分钟）</label>
       <input type="number" id="cfg-conversation-timeout" min="1" max="120" step="1" value="10" style="flex:1;max-width:140px;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4">
       <span class="muted">无新对话超过此时长后重置</span>
@@ -437,6 +477,33 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       对话连续时长可设置为 1～120 分钟，默认 10 分钟。
       模型需为百炼 Realtime 系列（如 qwen3.5-omni-flash-realtime / qwen3.5-omni-plus-realtime）。
     </div>
+  </div>
+
+  <div class="card">
+    <h2>当前设备 · 记忆与打断</h2>
+    <label class="row"><input type="checkbox" id="feature-memory"> 允许此设备使用个人长期记忆</label>
+    <label class="row"><input type="checkbox" id="feature-auto-interrupt"> 自动打断（当前硬件使用唤醒词检测）</label>
+    <label class="row"><input type="checkbox" id="feature-button-interrupt"> 单击复位待命键：打断并继续聆听</label>
+    <label class="row"><input type="checkbox" id="feature-double-end"> 双击复位待命键：结束本次会话</label>
+    <div class="row" style="margin-top:10px"><button class="btn" onclick="saveFeatures()">保存功能设置</button><span class="muted" id="feature-status"></span></div>
+    <div class="hint">无回声消除的设备无法可靠地在扬声器播放时检测任意语音，因此自动模式使用唤醒词打断；按键打断始终能立即取消模型生成与播放。</div>
+  </div>
+
+  <div class="card">
+    <h2>我的个人信息（永久记忆）</h2>
+    <div class="row"><input id="memory-category" placeholder="分类，如 偏好" style="padding:7px;width:100px"><input id="memory-label" placeholder="字段，如 喜欢的颜色" style="padding:7px;flex:1"><input id="memory-value" placeholder="内容" style="padding:7px;flex:2"><button class="btn" onclick="addMemory()">添加</button></div>
+    <div id="memory-list" class="memory-grid"><div class="empty">加载中…</div></div>
+    <div class="hint">你可以启用、停用、编辑或删除。只有已启用的信息才可能注入模型，并且还要由上方的设备开关允许。</div>
+  </div>
+
+  <div class="card full">
+    <h2>当前设备 · 对话记录</h2>
+    <div class="row" style="margin-bottom:10px">
+      <button class="btn" onclick="loadConversations()">刷新记录</button>
+      <button class="btn warn" onclick="endConversation()">结束当前会话并整理记忆</button>
+      <span class="muted" id="conversation-status"></span>
+    </div>
+    <div class="chat-layout"><div id="conversation-list" class="conversation-list"><div class="empty">请先绑定并选择设备。</div></div><div id="chat-messages" class="chat-messages"><div class="empty">选择一段会话查看消息。</div></div></div>
   </div>
 
   <div class="card full">
@@ -465,6 +532,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 const $ = id => document.getElementById(id);
 let autoRefresh = true;
 let dashboardDevices = [];
+let ownedDevices = [];
+let activeDeviceId = "";
+let activeConversationId = "";
 
 function fmtDur(sec) {
   sec = Math.max(0, Math.floor(sec));
@@ -487,6 +557,105 @@ function showToast(message, kind) {
   toastTimer = setTimeout(() => { toast.classList.remove("show"); }, 4200);
 }
 
+function esc(value) {
+  return String(value == null ? "" : value)
+    .replaceAll("&", "&amp;").replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+}
+
+async function apiJson(url, options) {
+  const r = await fetch(url, options);
+  let data = {};
+  try { data = await r.json(); } catch (_) {}
+  if (!r.ok) throw new Error(data.error || ("请求失败 (" + r.status + ")"));
+  return data;
+}
+
+function selectedOwnedDevice() {
+  return ownedDevices.find(dev => dev.device_id === activeDeviceId);
+}
+
+function fillDeviceEditor() {
+  const dev = selectedOwnedDevice();
+  $("device-edit-identifier").value = dev ? dev.identifier : "";
+  $("device-edit-name").value = dev ? dev.name : "";
+}
+
+function renderOwnedDeviceControls(devices) {
+  ownedDevices = devices;
+  const select = $("active-device");
+  const previous = activeDeviceId;
+  if (!devices.some(dev => dev.device_id === activeDeviceId)) {
+    activeDeviceId = devices.length ? devices[0].device_id : "";
+  }
+  select.innerHTML = devices.length ? devices.map(dev =>
+    `<option value="${esc(dev.device_id)}">${esc(dev.name)} · ${esc(dev.identifier)}</option>`
+  ).join("") : '<option value="">尚未绑定设备</option>';
+  select.value = activeDeviceId;
+  select.disabled = devices.length === 0;
+  if (previous !== activeDeviceId) {
+    fillDeviceEditor();
+    loadVad();
+    loadModel();
+    loadFeatures();
+    loadConversations();
+  }
+}
+
+async function onDeviceChanged() {
+  activeDeviceId = $("active-device").value;
+  fillDeviceEditor();
+  await Promise.all([loadVad(), loadModel(), loadFeatures(), loadConversations()]);
+}
+
+async function bindDevice() {
+  try {
+    const code = $("bind-code").value.trim();
+    if (!/^\d{8}$/.test(code)) throw new Error("请输入设备屏幕上的 8 位数字绑定码");
+    const body = {
+      binding_code: code,
+    };
+    const dev = await apiJson("/api/devices/bind", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
+    });
+    activeDeviceId = dev.device_id;
+    $("bind-code").value = "";
+    showToast("设备已绑定，正在重新连接", "ok");
+    await refresh();
+    await onDeviceChanged();
+  } catch (e) { showToast("绑定失败：" + e.message, "err"); }
+}
+
+async function updateDevice() {
+  if (!activeDeviceId) return showToast("请先选择设备", "err");
+  try {
+    await apiJson("/api/devices/update", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        device_id: activeDeviceId,
+        identifier: $("device-edit-identifier").value.trim(),
+        name: $("device-edit-name").value.trim(),
+      })
+    });
+    showToast("设备信息已保存", "ok");
+    await refresh();
+  } catch (e) { showToast("保存失败：" + e.message, "err"); }
+}
+
+async function unbindDevice() {
+  const dev = selectedOwnedDevice();
+  if (!dev || !confirm("确定解绑“" + dev.name + "”？设备将重新显示绑定码。")) return;
+  try {
+    await apiJson("/api/devices/unbind", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ device_id: dev.device_id })
+    });
+    activeDeviceId = "";
+    showToast("设备已解绑", "ok");
+    await refresh();
+  } catch (e) { showToast("解绑失败：" + e.message, "err"); }
+}
+
 async function refresh() {
   try {
     const r = await fetch("/api/status");
@@ -504,11 +673,13 @@ function render(d) {
     ? '<span class="dot ok"></span>服务在线'
     : '<span class="dot bad"></span>服务异常';
   $("uptime").textContent = "运行 " + fmtDur(d.server.uptime);
+  $("current-user").textContent = "用户：" + (d.user ? d.user.username : "—");
+  renderOwnedDeviceControls(d.devices || []);
 
   // devices
   const tbody = $("device-body");
   if (!d.devices.length) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty">当前无设备在线</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="empty">尚未绑定设备</td></tr>';
   } else {
     tbody.innerHTML = d.devices.map(dev => {
       let st;
@@ -524,11 +695,13 @@ function render(d) {
       const timeStr = dev.online ? fmtDur(dev.connected_for)
         : (dev.idle ? "最后活跃 " + fmtDur(dev.connected_for) + " 前" : "—");
       return `<tr>
-        <td class="mono">${dev.device_id}</td>
-        <td>v${dev.bin_version}</td>
+        <td>${esc(dev.name)}</td>
+        <td class="mono">${esc(dev.identifier)}</td>
+        <td class="mono">${esc(dev.device_id)}</td>
+        <td>v${esc(dev.bin_version)}</td>
         <td>${st}</td>
         <td>${timeStr}</td>
-        <td class="mono">${dev.session_id || "—"}</td>
+        <td class="mono">${esc(dev.session_id || "—")}</td>
       </tr>`;
     }).join("");
   }
@@ -541,8 +714,7 @@ function render(d) {
   $("cfg-kv").innerHTML = [
     ["OTA URL", c.ota_url],
     ["WebSocket URL", c.ws_url],
-    ["AI 模型", c.model + " @ " + c.model_base],
-    ["对话语言", c.language || "zh"],
+    ["模型服务", c.model_base],
     ["API Key", c.api_key_configured ? '<span style="color:var(--ok)">已配置</span>'
                                      : '<span style="color:var(--warn)">未配置 (回环模式)</span>'],
     ["设备鉴权", c.devices_enabled ? "开启" : "关闭"],
@@ -556,7 +728,7 @@ function renderHardwareTestControls(devices) {
   const previous = select.value;
   dashboardDevices = devices.filter(dev => dev.online);
   select.innerHTML = dashboardDevices.map(dev =>
-    `<option value="${dev.device_id}">${dev.device_id} (v${dev.bin_version})</option>`
+    `<option value="${esc(dev.device_id)}">${esc(dev.name)} · ${esc(dev.identifier)} (v${esc(dev.bin_version)})</option>`
   ).join("");
   select.disabled = dashboardDevices.length === 0;
   if (dashboardDevices.some(dev => dev.device_id === previous)) select.value = previous;
@@ -637,14 +809,20 @@ es.onerror = () => {};
 
 // ---- VAD 控制 ----
 async function loadVad() {
+  if (!activeDeviceId) {
+    $("vad-status").textContent = "请先绑定并选择设备";
+    return;
+  }
   try {
-    const r = await fetch("/api/vad");
+    const r = await fetch("/api/vad?device_id=" + encodeURIComponent(activeDeviceId));
+    if (!r.ok) return;
     const d = await r.json();
     $("vad-silence").value = d.silence_duration_ms;
     $("vad-threshold").value = d.energy_threshold;
   } catch (e) {}
 }
 async function saveVad() {
+  if (!activeDeviceId) return showToast("请先绑定并选择设备", "err");
   const silence = parseInt($("vad-silence").value, 10);
   const threshold = parseFloat($("vad-threshold").value);
   if (isNaN(silence) || isNaN(threshold)) {
@@ -662,7 +840,7 @@ async function saveVad() {
     $("vad-status").style.color = "var(--bad)";
     return;
   }
-  const body = { silence_duration_ms: silence, energy_threshold: threshold };
+  const body = { device_id: activeDeviceId, silence_duration_ms: silence, energy_threshold: threshold };
   try {
     const r = await fetch("/api/vad", {
       method: "POST",
@@ -820,14 +998,17 @@ async function runHardwareTest(name, button) {
 }
 
 async function loadModel() {
+  if (!activeDeviceId) {
+    $("model-status").textContent = "请先绑定并选择设备";
+    return;
+  }
   try {
-    const r = await fetch("/api/model");
+    const r = await fetch("/api/model?device_id=" + encodeURIComponent(activeDeviceId));
+    if (!r.ok) return;
     const d = await r.json();
     $("cfg-model").value = d.model || "";
     $("cfg-language").value = d.language || "zh";
     $("cfg-instructions").value = d.instructions || "";
-    $("cfg-in-rate").value = d.input_sample_rate || 16000;
-    $("cfg-out-rate").value = d.output_sample_rate || 24000;
     $("cfg-conversation-timeout").value = d.conversation_timeout_minutes || 10;
     const voice = d.voice || "";
     if (Array.from($("cfg-voice").options).some(option => option.value === voice)) {
@@ -836,14 +1017,14 @@ async function loadModel() {
   } catch (e) {}
 }
 async function saveModel() {
+  if (!activeDeviceId) return showToast("请先绑定并选择设备", "err");
   const voice = $("cfg-voice").value;
   const body = {
+    device_id: activeDeviceId,
     model: $("cfg-model").value.trim(),
     language: $("cfg-language").value,
     voice: voice,
     instructions: $("cfg-instructions").value.trim(),
-    input_sample_rate: parseInt($("cfg-in-rate").value, 10),
-    output_sample_rate: parseInt($("cfg-out-rate").value, 10),
     conversation_timeout_minutes: parseFloat($("cfg-conversation-timeout").value),
   };
   if (!body.model) {
@@ -881,12 +1062,124 @@ async function saveModel() {
   }
 }
 
+async function loadConversations() {
+  const box = $("conversation-list");
+  const messages = $("chat-messages");
+  if (!activeDeviceId) {
+    box.innerHTML = '<div class="empty">请先绑定并选择设备。</div>';
+    messages.innerHTML = '<div class="empty">选择一段会话查看消息。</div>';
+    $("conversation-status").textContent = "";
+    return;
+  }
+  try {
+    const data = await apiJson("/api/conversations?device_id=" +
+      encodeURIComponent(activeDeviceId) + "&limit=100");
+    box.innerHTML = "";
+    if (!data.conversations.length) {
+      box.innerHTML = '<div class="empty">这台设备还没有对话记录。</div>';
+      messages.innerHTML = '<div class="empty">还没有消息。</div>';
+    } else {
+      if (!data.conversations.some(item => String(item.id) === String(activeConversationId))) {
+        activeConversationId = data.conversations[0].id;
+      }
+      data.conversations.forEach(conversation => {
+        const item = document.createElement("div");
+        item.className = "conversation-item" + (String(conversation.id) === String(activeConversationId) ? " active" : "");
+        item.innerHTML = '<div>' + esc(conversation.title || "新会话") + '</div><div class="muted">' +
+          new Date(conversation.last_message_at * 1000).toLocaleString() + ' · ' + conversation.message_count + ' 条消息' +
+          (conversation.ended_at ? '' : ' · 进行中') + '</div>';
+        item.onclick = () => { activeConversationId = conversation.id; loadConversationMessages(); loadConversations(); };
+        box.appendChild(item);
+      });
+      await loadConversationMessages();
+    }
+    $("conversation-status").textContent = data.conversations.length + " 次会话";
+  } catch (e) {
+    box.innerHTML = '<div class="empty">加载失败。</div>';
+    $("conversation-status").textContent = e.message;
+  }
+}
+
+async function loadConversationMessages() {
+  const box = $("chat-messages");
+  if (!activeConversationId) return;
+  try {
+    const data = await apiJson("/api/conversations?conversation_id=" + encodeURIComponent(activeConversationId));
+    box.innerHTML = data.messages.map(message =>
+      '<div class="chat-message ' + message.role + '"><div class="speaker">' +
+      (message.role === "user" ? "你" : "AI") + '</div>' + esc(message.content) + '</div>'
+    ).join("") || '<div class="empty">还没有消息。</div>';
+    box.scrollTop = box.scrollHeight;
+  } catch (e) { box.innerHTML = '<div class="empty">加载消息失败。</div>'; }
+}
+
+async function endConversation() {
+  if (!activeDeviceId) return showToast("请先选择设备", "err");
+  try {
+    const data = await apiJson("/api/conversations/end", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({device_id:activeDeviceId})});
+    activeConversationId = data.conversation_id || activeConversationId;
+    showToast(data.conversation_id ? "会话已结束，正在整理长期记忆" : "当前没有进行中的会话", "ok");
+    await loadConversations();
+    setTimeout(loadMemories, 2500);
+  } catch (e) { showToast("结束会话失败：" + e.message, "err"); }
+}
+
+async function loadFeatures() {
+  if (!activeDeviceId) return;
+  try {
+    const d = await apiJson("/api/features?device_id=" + encodeURIComponent(activeDeviceId));
+    $("feature-memory").checked = d.memory_enabled;
+    $("feature-auto-interrupt").checked = d.automatic_interrupt;
+    $("feature-button-interrupt").checked = d.button_interrupt;
+    $("feature-double-end").checked = d.double_click_end;
+  } catch (_) {}
+}
+
+async function saveFeatures() {
+  if (!activeDeviceId) return showToast("请先选择设备", "err");
+  try {
+    await apiJson("/api/features", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({
+      device_id:activeDeviceId, memory_enabled:$("feature-memory").checked,
+      automatic_interrupt:$("feature-auto-interrupt").checked,
+      button_interrupt:$("feature-button-interrupt").checked,
+      double_click_end:$("feature-double-end").checked})});
+    $("feature-status").textContent = "已保存并下发";
+    showToast("设备功能设置已保存", "ok");
+  } catch (e) { showToast("保存失败：" + e.message, "err"); }
+}
+
+async function loadMemories() {
+  const box = $("memory-list");
+  try {
+    const data = await apiJson("/api/memories");
+    if (!data.memories.length) { box.innerHTML = '<div class="empty">还没有长期记忆。结束一次会话后可自动整理，也可手动添加。</div>'; return; }
+    box.innerHTML = data.memories.map(m => '<div class="memory-item"><div class="row"><label><input type="checkbox" ' +
+      (m.enabled ? 'checked' : '') + ' onchange="toggleMemory(' + m.id + ',this.checked)"> 使用</label><span class="badge">' + esc(m.category) +
+      '</span></div><b>' + esc(m.label) + '</b><div style="margin:5px 0">' + esc(m.value) +
+      '</div><div class="row"><button class="btn" onclick="editMemory(' + m.id + ')">编辑</button><button class="btn warn" onclick="deleteMemory(' + m.id + ')">删除</button></div></div>').join('');
+    window.currentMemories = data.memories;
+  } catch (e) { box.innerHTML = '<div class="empty">加载失败。</div>'; }
+}
+
+async function addMemory() {
+  try {
+    await apiJson("/api/memories", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({category:$("memory-category").value || "其他", label:$("memory-label").value, value:$("memory-value").value})});
+    $("memory-label").value = ""; $("memory-value").value = ""; await loadMemories(); showToast("个人信息已添加", "ok");
+  } catch(e) { showToast("添加失败：" + e.message, "err"); }
+}
+async function toggleMemory(id, enabled) { await apiJson("/api/memories/update", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id,enabled})}); await loadMemories(); }
+async function editMemory(id) {
+  const m = (window.currentMemories || []).find(x => x.id === id); if (!m) return;
+  const value = prompt("修改“" + m.label + "”", m.value); if (value === null) return;
+  await apiJson("/api/memories/update", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id,value})}); await loadMemories();
+}
+async function deleteMemory(id) { if (!confirm("确定删除这条个人信息？")) return; await apiJson("/api/memories/delete", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id})}); await loadMemories(); }
+
 // ---- auto refresh ----
 $("autorefresh").addEventListener("change", e => { autoRefresh = e.target.checked; });
 setInterval(() => { if (autoRefresh) refresh(); }, 3000);
 refresh();
-loadVad();
-loadModel();
+loadMemories();
 </script>
 </body>
 </html>
@@ -898,18 +1191,22 @@ loadModel();
 # ---------------------------------------------------------------------------
 class Dashboard:
     def __init__(self, config: dict, sessions: dict, http_api, log_handler: BroadcastLogHandler,
-                 device_history: dict = None, save_config: callable = None):
+                 device_history: dict = None, save_config: callable = None,
+                 account_store=None, gateway=None, memory_service=None):
         self.config = config
         self.sessions = sessions  # device_id -> Session
         self.device_history = device_history or {}  # device_id -> {last_seen, client_id}
         self.http_api = http_api
         self.log_handler = log_handler
         self.save_config = save_config
+        self.account_store = account_store
+        self.gateway = gateway
+        self.memory_service = memory_service
         self.start_time = time.time()
         dash_cfg = config.get("dashboard", {})
-        self.password = dash_cfg.get("password", "")
         self.session_ttl = int(dash_cfg.get("session_ttl", 86400))
-        self._secret = secrets.token_hex(16)
+        self.registration_enabled = bool(dash_cfg.get("registration_enabled", True))
+        self._binding_failures = {}
         # Latest JPEG per device. Photos are intentionally ephemeral: they
         # are lost on restart and never written to disk.
         self._camera_photos = {}
@@ -918,7 +1215,23 @@ class Dashboard:
         app.router.add_get("/", self.index)
         app.router.add_get("/login", self.login_page)
         app.router.add_post("/login", self.login)
+        app.router.add_get("/register", self.register_page)
+        app.router.add_post("/register", self.register)
         app.router.add_get("/logout", self.logout)
+        app.router.add_get("/api/me", self.api_me)
+        app.router.add_get("/api/devices", self.api_devices)
+        app.router.add_post("/api/devices/bind", self.api_device_bind)
+        app.router.add_post("/api/devices/update", self.api_device_update)
+        app.router.add_post("/api/devices/unbind", self.api_device_unbind)
+        app.router.add_get("/api/conversations", self.api_conversations)
+        app.router.add_post("/api/conversations/end", self.api_conversation_end)
+        app.router.add_get("/api/memories", self.api_memories)
+        app.router.add_post("/api/memories", self.api_memory_create)
+        app.router.add_post("/api/memories/update", self.api_memory_update)
+        app.router.add_post("/api/memories/delete", self.api_memory_delete)
+        app.router.add_post("/api/memories/summarize", self.api_memory_summarize)
+        app.router.add_get("/api/features", self.api_features_get)
+        app.router.add_post("/api/features", self.api_features_set)
         app.router.add_get("/api/status", self.api_status)
         app.router.add_get("/api/logs", self.api_logs)
         app.router.add_get("/api/vad", self.api_vad_get)
@@ -933,39 +1246,28 @@ class Dashboard:
     # ------------------------------------------------------------------
     # 鉴权辅助
     # ------------------------------------------------------------------
-    @property
-    def auth_enabled(self) -> bool:
-        return bool(self.password)
-
-    def _sign(self, value: str) -> str:
-        return hmac.new(self._secret.encode(), value.encode(), hashlib.sha256).hexdigest()
-
-    def _make_cookie(self, now: float) -> str:
-        # token = expires.ts.sign(expires.ts)
-        payload = str(int(now) + self.session_ttl)
-        return "{}.{}".format(payload, self._sign(payload))
+    def _current_user(self, request):
+        if self.account_store is None:
+            return None
+        return self.account_store.user_from_session(request.cookies.get(AUTH_COOKIE, ""))
 
     def _check_cookie(self, request) -> bool:
-        if not self.auth_enabled:
-            return True
-        cookie = request.cookies.get(AUTH_COOKIE, "")
-        if not cookie or "." not in cookie:
-            return False
-        payload, sig = cookie.rsplit(".", 1)
-        if not hmac.compare_digest(sig, self._sign(payload)):
-            return False
-        try:
-            expires = int(payload)
-        except ValueError:
-            return False
-        return expires > time.time()
+        return self._current_user(request) is not None
 
     def _redirect_login(self):
         raise web.HTTPFound("/login")
 
-    def _require_auth(self, request):
-        if not self._check_cookie(request):
-            self._redirect_login()
+    def _require_user(self, request):
+        user = self._current_user(request)
+        if user is None:
+            raise web.HTTPUnauthorized(text="unauthorized")
+        return user
+
+    def _require_owned_device(self, request, device_id):
+        user = self._require_user(request)
+        if not self.account_store.user_owns_device(user["id"], device_id):
+            raise web.HTTPForbidden(text="device does not belong to this user")
+        return user
 
     # ------------------------------------------------------------------
     # 登录
@@ -977,22 +1279,51 @@ class Dashboard:
 
     async def login(self, request):
         data = await request.post()
+        username = data.get("username", "")
         password = data.get("password", "")
-        if not self.auth_enabled:
-            raise web.HTTPFound("/")
-        if password != self.password:
-            log.warning("dashboard 登录失败 (ip=%s)", request.remote)
+        user = self.account_store.authenticate(username, password) if self.account_store else None
+        if user is None:
+            log.warning("dashboard 登录失败 (username=%s ip=%s)", username, request.remote)
             return web.Response(text=LOGIN_HTML.replace(
                 "<!--ERROR-->",
-                '<div class="error">密码错误</div>'
+                '<div class="error">用户名或密码错误</div>'
             ), content_type="text/html", charset="utf-8")
-        log.info("dashboard 登录成功 (ip=%s)", request.remote)
+        log.info("dashboard 登录成功 (user=%s ip=%s)", user["username"], request.remote)
+        token = self.account_store.create_session(user["id"], self.session_ttl)
         resp = web.HTTPFound("/")
-        resp.set_cookie(AUTH_COOKIE, self._make_cookie(time.time()),
-                        max_age=self.session_ttl, httponly=True, samesite="Lax")
+        resp.set_cookie(AUTH_COOKIE, token, max_age=self.session_ttl,
+                        httponly=True, samesite="Lax", secure=request.secure)
+        raise resp
+
+    async def register_page(self, request):
+        if self._check_cookie(request):
+            raise web.HTTPFound("/")
+        if not self.registration_enabled:
+            raise web.HTTPForbidden(text="registration disabled")
+        return web.Response(text=REGISTER_HTML, content_type="text/html", charset="utf-8")
+
+    async def register(self, request):
+        if not self.registration_enabled:
+            raise web.HTTPForbidden(text="registration disabled")
+        data = await request.post()
+        try:
+            user = self.account_store.register_user(
+                data.get("username", ""), data.get("password", ""))
+        except ValueError as exc:
+            return web.Response(text=REGISTER_HTML.replace(
+                "<!--ERROR-->", '<div class="error">{}</div>'.format(
+                    str(exc).replace("<", "&lt;").replace(">", "&gt;"))
+            ), content_type="text/html", charset="utf-8", status=400)
+        token = self.account_store.create_session(user["id"], self.session_ttl)
+        log.info("dashboard 用户注册成功 (user=%s ip=%s)", user["username"], request.remote)
+        resp = web.HTTPFound("/")
+        resp.set_cookie(AUTH_COOKIE, token, max_age=self.session_ttl,
+                        httponly=True, samesite="Lax", secure=request.secure)
         raise resp
 
     async def logout(self, request):
+        if self.account_store:
+            self.account_store.revoke_session(request.cookies.get(AUTH_COOKIE, ""))
         resp = web.HTTPFound("/login")
         resp.del_cookie(AUTH_COOKIE)
         raise resp
@@ -1005,41 +1336,272 @@ class Dashboard:
             raise web.HTTPFound("/login")
         return web.Response(text=DASHBOARD_HTML, content_type="text/html", charset="utf-8")
 
+    def _effective_model_settings(self, device_id):
+        settings = {
+            key: self.config.get("dashscope", {}).get(key)
+            for key in ("model", "language", "voice", "instructions",
+                        "conversation_timeout_minutes")
+        }
+        settings["language"] = settings.get("language") or "zh"
+        settings["conversation_timeout_minutes"] = (
+            settings.get("conversation_timeout_minutes") or 10)
+        settings.update(self.account_store.get_model_settings(device_id))
+        settings["api_key_configured"] = bool(
+            self.config.get("dashscope", {}).get("api_key"))
+        return settings
+
+    def _effective_vad_settings(self, device_id):
+        settings = dict(self.config.get("vad", {}))
+        settings.update(self.account_store.get_vad_settings(device_id))
+        return {
+            "silence_duration_ms": settings.get("silence_duration_ms", 900),
+            "energy_threshold": settings.get("energy_threshold", 120.0),
+        }
+
+    def _refresh_active_device_config(self, device_id):
+        session = self.sessions.get(device_id)
+        if session is None:
+            return
+        model = self._effective_model_settings(device_id)
+        model.pop("api_key_configured", None)
+        session.config.setdefault("dashscope", {}).update(model)
+        session.config.setdefault("vad", {}).update(self._effective_vad_settings(device_id))
+        features = self.account_store.get_device_features(device_id)
+        session.config["features"] = features
+        owner_id = self.account_store.device_owner_id(device_id)
+        if owner_id is not None and features.get("memory_enabled"):
+            session.config.setdefault("dashscope", {})["user_memory_prompt"] = (
+                self.account_store.memory_prompt(owner_id))
+        else:
+            session.config.setdefault("dashscope", {}).pop("user_memory_prompt", None)
+
+    def _binding_attempt_keys(self, request, user):
+        return ("user:{}".format(user["id"]),
+                "ip:{}".format(request.remote or "unknown"))
+
+    def _binding_retry_after(self, request, user):
+        now = time.monotonic()
+        retry_after = 0
+        for key in self._binding_attempt_keys(request, user):
+            attempts = self._binding_failures.setdefault(key, deque())
+            while attempts and now - attempts[0] >= BINDING_ATTEMPT_WINDOW_SECONDS:
+                attempts.popleft()
+            if len(attempts) >= BINDING_ATTEMPT_LIMIT:
+                retry_after = max(
+                    retry_after,
+                    int(BINDING_ATTEMPT_WINDOW_SECONDS - (now - attempts[0])) + 1,
+                )
+        return retry_after
+
+    def _record_binding_failure(self, request, user):
+        now = time.monotonic()
+        for key in self._binding_attempt_keys(request, user):
+            self._binding_failures.setdefault(key, deque()).append(now)
+
+    def _clear_binding_failures(self, request, user):
+        for key in self._binding_attempt_keys(request, user):
+            self._binding_failures.pop(key, None)
+
+    async def api_me(self, request):
+        user = self._require_user(request)
+        return web.json_response({"id": user["id"], "username": user["username"]})
+
+    async def api_devices(self, request):
+        user = self._require_user(request)
+        return web.json_response({"devices": self.account_store.list_user_devices(user["id"])})
+
+    async def api_device_bind(self, request):
+        user = self._require_user(request)
+        retry_after = self._binding_retry_after(request, user)
+        if retry_after:
+            return web.json_response(
+                {"error": "尝试次数过多，请稍后再试", "retry_after": retry_after},
+                status=429, headers={"Retry-After": str(retry_after)})
+        try:
+            data = await request.json()
+            device = self.account_store.bind_device_by_code(
+                user["id"], data.get("binding_code"))
+        except (ValueError, TypeError):
+            self._record_binding_failure(request, user)
+            return web.json_response({"error": "绑定码无效或已过期"}, status=400)
+        self._clear_binding_failures(request, user)
+        # Reconnect so the restricted binding session is replaced by a normal
+        # per-user session with this device's effective settings.
+        session = self.sessions.get(device["device_id"])
+        if session is not None:
+            await session.close()
+        log.info("device bound: user=%s device=%s identifier=%s",
+                 user["username"], device["device_id"], device["identifier"])
+        return web.json_response(device)
+
+    async def api_device_update(self, request):
+        user = self._require_user(request)
+        try:
+            data = await request.json()
+            device = self.account_store.update_device(
+                user["id"], data.get("device_id"),
+                data.get("identifier"), data.get("name"))
+        except PermissionError as exc:
+            return web.json_response({"error": str(exc)}, status=403)
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        return web.json_response(device)
+
+    async def api_device_unbind(self, request):
+        user = self._require_user(request)
+        try:
+            data = await request.json()
+            device_id = self.account_store.normalize_device_id(data.get("device_id"))
+            self.account_store.unbind_device(user["id"], device_id)
+        except PermissionError as exc:
+            return web.json_response({"error": str(exc)}, status=403)
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        session = self.sessions.get(device_id)
+        if session is not None:
+            await session.close()
+        return web.json_response({"success": True})
+
+    async def api_conversations(self, request):
+        user = self._require_user(request)
+        device_id = request.query.get("device_id", "")
+        try:
+            conversation_id = request.query.get("conversation_id")
+            if conversation_id:
+                return web.json_response(
+                    self.account_store.get_chat_messages(user["id"], conversation_id))
+            conversations = self.account_store.list_chat_sessions(
+                user["id"], device_id, request.query.get("limit", 100))
+            # Compatibility for API clients on the previous paired-turn
+            # contract; the dashboard renders conversations/messages.
+            turns = self.account_store.list_conversations(
+                user["id"], device_id, request.query.get("limit", 100))
+        except PermissionError as exc:
+            return web.json_response({"error": str(exc)}, status=403)
+        except (ValueError, TypeError):
+            return web.json_response({"error": "invalid limit"}, status=400)
+        return web.json_response({"device_id": device_id,
+                                  "conversations": conversations,
+                                  "turns": turns})
+
+    async def api_conversation_end(self, request):
+        user = self._require_user(request)
+        data = await request.json()
+        device_id = data.get("device_id", "")
+        self._require_owned_device(request, device_id)
+        conversation_id = self.account_store.end_conversation(device_id)
+        session = self.sessions.get(device_id)
+        if session:
+            await session._abort_speaking()
+        if conversation_id and self.gateway:
+            asyncio.create_task(self.gateway.summarize_conversation(conversation_id))
+        return web.json_response({"conversation_id": conversation_id})
+
+    async def api_memories(self, request):
+        user = self._require_user(request)
+        return web.json_response({"memories": self.account_store.list_memories(user["id"])})
+
+    async def api_memory_create(self, request):
+        user = self._require_user(request)
+        try:
+            data = await request.json()
+            memory = self.account_store.upsert_memory(
+                user["id"], data.get("category"), data.get("label"),
+                data.get("value"), data.get("enabled", True))
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        self._refresh_user_sessions(user["id"])
+        return web.json_response(memory)
+
+    async def api_memory_update(self, request):
+        user = self._require_user(request)
+        try:
+            data = await request.json()
+            memories = self.account_store.update_memory(
+                user["id"], data.pop("id"), **data)
+        except PermissionError as exc:
+            return web.json_response({"error": str(exc)}, status=403)
+        except (ValueError, TypeError, KeyError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        self._refresh_user_sessions(user["id"])
+        return web.json_response({"memories": memories})
+
+    async def api_memory_delete(self, request):
+        user = self._require_user(request)
+        try:
+            data = await request.json()
+            self.account_store.delete_memory(user["id"], data.get("id"))
+        except PermissionError as exc:
+            return web.json_response({"error": str(exc)}, status=403)
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        self._refresh_user_sessions(user["id"])
+        return web.json_response({"success": True})
+
+    async def api_memory_summarize(self, request):
+        user = self._require_user(request)
+        if not self.gateway:
+            return web.json_response({"error": "memory service unavailable"}, status=503)
+        try:
+            data = await request.json()
+            conversation_id = int(data.get("conversation_id"))
+            self.account_store.get_chat_messages(user["id"], conversation_id)
+            saved = await self.gateway.summarize_conversation(conversation_id)
+        except PermissionError as exc:
+            return web.json_response({"error": str(exc)}, status=403)
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        return web.json_response({"memories": saved})
+
+    async def api_features_get(self, request):
+        device_id = request.query.get("device_id", "")
+        self._require_owned_device(request, device_id)
+        return web.json_response(self.account_store.get_device_features(device_id))
+
+    async def api_features_set(self, request):
+        user = self._require_user(request)
+        data = await request.json()
+        device_id = data.get("device_id", "")
+        try:
+            features = self.account_store.set_device_features(
+                user["id"], device_id, data)
+        except PermissionError as exc:
+            return web.json_response({"error": str(exc)}, status=403)
+        self._refresh_active_device_config(device_id)
+        session = self.sessions.get(device_id)
+        if session:
+            await session.send_json({"type": "system", "command": "conversation_config",
+                "automatic_interrupt": features["automatic_interrupt"],
+                "button_interrupt": features["button_interrupt"],
+                "double_click_end": features["double_click_end"]})
+        return web.json_response(features)
+
+    def _refresh_user_sessions(self, user_id):
+        for device in self.account_store.list_user_devices(user_id):
+            self._refresh_active_device_config(device["device_id"])
+
     async def api_status(self, request):
-        if not self._check_cookie(request):
-            return web.json_response({"error": "unauthorized"}, status=401)
+        user = self._require_user(request)
         now = time.time()
         devices = []
-        # 在线设备（WS 连接中）
-        for device_id, s in list(self.sessions.items()):
+        for device in self.account_store.list_user_devices(user["id"]):
+            device_id = device["device_id"]
+            s = self.sessions.get(device_id)
+            online = s is not None and not getattr(getattr(s, "ws", None), "closed", False)
+            last_seen = device.get("last_seen") or now
             devices.append({
                 "device_id": device_id,
-                "session_id": s.session_id,
-                "bin_version": getattr(s, "bin_version", "?"),
-                "online": True,
-                "idle": False,
-                "listening": getattr(s, "listening", False),
-                "speaking": getattr(s, "speaking", False),
-                "omni_busy": getattr(s, "omni_busy", False),
-                "connected_at": s.connected_at,
-                "connected_for": now - s.connected_at,
-            })
-        # 待机设备（曾连接过，当前断开，省电待机）
-        online_ids = {d["device_id"] for d in devices}
-        for device_id, info in self.device_history.items():
-            if device_id in online_ids:
-                continue
-            devices.append({
-                "device_id": device_id,
-                "session_id": "",
-                "bin_version": "?",
-                "online": False,
-                "idle": True,
-                "listening": False,
-                "speaking": False,
-                "omni_busy": False,
-                "connected_at": info.get("last_seen", 0),
-                "connected_for": now - info.get("last_seen", now),
+                "identifier": device["identifier"],
+                "name": device["name"],
+                "session_id": s.session_id if online else "",
+                "bin_version": getattr(s, "bin_version", "?") if online else "?",
+                "online": online,
+                "idle": not online,
+                "listening": getattr(s, "listening", False) if online else False,
+                "speaking": getattr(s, "speaking", False) if online else False,
+                "omni_busy": getattr(s, "omni_busy", False) if online else False,
+                "connected_at": s.connected_at if online else last_seen,
+                "connected_for": now - (s.connected_at if online else last_seen),
             })
 
         cfg = self.config
@@ -1050,13 +1612,12 @@ class Dashboard:
         return web.json_response({
             "health": {"status": "ok", "time": time.time()},
             "server": {"uptime": now - self.start_time},
+            "user": user,
             "devices": devices,
-            "ota_requests": list(getattr(self.http_api, "device_tokens", {}).keys()),
+            "ota_requests": [device["device_id"] for device in devices],
             "config": {
                 "ota_url": base.rstrip("/") + "/ota",
                 "ws_url": cfg["server"].get("public_ws_url", ""),
-                "model": cfg["dashscope"].get("model", ""),
-                "language": cfg["dashscope"].get("language", "zh"),
                 "model_base": cfg["dashscope"].get("realtime_url", ""),
                 "api_key_configured": bool(cfg["dashscope"].get("api_key")),
                 "devices_enabled": bool(cfg.get("devices", {}).get("enabled")),
@@ -1065,106 +1626,73 @@ class Dashboard:
         })
 
     async def api_vad_get(self, request):
-        if not self._check_cookie(request):
-            raise web.HTTPUnauthorized()
-        vad = self.config.get("vad", {})
-        return web.json_response({
-            "silence_duration_ms": vad.get("silence_duration_ms", 900),
-            "energy_threshold": vad.get("energy_threshold", 120.0),
-        })
+        device_id = request.query.get("device_id", "")
+        self._require_owned_device(request, device_id)
+        return web.json_response(self._effective_vad_settings(device_id))
 
     async def api_vad_set(self, request):
-        if not self._check_cookie(request):
-            raise web.HTTPUnauthorized()
+        user = self._require_user(request)
         try:
             data = await request.json()
         except Exception:
             return web.json_response({"error": "bad json"}, status=400)
-        vad = self.config.setdefault("vad", {})
-        if "silence_duration_ms" in data:
-            v = int(data["silence_duration_ms"])
-            vad["silence_duration_ms"] = max(200, min(6000, v))
-        if "energy_threshold" in data:
-            v = float(data["energy_threshold"])
-            vad["energy_threshold"] = max(1, min(30000, v))
-        log.info("VAD 配置更新: %s", vad)
-        return web.json_response({
-            "silence_duration_ms": vad.get("silence_duration_ms", 900),
-            "energy_threshold": vad.get("energy_threshold", 120.0),
-        })
+        device_id = data.get("device_id", "")
+        self._require_owned_device(request, device_id)
+        try:
+            vad = {
+                "silence_duration_ms": max(200, min(6000, int(data["silence_duration_ms"]))),
+                "energy_threshold": max(1, min(30000, float(data["energy_threshold"]))),
+            }
+        except (KeyError, TypeError, ValueError):
+            return web.json_response({"error": "invalid VAD settings"}, status=400)
+        self.account_store.set_vad_settings(user["id"], device_id, vad)
+        self._refresh_active_device_config(device_id)
+        log.info("VAD 配置更新: user=%s device=%s settings=%s",
+                 user["username"], device_id, vad)
+        return web.json_response(vad)
 
     async def api_model_get(self, request):
-        if not self._check_cookie(request):
-            raise web.HTTPUnauthorized()
-        ds = self.config["dashscope"]
-        return web.json_response({
-            "model": ds.get("model", ""),
-            "language": ds.get("language", "zh"),
-            "voice": ds.get("voice", ""),
-            "instructions": ds.get("instructions", ""),
-            "workspace_id": ds.get("workspace_id", ""),
-            "realtime_url": ds.get("realtime_url", ""),
-            "input_sample_rate": ds.get("input_sample_rate", 16000),
-            "output_sample_rate": ds.get("output_sample_rate", 24000),
-            "conversation_timeout_minutes": ds.get("conversation_timeout_minutes", 10),
-            "api_key_configured": bool(ds.get("api_key")),
-        })
+        device_id = request.query.get("device_id", "")
+        self._require_owned_device(request, device_id)
+        return web.json_response(self._effective_model_settings(device_id))
 
     async def api_model_set(self, request):
-        if not self._check_cookie(request):
-            raise web.HTTPUnauthorized()
+        user = self._require_user(request)
         try:
             data = await request.json()
         except Exception:
             return web.json_response({"error": "bad json"}, status=400)
-        ds = self.config["dashscope"]
-        if "model" in data and isinstance(data["model"], str):
-            ds["model"] = data["model"].strip()
-        if "language" in data:
-            if not isinstance(data["language"], str) or data["language"] not in MODEL_LANGUAGE_CODES:
-                return web.json_response({"error": "unsupported language"}, status=400)
-            ds["language"] = data["language"]
-        if "voice" in data and isinstance(data["voice"], str):
-            ds["voice"] = data["voice"].strip()
-        if "instructions" in data and isinstance(data["instructions"], str):
-            ds["instructions"] = data["instructions"].strip()
-        if "workspace_id" in data and isinstance(data["workspace_id"], str):
-            ds["workspace_id"] = data["workspace_id"].strip()
-        if "realtime_url" in data and isinstance(data["realtime_url"], str):
-            ds["realtime_url"] = data["realtime_url"].strip()
-        if "input_sample_rate" in data:
-            ds["input_sample_rate"] = int(data["input_sample_rate"])
-        if "output_sample_rate" in data:
-            ds["output_sample_rate"] = int(data["output_sample_rate"])
-        if "conversation_timeout_minutes" in data:
-            try:
-                minutes = float(data["conversation_timeout_minutes"])
-            except (TypeError, ValueError):
-                return web.json_response({"error": "conversation_timeout_minutes must be a number"}, status=400)
-            if not math.isfinite(minutes) or not 1 <= minutes <= 120:
-                return web.json_response({"error": "conversation_timeout_minutes must be between 1 and 120"}, status=400)
-            ds["conversation_timeout_minutes"] = minutes
-        # 持久化到 config.yaml（重启仍生效）
-        if self.save_config:
-            try:
-                self.save_config(self.config)
-                log.info("模型/音色/人物设定配置已持久化")
-            except Exception as e:
-                log.warning("配置持久化失败: %s", e)
-        log.info("模型/语言/音色配置更新: model=%s language=%s voice=%s",
-                 ds.get("model"), ds.get("language", "zh"), ds.get("voice"))
-        return web.json_response({
-            "model": ds.get("model", ""),
-            "language": ds.get("language", "zh"),
-            "voice": ds.get("voice", ""),
-            "workspace_id": ds.get("workspace_id", ""),
-            "realtime_url": ds.get("realtime_url", ""),
-            "instructions": ds.get("instructions", ""),
-            "input_sample_rate": ds.get("input_sample_rate", 16000),
-            "output_sample_rate": ds.get("output_sample_rate", 24000),
-            "conversation_timeout_minutes": ds.get("conversation_timeout_minutes", 10),
-            "api_key_configured": bool(ds.get("api_key")),
-        })
+        device_id = data.get("device_id", "")
+        self._require_owned_device(request, device_id)
+        model = (data.get("model") or "").strip()
+        language = data.get("language", "")
+        voice = (data.get("voice") or "").strip()
+        instructions = (data.get("instructions") or "").strip()
+        if not model or len(model) > 128:
+            return web.json_response({"error": "invalid model"}, status=400)
+        if language not in MODEL_LANGUAGE_CODES:
+            return web.json_response({"error": "unsupported language"}, status=400)
+        if not voice or len(voice) > 128 or len(instructions) > 12000:
+            return web.json_response({"error": "invalid voice or instructions"}, status=400)
+        try:
+            minutes = float(data.get("conversation_timeout_minutes", 10))
+        except (TypeError, ValueError):
+            return web.json_response({"error": "conversation_timeout_minutes must be a number"}, status=400)
+        if not math.isfinite(minutes) or not 1 <= minutes <= 120:
+            return web.json_response(
+                {"error": "conversation_timeout_minutes must be between 1 and 120"}, status=400)
+        settings = {
+            "model": model,
+            "language": language,
+            "voice": voice,
+            "instructions": instructions,
+            "conversation_timeout_minutes": minutes,
+        }
+        self.account_store.set_model_settings(user["id"], device_id, settings)
+        self._refresh_active_device_config(device_id)
+        log.info("设备模型配置更新: user=%s device=%s model=%s language=%s voice=%s",
+                 user["username"], device_id, model, language, voice)
+        return web.json_response(self._effective_model_settings(device_id))
 
     @staticmethod
     def _testable_tools(session):
@@ -1255,9 +1783,8 @@ class Dashboard:
 
     async def api_camera_latest(self, request):
         """Serve a dashboard-authenticated, in-memory latest camera photo."""
-        if not self._check_cookie(request):
-            raise web.HTTPUnauthorized()
         device_id = request.query.get("device_id", "")
+        self._require_owned_device(request, device_id)
         photo = self._camera_photos.get(device_id)
         if photo is None:
             raise web.HTTPNotFound(text="no camera photo for this device")
@@ -1268,9 +1795,8 @@ class Dashboard:
         )
 
     async def api_test_tools(self, request):
-        if not self._check_cookie(request):
-            raise web.HTTPUnauthorized()
         device_id = request.query.get("device_id", "")
+        self._require_owned_device(request, device_id)
         session = self._get_test_session(device_id)
         if session is None:
             return web.json_response({"error": "device is not online"}, status=404)
@@ -1281,14 +1807,14 @@ class Dashboard:
 
     async def api_test_mcp(self, request):
         """Send one supervised bench-test MCP command to an online device."""
-        if not self._check_cookie(request):
-            raise web.HTTPUnauthorized()
+        self._require_user(request)
         try:
             data = await request.json()
         except Exception:
             return web.json_response({"error": "bad json"}, status=400)
 
         device_id = data.get("device_id", "")
+        self._require_owned_device(request, device_id)
         name = data.get("name", "")
         arguments = data.get("arguments", {})
         if not isinstance(arguments, dict):
@@ -1318,8 +1844,16 @@ class Dashboard:
         return web.json_response({"device_id": device_id, "name": name, "result": result})
 
     async def api_logs(self, request):
-        if not self._check_cookie(request):
-            raise web.HTTPUnauthorized()
+        user = self._require_user(request)
+        owned_ids = {
+            device["device_id"].casefold()
+            for device in self.account_store.list_user_devices(user["id"])
+        }
+
+        def visible(entry):
+            text = entry.get("text", "").casefold()
+            return any(device_id in text for device_id in owned_ids)
+
         # 先推快照（最近的日志），再持续推送新增
         resp = web.StreamResponse(headers={
             "Content-Type": "text/event-stream",
@@ -1329,7 +1863,8 @@ class Dashboard:
         })
         await resp.prepare(request)
 
-        snapshot = self.log_handler.snapshot()
+        all_snapshot = self.log_handler.snapshot()
+        snapshot = [entry for entry in all_snapshot if visible(entry)]
         for entry in snapshot:
             try:
                 await resp.write(("data: " + json.dumps(entry, ensure_ascii=False) + "\n\n").encode("utf-8"))
@@ -1337,15 +1872,18 @@ class Dashboard:
                 return resp
 
         evt = self.log_handler._evt
-        last_sequence = snapshot[-1]["id"] if snapshot else 0
+        last_sequence = all_snapshot[-1]["id"] if all_snapshot else 0
         try:
             while True:
                 # 检查是否有新日志
-                new_entries = self.log_handler.events_after(last_sequence)
+                all_new_entries = self.log_handler.events_after(last_sequence)
+                new_entries = [entry for entry in all_new_entries if visible(entry)]
                 if new_entries:
                     for entry in new_entries:
                         await resp.write(("data: " + json.dumps(entry, ensure_ascii=False) + "\n\n").encode("utf-8"))
-                    last_sequence = new_entries[-1]["id"]
+                    last_sequence = all_new_entries[-1]["id"]
+                elif all_new_entries:
+                    last_sequence = all_new_entries[-1]["id"]
                 else:
                     try:
                         await asyncio.wait_for(evt.wait(), timeout=15)
