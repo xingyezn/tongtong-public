@@ -19,8 +19,6 @@ from urllib.parse import urlparse
 
 from aiohttp import web
 
-from .omni_client import DEFAULT_TOOL_INSTRUCTIONS
-
 log = logging.getLogger("dash")
 
 # 登录 cookie 名
@@ -500,11 +498,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <label class="muted" style="min-width:130px;align-self:flex-start">人物设定</label>
       <textarea id="cfg-instructions" rows="4" placeholder="你是童童，一个友好、热情的语音助手……" style="flex:1;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4;resize:vertical;font-family:Consolas,monospace;font-size:12px"></textarea>
     </div>
-    <div class="row" style="margin-bottom:10px">
-      <label class="muted" style="min-width:130px;align-self:flex-start">工具规则（全局）</label>
-      <textarea id="cfg-tool-instructions" rows="5" placeholder="涉及实时传感器时的工具调用规则……" style="flex:1;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4;resize:vertical;font-family:Consolas,monospace;font-size:12px"></textarea>
-    </div>
-    <div class="hint">工具规则不区分用户和设备，保存后会拼接到所有会话的人物设定后面。</div>
     <div class="row" style="margin-bottom:10px">
       <label class="muted" style="min-width:130px">模型连接复用（分钟）</label>
       <input type="number" id="cfg-conversation-timeout" min="1" max="120" step="1" value="10" style="flex:1;max-width:140px;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4">
@@ -1167,7 +1160,6 @@ async function loadModel() {
     $("cfg-model").value = d.model || "";
     $("cfg-language").value = d.language || "zh";
     $("cfg-instructions").value = d.instructions || "";
-    $("cfg-tool-instructions").value = d.tool_instructions || "";
     $("cfg-conversation-timeout").value = d.conversation_timeout_minutes || 10;
     const voice = d.voice || "";
     if (Array.from($("cfg-voice").options).some(option => option.value === voice)) {
@@ -1184,7 +1176,6 @@ async function saveModel() {
     language: $("cfg-language").value,
     voice: voice,
     instructions: $("cfg-instructions").value.trim(),
-    tool_instructions: $("cfg-tool-instructions").value.trim(),
     conversation_timeout_minutes: parseFloat($("cfg-conversation-timeout").value),
   };
   if (!body.model) {
@@ -1397,13 +1388,15 @@ header{padding:18px 4vw;background:#fff;border-bottom:1px solid var(--line);disp
 <section class="card"><h2>用户管理</h2><div class="row"><input id="new-user" placeholder="用户名"><input id="new-password" type="password" placeholder="初始密码（至少 8 位）"><label><input id="new-admin" type="checkbox"> 管理员</label><button class="primary" onclick="createUser()">创建用户</button></div>
 <table><thead><tr><th>ID</th><th>用户名</th><th>角色</th><th>状态</th><th>设备</th><th>会话</th><th>累计 Token</th><th>操作</th></tr></thead><tbody id="users"></tbody></table></section>
 <section class="card"><h2>设备管理</h2><div class="row"><label>按用户查询 <select id="device-user-filter" onchange="load()"><option value="">全部用户 / 未绑定设备</option></select></label></div><table><thead><tr><th>设备 ID</th><th>名称/识别码</th><th>所有者</th><th>设备状态</th><th>在线</th><th>累计 / 本月 Token</th><th>最后出现</th><th>操作</th></tr></thead><tbody id="devices"></tbody></table></section>
+<section class="card"><h2>全局工具规则</h2><p>此规则适用于所有用户和所有设备，普通用户不可修改。</p><textarea id="global-tool-instructions" rows="6" style="width:100%;font:13px/1.5 Consolas,monospace;padding:9px"></textarea><div class="row"><button class="primary" onclick="saveGlobalSettings()">保存全局工具规则</button></div></section>
 <section class="card"><h2>管理员操作审计</h2><table><thead><tr><th>时间</th><th>管理员</th><th>操作</th><th>对象</th><th>详情</th></tr></thead><tbody id="audit"></tbody></table></section>
 </main><div id="msg"></div>
 <script>
 let data={users:[],devices:[]}; const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 async function api(url,options={}){const r=await fetch(url,options);let d={};try{d=await r.json()}catch{}if(!r.ok)throw Error(d.error||("HTTP "+r.status));return d}
 function toast(s,bad=false){const n=document.getElementById("msg");n.textContent=s;n.style.background=bad?"#a93649":"#17364d";n.style.display="block";setTimeout(()=>n.style.display="none",2800)}
-async function load(){try{const selected=document.getElementById("device-user-filter")?.value||"";data=await api("/api/admin/overview"+(selected?"?user_id="+encodeURIComponent(selected):""));render()}catch(e){toast(e.message,true)}}
+async function load(){try{const selected=document.getElementById("device-user-filter")?.value||"";data=await api("/api/admin/overview"+(selected?"?user_id="+encodeURIComponent(selected):""));render();const settings=await api("/api/admin/settings");document.getElementById("global-tool-instructions").value=settings.tool_instructions||""}catch(e){toast(e.message,true)}}
+async function saveGlobalSettings(){try{await api("/api/admin/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tool_instructions:document.getElementById("global-tool-instructions").value})});toast("全局工具规则已保存并应用")}catch(e){toast(e.message,true)}}
 function render(){document.getElementById("env").textContent="环境："+data.environment;document.getElementById("user-count").textContent=data.counts.users;document.getElementById("admin-count").textContent=data.counts.admins;document.getElementById("device-count").textContent=data.counts.devices;document.getElementById("online-count").textContent=data.counts.online_devices;
 const filter=document.getElementById("device-user-filter"),selected=String(data.selected_user_id??filter.value??"");filter.innerHTML='<option value="">全部用户 / 未绑定设备</option>'+data.users.map(u=>`<option value="${u.id}">${esc(u.username)}</option>`).join('');filter.value=selected;const usage=new Map((data.usage_by_user_device||[]).map(x=>[x.user_id+'|'+x.device_id,x]));const userTokens=id=>(data.usage_by_user_device||[]).filter(x=>x.user_id===id).reduce((s,x)=>s+Number(x.total_tokens||0),0);
 document.getElementById("users").innerHTML=data.users.map(u=>`<tr><td>${u.id}</td><td>${esc(u.username)}</td><td>${u.is_admin?'<span class="tag">管理员</span>':'用户'}</td><td>${u.is_active?'启用':'<span class="tag off">禁用</span>'}</td><td>${u.device_count}</td><td>${u.active_session_count}</td><td>${userTokens(u.id).toLocaleString()}</td><td><button onclick="toggleRole(${u.id},${!u.is_admin})">${u.is_admin?'取消管理员':'设为管理员'}</button> <button onclick="toggleActive(${u.id},${!u.is_active})">${u.is_active?'禁用':'启用'}</button> <button onclick="resetPassword(${u.id})">重置密码</button> <button class="danger" onclick="deleteUser(${u.id})">删除</button></td></tr>`).join("");
@@ -1492,6 +1485,8 @@ class Dashboard:
         app.router.add_post("/api/camera/upload", self.api_camera_upload)
         app.router.add_get("/api/camera/latest", self.api_camera_latest)
         app.router.add_get("/api/admin/overview", self.api_admin_overview)
+        app.router.add_get("/api/admin/settings", self.api_admin_settings_get)
+        app.router.add_post("/api/admin/settings", self.api_admin_settings_set)
         app.router.add_post("/api/admin/users/create", self.api_admin_user_create)
         app.router.add_post("/api/admin/users/update", self.api_admin_user_update)
         app.router.add_post("/api/admin/users/delete", self.api_admin_user_delete)
@@ -1645,6 +1640,33 @@ class Dashboard:
             "usage_by_user_device": self.account_store.usage_by_user_device(),
             "audit": self.account_store.list_admin_audit(100),
         })
+
+    async def api_admin_settings_get(self, request):
+        self._require_admin(request)
+        from .omni_client import DEFAULT_TOOL_INSTRUCTIONS
+        return web.json_response({
+            "tool_instructions": (
+                self.account_store.get_global_setting("tool_instructions")
+                or DEFAULT_TOOL_INSTRUCTIONS)
+        })
+
+    async def api_admin_settings_set(self, request):
+        admin = self._require_admin(request)
+        try:
+            data = await request.json()
+            tool_instructions = (data.get("tool_instructions") or "").strip()
+            if len(tool_instructions) > 12000:
+                raise ValueError("invalid tool instructions")
+            self.account_store.set_global_setting(
+                "tool_instructions", tool_instructions)
+            for session in self.sessions.values():
+                session.config.setdefault("dashscope", {})[
+                    "tool_instructions"] = tool_instructions
+            self.account_store.audit_admin_action(
+                admin["id"], "settings.update", "app", "tool_instructions", {})
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        return web.json_response({"tool_instructions": tool_instructions})
 
     async def api_admin_user_create(self, request):
         admin = self._require_admin(request)
@@ -1813,9 +1835,6 @@ class Dashboard:
         settings["conversation_timeout_minutes"] = (
             settings.get("conversation_timeout_minutes") or 10)
         settings.update(self.account_store.get_model_settings(device_id))
-        settings["tool_instructions"] = (
-            self.account_store.get_global_setting("tool_instructions")
-            or DEFAULT_TOOL_INSTRUCTIONS)
         settings["api_key_configured"] = bool(
             self.config.get("dashscope", {}).get("api_key"))
         return settings
@@ -2209,10 +2228,6 @@ class Dashboard:
             "instructions": instructions,
             "conversation_timeout_minutes": minutes,
         }
-        tool_instructions = (data.get("tool_instructions") or "").strip()
-        if len(tool_instructions) > 12000:
-            return web.json_response({"error": "invalid tool instructions"}, status=400)
-        self.account_store.set_global_setting("tool_instructions", tool_instructions)
         self.account_store.set_model_settings(user["id"], device_id, settings)
         self._refresh_active_device_config(device_id)
         log.info("设备模型配置更新: user=%s device=%s model=%s language=%s voice=%s",
