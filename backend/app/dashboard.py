@@ -18,6 +18,8 @@ from collections import deque
 
 from aiohttp import web
 
+from .omni_client import DEFAULT_TOOL_INSTRUCTIONS
+
 log = logging.getLogger("dash")
 
 # 登录 cookie 名
@@ -479,6 +481,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <label class="muted" style="min-width:130px;align-self:flex-start">人物设定</label>
       <textarea id="cfg-instructions" rows="4" placeholder="你是童童，一个友好、热情的语音助手……" style="flex:1;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4;resize:vertical;font-family:Consolas,monospace;font-size:12px"></textarea>
     </div>
+    <div class="row" style="margin-bottom:10px">
+      <label class="muted" style="min-width:130px;align-self:flex-start">工具规则（全局）</label>
+      <textarea id="cfg-tool-instructions" rows="5" placeholder="涉及实时传感器时的工具调用规则……" style="flex:1;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4;resize:vertical;font-family:Consolas,monospace;font-size:12px"></textarea>
+    </div>
+    <div class="hint">工具规则不区分用户和设备，保存后会拼接到所有会话的人物设定后面。</div>
     <div class="row" style="margin-bottom:10px">
       <label class="muted" style="min-width:130px">模型连接复用（分钟）</label>
       <input type="number" id="cfg-conversation-timeout" min="1" max="120" step="1" value="10" style="flex:1;max-width:140px;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4">
@@ -1055,6 +1062,7 @@ async function loadModel() {
     $("cfg-model").value = d.model || "";
     $("cfg-language").value = d.language || "zh";
     $("cfg-instructions").value = d.instructions || "";
+    $("cfg-tool-instructions").value = d.tool_instructions || "";
     $("cfg-conversation-timeout").value = d.conversation_timeout_minutes || 10;
     const voice = d.voice || "";
     if (Array.from($("cfg-voice").options).some(option => option.value === voice)) {
@@ -1071,6 +1079,7 @@ async function saveModel() {
     language: $("cfg-language").value,
     voice: voice,
     instructions: $("cfg-instructions").value.trim(),
+    tool_instructions: $("cfg-tool-instructions").value.trim(),
     conversation_timeout_minutes: parseFloat($("cfg-conversation-timeout").value),
   };
   if (!body.model) {
@@ -1427,6 +1436,9 @@ class Dashboard:
         settings["conversation_timeout_minutes"] = (
             settings.get("conversation_timeout_minutes") or 10)
         settings.update(self.account_store.get_model_settings(device_id))
+        settings["tool_instructions"] = (
+            self.account_store.get_global_setting("tool_instructions")
+            or DEFAULT_TOOL_INSTRUCTIONS)
         settings["api_key_configured"] = bool(
             self.config.get("dashscope", {}).get("api_key"))
         return settings
@@ -1788,6 +1800,10 @@ class Dashboard:
             "instructions": instructions,
             "conversation_timeout_minutes": minutes,
         }
+        tool_instructions = (data.get("tool_instructions") or "").strip()
+        if len(tool_instructions) > 12000:
+            return web.json_response({"error": "invalid tool instructions"}, status=400)
+        self.account_store.set_global_setting("tool_instructions", tool_instructions)
         self.account_store.set_model_settings(user["id"], device_id, settings)
         self._refresh_active_device_config(device_id)
         log.info("设备模型配置更新: user=%s device=%s model=%s language=%s voice=%s",

@@ -147,8 +147,11 @@ void McpServer::AddCommonTools() {
 
         AddTool("self.camera.face_detect_local",
             "Capture one frame from the USB camera and run face detection locally "
-            "on-device with ESP-DL (works offline). Use this when the user asks "
-            "to find or count faces and the network is unavailable.",
+            "on-device with ESP-DL (works offline). This is a real-time sensor "
+            "command: every call captures a new current frame. Never use, infer, "
+            "or reuse a previous frame or historical detection result. Whenever "
+            "the user asks about the current number, presence, or location of "
+            "faces, you must call this tool again for that question.",
             PropertyList(),
             [camera](const PropertyList&) -> ReturnValue {
                 TaskPriorityReset priority_reset(1);

@@ -22,6 +22,7 @@ VAD_SETTING_KEYS = {"silence_duration_ms", "energy_threshold"}
 INTERRUPTION_SETTING_KEYS = {
     "automatic_interrupt", "button_interrupt", "double_click_end",
 }
+GLOBAL_SETTING_KEYS = {"tool_instructions"}
 
 
 class AccountError(ValueError):
@@ -125,6 +126,10 @@ class AccountStore:
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
                     UNIQUE(user_id, category, label)
+                );
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL DEFAULT ''
                 );
             """)
             columns = {
@@ -519,6 +524,26 @@ class AccountStore:
                 (json.dumps(clean, ensure_ascii=False), device_id),
             )
         return clean
+
+    def get_global_setting(self, key, default=""):
+        if key not in GLOBAL_SETTING_KEYS:
+            raise ValueError("unknown global setting")
+        with self._lock:
+            row = self._db.execute(
+                "SELECT value FROM app_settings WHERE key = ?", (key,)
+            ).fetchone()
+        return row["value"] if row else default
+
+    def set_global_setting(self, key, value):
+        if key not in GLOBAL_SETTING_KEYS:
+            raise ValueError("unknown global setting")
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT INTO app_settings(key, value) VALUES(?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, value),
+            )
+        return value
 
     def get_vad_settings(self, device_id):
         device_id = self.normalize_device_id(device_id)

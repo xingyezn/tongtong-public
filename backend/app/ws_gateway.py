@@ -34,6 +34,8 @@ class WsGateway:
         if self.account_store:
             config.setdefault("dashscope", {}).update(
                 self.account_store.get_model_settings(device_id))
+            config.setdefault("dashscope", {})["tool_instructions"] = (
+                self.account_store.get_global_setting("tool_instructions"))
             config.setdefault("vad", {}).update(
                 self.account_store.get_vad_settings(device_id))
             features = self.account_store.get_device_features(device_id)
