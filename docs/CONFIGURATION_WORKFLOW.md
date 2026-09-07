@@ -51,6 +51,11 @@ ESP-IDF cannot reuse the old value.
 
 非 `main` 分支禁止默认猜测测试环境，必须由用户明确确认端口：8081 是浩然测试后端，8082 是浩鑫测试后端。确认后再执行：
 
+远程部署目录也必须按端口匹配：生产 8080 使用 `/opt/tongtong-omni-backend` 和
+`tongtong-omni`；浩然 8081 使用 `/opt/tongtong-omni-backend-test-adam` 和
+`tongtong-omni-test-adam`；浩鑫 8082 使用 `/opt/tongtong-omni-backend-test` 和
+`tongtong-omni-test`。部署脚本或 SSH 命令不得只根据“测试环境”字样选择目录。
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/build_firmware.ps1 -TestBackendPort 8081
 # 刷写：

@@ -59,6 +59,16 @@ python scripts\configure_local.py
 - 非 `main` 分支必须由用户明确选择测试后端：8081 为浩然，8082 为浩鑫；
 - WebSocket 地址也必须与所选环境一致。
 
+远程后端部署目录和服务也必须按端口匹配：
+
+| 环境 | 端口 | 部署目录 | systemd 服务 |
+| --- | ---: | --- | --- |
+| 生产 | 8080 | `/opt/tongtong-omni-backend` | `tongtong-omni` |
+| 浩然测试 | 8081 | `/opt/tongtong-omni-backend-test-adam` | `tongtong-omni-test-adam` |
+| 浩鑫测试 | 8082 | `/opt/tongtong-omni-backend-test` | `tongtong-omni-test` |
+
+部署时不能只根据“测试环境”字样选择目录，必须先确认使用浩然还是浩鑫。
+
 构建命令中的 `-TestBackendPort` 不是装饰参数：脚本会同时校验生成的
 `backend\config.yaml` 服务端口和 `firmware\sdkconfig.defaults.private` OTA 地址。端口未确认、或配置与选择不一致时，构建会直接停止。
 
