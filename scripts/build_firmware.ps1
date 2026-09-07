@@ -74,6 +74,7 @@ idf.py reconfigure
 # N16R8 this competes with ESP-SR and ESP-DL for the shared 8 MB PSRAM. Apply
 # our tracked one-frame patch after Component Manager has restored dependencies.
 $uvcDriver = Join-Path $firmware "managed_components\espressif__esp_video\src\device\esp_video_usb_uvc_device.c"
+$uvcResolutionPatch = Join-Path $repo "patches\esp_video_uvc_480x320.patch"
 if (-not (Select-String -Path $uvcDriver -SimpleMatch "#define UVC_DEVICE_FRAME_COUNT          1" -Quiet)) {
     $uvcContent = Get-Content -LiteralPath $uvcDriver -Raw
     $uvcDefault = "#define UVC_DEVICE_FRAME_COUNT          3"
@@ -89,6 +90,21 @@ if (-not (Select-String -Path $uvcDriver -SimpleMatch "#define UVC_DEVICE_FRAME_
     $uvcContent = $uvcContent.Replace($uvcDefault, $uvcReplacement.TrimEnd())
     [System.IO.File]::WriteAllText($uvcDriver, $uvcContent, (New-Object System.Text.UTF8Encoding($false)))
     Write-Output "Applied UVC single-buffer memory patch."
+}
+
+# Keep the negotiated USB-UVC stream at the tested 480x320 mode. This is
+# required for the ESP-DL face detector and must be reapplied after a fresh
+# Component Manager restore because managed_components is intentionally ignored.
+if (-not (Select-String -Path $uvcDriver -SimpleMatch "#define UVC_DEVICE_FRAME_WIDTH          480" -Quiet)) {
+    git -C $repo apply --check $uvcResolutionPatch
+    if ($LASTEXITCODE -ne 0) {
+        throw "Cannot apply the ESP Video UVC 480x320 resolution patch; inspect $uvcDriver."
+    }
+    git -C $repo apply $uvcResolutionPatch
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to apply the ESP Video UVC 480x320 resolution patch."
+    }
+    Write-Output "Applied UVC 480x320 resolution patch."
 }
 
 # ESP-SR and ESP-DL on ESP32-S3 currently share conflicting conv2d symbols in

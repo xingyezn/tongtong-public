@@ -91,6 +91,7 @@ Get-Content firmware\sdkconfig.defaults.private
 
 ```text
 patches\esp_video_uvc_single_buffer.patch
+patches\esp_video_uvc_480x320.patch
 firmware\vendor\esp-sr-libdl-fix\libdl_lib.a
 ```
 

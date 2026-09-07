@@ -1,0 +1,27 @@
+diff --git a/firmware/managed_components/espressif__esp_video/src/device/esp_video_usb_uvc_device.c b/firmware/managed_components/espressif__esp_video/src/device/esp_video_usb_uvc_device.c
+--- a/firmware/managed_components/espressif__esp_video/src/device/esp_video_usb_uvc_device.c
++++ b/firmware/managed_components/espressif__esp_video/src/device/esp_video_usb_uvc_device.c
+@@ -42,4 +42,9 @@
+ // every frame is consumed and returned before the next one is requested.
+ #define UVC_DEVICE_FRAME_COUNT          1
+ 
++// Keep the USB stream compact for on-device face detection and photo tests.
++#define UVC_DEVICE_FRAME_WIDTH          480
++#define UVC_DEVICE_FRAME_HEIGHT         320
++#define UVC_DEVICE_FRAME_SIZE           (512 * 1024)
++
+ #define UVC_DEVICE_URB_SIZE             (10 * 1024)
+@@ -259,9 +264,9 @@
+         },
+         .vs_format = {
+-            .h_res = device->frame_info[0].h_res,
+-            .v_res = device->frame_info[0].v_res,
++            .h_res = UVC_DEVICE_FRAME_WIDTH,
++            .v_res = UVC_DEVICE_FRAME_HEIGHT,
+             .fps = 10 * 1000 * 1000 / device->frame_info[0].default_interval,
+             .format = device->frame_info[0].format,
+         },
+         .advanced = {
+             .number_of_frame_buffers = UVC_DEVICE_FRAME_COUNT,
+-            .frame_size = 0,
++            .frame_size = UVC_DEVICE_FRAME_SIZE,
