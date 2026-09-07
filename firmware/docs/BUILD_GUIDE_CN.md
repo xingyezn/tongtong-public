@@ -154,6 +154,7 @@ firmware\build\flash_args
 ```
 
 不要提交 `firmware\build`、`sdkconfig`、生成的配置、真实固件或日志。
+`firmware\dependencies.lock` 是例外：它用于锁定组件版本，必须保留并提交。
 
 ## 8. 串口调试和验收
 

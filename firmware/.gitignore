@@ -8,7 +8,6 @@ build/
 sdkconfig.old
 sdkconfig
 sdkconfig.defaults.*.local
-dependencies.lock
 .env
 releases/
 main/assets/lang_config.h

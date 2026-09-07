@@ -12,7 +12,7 @@
 /firmware/sdkconfig.old
 /firmware/sdkconfig.defaults.*.local
 /firmware/sdkconfig.defaults.private
-/firmware/dependencies.lock
+# Keep the ESP-IDF component versions reproducible across computers.
 /firmware/.cache/
 
 # Python environments, caches, and test artifacts
