@@ -13,7 +13,7 @@ This directory contains the current Tongtong ESP32 firmware. The device connects
 - Screen information, brightness, and theme controls.
 - RGB indicator control and state reporting; default color is R=0, G=0, B=255.
 - UVC camera capture at a fixed 480x320 JPEG pipeline.
-- Camera MCP tools: `self.camera.take_photo` and local `self.camera.face_detect_local`.
+- Camera MCP tool: `self.camera.take_photo`; face counting and identity recognition use the backend `server.face.recognize_current` tool. The local ESP-DL face detection code remains in the source tree for future development but is not registered as an MCP tool.
 - Motor MCP controls: forward, backward, turns, spin, stop, and direct GPIO test.
 - Connected gimbal, servo, tracking-state, OTA, and other board MCP capabilities.
 

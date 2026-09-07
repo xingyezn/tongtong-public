@@ -17,9 +17,6 @@
 #include "settings.h"
 #include "lvgl_theme.h"
 #include "lvgl_display.h"
-#ifdef CONFIG_ESP_VIDEO_ENABLE_USB_UVC_VIDEO_DEVICE
-#include "camera_face_detect_local.h"
-#endif
 
 #define TAG "MCP"
 
@@ -127,6 +124,8 @@ void McpServer::AddCommonTools() {
     if (camera) {
         AddTool("self.camera.take_photo",
             "Take a photo and explain it. Use this tool after the user asks you to see something.\n"
+            "For questions about who is in the image, how many people are present, or face identities, "
+            "the backend must use server.face.recognize_current instead.\n"
             "Args:\n"
             "  `question`: The question that you want to ask about the photo.\n"
             "Return:\n"
@@ -145,18 +144,6 @@ void McpServer::AddCommonTools() {
                 return camera->Explain(question);
             });
 
-        AddTool("self.camera.face_detect_local",
-            "Capture one frame from the USB camera and run face detection locally "
-            "on-device with ESP-DL (works offline). This is a real-time sensor "
-            "command: every call captures a new current frame. Never use, infer, "
-            "or reuse a previous frame or historical detection result. Whenever "
-            "the user asks about the current number, presence, or location of "
-            "faces, you must call this tool again for that question.",
-            PropertyList(),
-            [camera](const PropertyList&) -> ReturnValue {
-                TaskPriorityReset priority_reset(1);
-                return CameraFaceDetectLocalJson(camera);
-            });
     }
 #endif
 #endif

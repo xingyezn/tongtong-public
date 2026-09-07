@@ -13,7 +13,7 @@
 - 屏幕信息读取、亮度设置和主题设置。
 - RGB 指示灯开关、颜色设置和状态读取，默认颜色为 R=0、G=0、B=255。
 - UVC 摄像头当前帧采集，固定使用 480×320 分辨率和 JPEG 上传链路。
-- 摄像头 MCP：`self.camera.take_photo`；本地 ESP-DL 人脸检测 MCP：`self.camera.face_detect_local`，仅用于手动测试。
+- 摄像头 MCP：`self.camera.take_photo`；人脸数量和身份识别统一优先使用后端 `server.face.recognize_current`。本地 ESP-DL 人脸检测代码保留在源码中，便于后续开发，但当前不注册为 MCP 工具。
 - 电机驱动 MCP：前进、后退、左转、右转、原地旋转、停止，以及高低电平直驱测试。
 - 云台、舵机、跟随状态和 OTA 等已接入的板级 MCP 能力。
 
@@ -22,7 +22,6 @@
 ### 摄像头
 
 - `self.camera.take_photo`：重新采集当前帧并上传后端，由后端进行视觉处理。
-- `self.camera.face_detect_local`：设备本地使用 ESP-DL 检测当前帧，仅用于离线/手动验证。
 
 服务器端人脸录入、识别、删除和修改不在固件中保存数据。后端模型工具会先调用拍照 MCP，再将新图片转发给项目内的 `face-detect-service`。
 

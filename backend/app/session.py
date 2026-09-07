@@ -71,7 +71,7 @@ FACE_TOOLS = [
          "external_id": {"type": "string"}, "note": {"type": "string"}},
          "required": ["name"]}}},
     {"type": "function", "function": {"name": "server.face.recognize_current",
-     "description": "识别当前摄像头画面中的人脸。每次调用必须重新拍摄当前帧，绝不能复用之前的图片或识别结果。",
+     "description": "优先使用此工具识别当前摄像头画面：判断是否有人脸、当前有几张脸，以及哪些是已登记的人。每次调用必须重新拍摄当前帧并请求云端服务，绝不能复用之前的图片、人数、身份或识别结果；用户说‘看看我是谁’、‘都有谁’、‘有几个人’、‘再看一下’或‘重新确认’时都必须重新调用。",
      "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {"name": "server.face.delete",
      "description": "删除已录入的人脸。只有用户明确提供人脸 id 时才能调用；不能查询或猜测其他用户的人脸数据。",
