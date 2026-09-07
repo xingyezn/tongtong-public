@@ -1,5 +1,8 @@
 param(
     [string]$PublicHost = "127.0.0.1",
+    [ValidateSet("8081", "8082")]
+    [Parameter(Mandatory = $true)]
+    [string]$TestBackendPort,
     [string]$AdminUsername = "admin",
     [string]$AdminPassword = $env:TONGTONG_ADMIN_PASSWORD
 )
@@ -20,12 +23,12 @@ if (-not (Test-Path -LiteralPath $runtimeConfig)) {
 }
 
 $env:TONGTONG_ENVIRONMENT = "test"
-$env:TONGTONG_SERVER_PORT = "8082"
-$env:TONGTONG_PUBLIC_WS_URL = "ws://${PublicHost}:8082/ws"
+$env:TONGTONG_SERVER_PORT = $TestBackendPort
+$env:TONGTONG_PUBLIC_WS_URL = "ws://${PublicHost}:${TestBackendPort}/ws"
 $env:TONGTONG_ADMIN_USERNAME = $AdminUsername
 $env:TONGTONG_ADMIN_PASSWORD = $AdminPassword
 
-Write-Host "Starting isolated test backend: http://${PublicHost}:8082"
+Write-Host "Starting isolated test backend: http://${PublicHost}:${TestBackendPort}"
 Write-Host "Database: backend/data/test/tongtong-test.db"
 Write-Host "Administrator: $AdminUsername"
 

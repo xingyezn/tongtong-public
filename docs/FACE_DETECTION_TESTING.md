@@ -23,15 +23,16 @@ python scripts/face_detection_test.py path/to/face.jpg \
 
 ## ESP32-S3 板端真实推理
 
-固件开启 `CONFIG_FACE_DETECTION_TEST_ON_BOOT` 后，会在启动阶段解码内置 JPEG，并调用 ESP-DL `HumanFaceDetect` 完成一次真实推理。模型使用官方 `human_face_det` 独立 Flash 分区，刷写时由组件自动写入 `0xE00000`。
+当前固件不再执行开机内置图片/纯色图片人脸自检。人脸检测由后端手动测试触发；完整的固件构建、烧录和串口流程见 [firmware/docs/BUILD_GUIDE_CN.md](../firmware/docs/BUILD_GUIDE_CN.md)。
 
 ```powershell
+cd <仓库目录>
+powershell -ExecutionPolicy Bypass -File .\scripts\build_firmware.ps1 -Flash -Port COM3
 cd firmware
-. C:\Espressif\esp-idf\export.ps1
-idf.py -p COM3 build flash monitor
+idf.py -p COM3 monitor
 ```
 
-串口中关注 `FaceDetectTest` 日志，例如：
+串口中关注 `FaceDetectLocal` 或后端测试返回的 JSON。不要把历史的 `FaceDetectTest` 开机自检日志当作当前验收标准。
 
 ```text
 Inference complete: 4 face(s), 140 ms

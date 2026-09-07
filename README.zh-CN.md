@@ -2,6 +2,8 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
+> **编译前请先阅读 `firmware/docs/BUILD_GUIDE_CN.md`，并严格按照其中的环境配置、修复库处理、缓存保留、编译和烧录流程执行。**
+
 童童是一套可私有化部署、低延迟的 ESP32 语音助手。本仓库包含 ESP-IDF
 固件、对接阿里云百炼 `qwen3.5-omni-plus-realtime` 的 asyncio/aiohttp
 服务端，以及用于管理配置和诊断硬件的浏览器控制面板。

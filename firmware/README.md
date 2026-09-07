@@ -2,6 +2,8 @@
 
 (English | [中文](README_zh.md) | [日本語](README_ja.md))
 
+> For this fork, read the [build guide](docs/BUILD_GUIDE_CN.md) before compiling. Use `scripts/build_firmware.ps1` from the repository root; the project requires automatic UVC single-buffer and ESP-SR/ESP-DL compatibility fixes.
+
 ## Introduction
 
 👉 [Human: Give AI a camera vs AI: Instantly finds out the owner hasn't washed hair for three days【bilibili】](https://www.bilibili.com/video/BV1bpjgzKEhd/)

@@ -2,6 +2,10 @@
 
 本指南介绍如何为小智AI语音聊天机器人项目定制一个新的开发板初始化程序。小智AI支持70多种ESP32系列开发板，每个开发板的初始化代码都放在对应的目录下。
 
+> 本仓库当前开发板的实际构建必须先阅读 [Tongtong 固件构建指南](BUILD_GUIDE_CN.md)。本文后面的通用上游示例可能不包含本项目所需的 UVC 单帧和 ESP-SR/ESP-DL 兼容修复。
+
+> 本仓库当前开发板的实际构建必须先阅读 [Tongtong 固件构建指南](BUILD_GUIDE_CN.md)。本文后面的通用上游示例可能不包含本项目所需的 UVC 单帧和 ESP-SR/ESP-DL 兼容修复。
+
 ## 重要提示
 
 > **警告**: 对于自定义开发板，当IO配置与原有开发板不同时，切勿直接覆盖原有开发板的配置编译固件。必须创建新的开发板类型，或者通过config.json文件中的builds配置不同的name和sdkconfig宏定义来区分。使用 `python scripts/release.py [开发板目录名字]` 来编译打包固件。
@@ -450,4 +454,4 @@ python scripts/release.py my-custom-board
 
 - ESP-IDF 文档: https://docs.espressif.com/projects/esp-idf/
 - LVGL 文档: https://docs.lvgl.io/
-- ESP-SR 文档: https://github.com/espressif/esp-sr 
+- ESP-SR 文档: https://github.com/espressif/esp-sr

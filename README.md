@@ -2,6 +2,8 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
+> **Before compiling, read `firmware/docs/BUILD_GUIDE_CN.md` and follow its environment, patch, cache, build, and flashing instructions.**
+
 Tongtong is a self-hosted, low-latency ESP32 voice assistant. This repository
 contains the ESP-IDF firmware, an asyncio/aiohttp backend for Alibaba Cloud
 Model Studio's `qwen3.5-omni-plus-realtime`, and a browser-based administration

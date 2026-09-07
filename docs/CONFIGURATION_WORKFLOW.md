@@ -46,20 +46,23 @@ After changing `private/local.yaml`, regenerate configuration. If the OTA value
 changed, remove the existing `firmware/sdkconfig` before configuring again so
 ESP-IDF cannot reuse the old value.
 
-```bash
-python scripts/configure_local.py
-cd firmware
-idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.private" set-target esp32s3
-idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.private" build
-```
+推荐直接使用仓库脚本。它会加载 IDF v5.5.5、生成本地配置、重新配置工程，并自动应用 UVC 单帧和 ESP-SR/ESP-DL 兼容修复。
 
-推荐直接使用仓库脚本：
+非 `main` 分支禁止默认猜测测试环境，必须由用户明确确认端口：8081 是浩然测试后端，8082 是浩鑫测试后端。确认后再执行：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/build_firmware.ps1
+powershell -ExecutionPolicy Bypass -File scripts/build_firmware.ps1 -TestBackendPort 8081
 # 刷写：
-powershell -ExecutionPolicy Bypass -File scripts/build_firmware.ps1 -Flash -Port COM3
+powershell -ExecutionPolicy Bypass -File scripts/build_firmware.ps1 -Flash -Port COM3 -TestBackendPort 8081
 ```
+
+新电脑或需要验证不依赖旧缓存时使用全量构建：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build_firmware.ps1 -Clean -TestBackendPort 8081
+```
+
+完整固件流程和串口验收见 [firmware/docs/BUILD_GUIDE_CN.md](../firmware/docs/BUILD_GUIDE_CN.md)。不要直接使用上游的 `idf.py build`，否则可能遗漏项目必需的构建修复。
 
 固件 CMake 会拒绝 `your-server.example` 占位 OTA 地址；如果没有私有配置，构建会直接失败，不会生成可刷写的占位地址固件。
 

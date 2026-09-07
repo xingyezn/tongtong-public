@@ -1,44 +1,55 @@
-# esp-sr / esp-dl 符号冲突修复说明
+# ESP-SR / ESP-DL 构建兼容修复
 
-## 现象
+## 背景
 
-在同一 ESP32-S3 固件里同时链入 `esp-sr`（唤醒词 multinet/mn7）与 `esp-dl`
-（human_face_detect）后，**唤醒词 detect 失效**（Wake feed 正常但永不触发），
-或反过来 **人脸检测框异常**（大量假框）。此前曾误判为 SRAM 余量不足。
+ESP32-S3 固件同时使用 ESP-SR 唤醒词和 ESP-DL 人脸检测时，需要两项项目级修复：
 
-## 根因（官方确认）
+1. ESP-SR 与 ESP-DL 的 conv2d 汇编实现存在符号兼容问题；
+2. USB-UVC 默认申请三个大帧缓冲，会和 ESP-SR、ESP-DL 争用 N16R8 的 8 MB PSRAM。
 
-Espressif esp-dl issue
-[espressif/esp-dl#302](https://github.com/espressif/esp-dl/issues/302)：
+缺少任意一项，都可能表现为唤醒词异常、人脸检测异常、模型加载失败，或进入待命后崩溃重启。
 
-> esp32-s3 上 esp-sr 与 esp-dl 的 **conv2d 汇编实现存在部分函数名冲突**，
-> 链接器不报错但符号被串用，导致两者之一的计算错乱。
+## 修复来源
 
-官方临时修复：用修正版 `libdl_lib.a` 替换 esp-sr 组件里的同名文件。
+- ESP-SR/ESP-DL 兼容库：firmware/vendor/esp-sr-libdl-fix/libdl_lib.a
+- UVC 单帧补丁：patches/esp_video_uvc_single_buffer.patch
 
-## 本仓库的处理（已验证）
+libdl_lib.a 是仓库内已验证的官方修复版本。UVC 补丁将
+UVC_DEVICE_FRAME_COUNT 从 3 调整为 1，当前拍照和人脸跟踪链路不需要同时保留三帧。
 
-- 修正版库已存放在：`vendor/esp-sr-libdl-fix/libdl_lib.a`
-- 应用方式（build 前执行；组件在 gitignored 的 managed 目录里，clean 后需重放）：
-  ```powershell
-  copy firmware\vendor\esp-sr-libdl-fix\libdl_lib.a `
-       firmware\managed_components\espressif__esp-sr\lib\esp32s3\libdl_lib.a
-  ```
-- 备份：原版 `libdl_lib.a` 来自 esp-sr registry 组件，删除 managed 目录重新
-  拉取即可还原，无需在仓库内保存。
-- 验证结果：替换后同固件内
-  - `EspdlProbe`：灰图 0 框、内置人脸照 1 框（score≈0.90）；
-  - 唤醒自检（注入 TTS “ni hao tong tong”）触发 `DETECTED`。
+## 如何应用
 
-## 正式修复建议
+不要手工长期修改 managed_components。使用仓库根目录的构建脚本：
 
-替换 `.a` 是过渡方案。升级到含官方修复的 esp-sr 版本（本地 2.2.0 过旧，
-官方近期线 2.4.x 已含修复）是正式做法，建议放到官方 IDF6 新基座迁移时实施，
-届时同步验证唤醒词 assets 与 API 兼容。
+powershell -ExecutionPolicy Bypass -File .\scripts\build_firmware.ps1
 
-## 相关诊断代码
+脚本在 idf.py reconfigure 后、正式编译前自动：
 
-- `boards/common/camera_face_detect_local.{h,cc}`：本地 ESP-DL 人脸检测工具；
-- `boards/common/espdl_link_probe.cc`：灰图/内置人脸诊断（boot 由
-  `FACE_WAKE_SELFTEST_ON_BOOT` 宏开启，默认关）；
-- `audio_service::RunWakeWordSelfTest`：唤醒词注入自检（同一宏控制，默认关）。
+- 修改 managed esp_video 源码为单帧缓冲；
+- 用仓库内修复库覆盖 managed esp-sr 的 libdl_lib.a；
+- 执行 idf.py build。
+
+使用 -Clean 时依赖会被重新恢复，脚本会再次应用这两项修复：
+
+powershell -ExecutionPolicy Bypass -File .\scripts\build_firmware.ps1 -Clean
+
+因此新电脑不需要复制旧的 build 目录，也不需要手工下载或提交 managed components。
+
+## 验证
+
+构建后可检查 UVC 生成源码：
+
+Select-String -Path firmware\managed_components\espressif__esp_video\src\device\esp_video_usb_uvc_device.c -Pattern "UVC_DEVICE_FRAME_COUNT"
+
+应显示值为 1。编译和烧录后，通过串口确认唤醒词模型正常加载，设备进入待命后不持续复位；人脸检测通过后端手动测试触发。当前固件不包含开机内置人脸、纯色图片或唤醒词自检。
+
+## 故障排查
+
+如果再次出现唤醒词失效、模型分配失败或待命重启：
+
+1. 保存完整串口日志；
+2. 保留 firmware\build 和 firmware\build\flash_args；
+3. 重新运行构建脚本的 -Clean 模式；
+4. 确认构建输出包含 Applied UVC single-buffer memory patch 和 Applied ESP-SR/ESP-DL compatibility library 提示。
+
+不要先执行 git clean -fdx，以免删除可用于对比的构建输出。

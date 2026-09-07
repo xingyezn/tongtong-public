@@ -2,6 +2,8 @@
 
 （中文 | [English](README.md) | [日本語](README_ja.md)）
 
+> 本仓库二次开发固件编译前必须先阅读 [构建指南](docs/BUILD_GUIDE_CN.md)。请使用仓库根目录的 `scripts/build_firmware.ps1`，不要直接照搬上游构建命令；项目需要自动应用 UVC 单帧和 ESP-SR/ESP-DL 兼容修复。
+
 ## 介绍
 
 👉 [人类：给 AI 装摄像头 vs AI：当场发现主人三天没洗头【bilibili】](https://www.bilibili.com/video/BV1bpjgzKEhd/)
