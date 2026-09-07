@@ -1,5 +1,7 @@
 # Tongtong 固件
 
+[English](README.md) | 中文
+
 这是当前 Tongtong 项目的 ESP32 固件。固件通过 WebSocket 连接自建后端，并通过 MCP 提供设备能力；语音识别、模型对话、TTS 和服务器端人脸管理由后端完成。
 
 ## 已实现功能

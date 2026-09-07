@@ -1,5 +1,7 @@
 # Tongtong Firmware
 
+[中文](README_zh.md) | English
+
 This directory contains the current Tongtong ESP32 firmware. The device connects to the self-hosted backend over WebSocket and exposes device capabilities through MCP. Speech recognition, model conversation, TTS, and server-side face management are handled by the backend.
 
 ## Implemented features

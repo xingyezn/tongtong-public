@@ -1,44 +1,56 @@
-# Tongtong backend
+# Tongtong Backend
 
-The backend is an `aiohttp` application providing OTA configuration, a device
-WebSocket gateway, Opus conversion, Qwen-Omni integration, MCP bridging, and a
-multi-user browser administration page. Users register and log in, bind devices
-by entering only the eight-digit, ten-minute code shown on the device, and
-manage per-device model/VAD/interruption settings, GPT-style conversation history,
-and user-controlled permanent memory summarized by `qwen3.8-max`. Binding attempts
-are rate-limited and each device can have only one owner. Account and device data is stored in SQLite under
-`backend/data/` by default.
+[中文](README_zh-CN.md) | English
 
-## Isolated test backend
+The backend is an `aiohttp` service that connects Tongtong ESP32 devices to the Qwen Omni Realtime model. It provides the device WebSocket gateway, Opus audio transport, MCP bridging, OTA endpoints, multi-user accounts, device binding, conversation history, permanent memory, administrator controls, and browser-based manual hardware tests.
 
-Run development traffic on port `8082` with a separate SQLite database:
+## Current features
+
+- WebSocket device sessions with wake/listen/abort/standby handling.
+- Streaming PCM/Opus uplink and TTS playback with interruption protection.
+- Device MCP discovery and tool calls for camera, screen, RGB LED, motor, gimbal, servo, tracking, and OTA capabilities.
+- Per-device model, language, voice, prompt, VAD, memory, and conversation-timeout settings.
+- Eight-digit, time-limited device binding codes and per-user device ownership.
+- User accounts, administrator accounts, audit records, conversation history, usage/token statistics, and permanent memory.
+- Camera upload and latest-frame preview for supervised tests.
+- Conversational server-side face tools: register the current frame, recognize the current frame, delete by an ID explicitly provided by the user, and update metadata or replace a sample image.
+- The model is not given the face-list tool. Face lists remain available only to the authenticated administrator/manual test page.
+
+## Server-side face recognition
+
+`face_service.py` calls the Git-tracked sibling service at `../face-detect-service/` (normally `http://127.0.0.1:8090`). The backend authenticates with the face service login session, then calls `/api/faces` or `/api/recognize`.
+
+Current-frame operations always invoke the firmware's `self.camera.take_photo` first. The JPEG is kept temporarily in backend memory and is never placed in the model prompt. The face service records recognition requests in its recent-request history, including result, count, timing, and a temporary image reference.
+
+Configure the face service under `face_service` in the backend configuration, or from the administrator page. Do not commit real API keys, account passwords, tokens, or deployment configuration.
+
+## Environments and deployment
+
+- `main`: production backend `/opt/tongtong-omni-backend`, service `tongtong-omni`, port `8080`.
+- Non-`main`: use an explicitly confirmed test backend. Port `8081` is Hao Ran at `/opt/tongtong-omni-backend-test-adam`, service `tongtong-omni-test-adam`; port `8082` is Hao Xin and must not be overwritten by this workflow.
+- The face service runs separately at `/opt/face-detect-service`, port `8090`, service `face-detect.service`.
+
+Preserve each server's `config.yaml`, SQLite database, virtual environment, and environment file when uploading application code. Restart only the service belonging to the selected environment. Updating remote `main` requires explicit approval.
+
+## Local development
+
+From the repository root, create private configuration and start the backend with the project scripts. For a test backend, copy `backend/config.test.example.yaml` to the ignored `backend/config.test.yaml`, select the confirmed test port, and use the isolated test database.
 
 ```powershell
-$env:TONGTONG_ADMIN_PASSWORD = "use-a-strong-local-password"
-.\scripts\start_test_backend.ps1 -PublicHost 192.168.1.20
+python -m py_compile backend\app\*.py
+python backend\main.py
 ```
 
-The test process reads the ignored `backend/config.test.yaml` (created from
-`config.test.example.yaml`) and stores data in
-`backend/data/test/tongtong-test.db`. It does not read or write the production
-account database. Open `/admin` after signing in with the bootstrap `admin`
-account to manage users and devices. For the shared server, run this isolated
-service on `8082`; keep production on its own service and database. See
-[`docs/TEST_PRODUCTION_ENVIRONMENTS.zh-CN.md`](../docs/TEST_PRODUCTION_ENVIRONMENTS.zh-CN.md)
-for the release procedure.
+On Windows PowerShell, if the wildcard is not expanded by Python, use the build/test instructions in the repository documentation or pass the individual files.
 
-The dashboard lets a user edit every personal-memory field (category, title,
-content, and enabled state) and view daily, weekly, monthly, and cumulative
-conversation/token usage. The admin page can enable or disable users and
-devices, filter devices by owner, and view token totals by user and device.
-Token totals are recorded from the realtime provider's reported usage, so
-records created before the usage migration have a zero token total.
+## Tests and useful endpoints
 
-Configuration is intentionally not tracked. From the repository root, copy
-`private/local.example.yaml` to `private/local.yaml`, fill in deployment values,
-then run `python scripts/configure_local.py`. This creates the ignored
-`backend/config.yaml` expected by `main.py`.
+```powershell
+python backend\tools\test_accounts.py
+python backend\tools\test_auth.py
+python backend\tools\test_dashboard.py
+```
 
-For a production service, inject `DASHSCOPE_API_KEY` using a protected service
-environment file. Never place API keys, user passwords, or device tokens in
-Git-tracked files.
+Useful backend endpoints include `/ws`, `/health`, `/ota`, `/ota/activate`, `/api/camera/upload`, `/api/test/tools`, and `/api/test/mcp`. Face-service endpoints are documented in [`../face-detect-service/README.md`](../face-detect-service/README.md).
+
+For the complete repository build, flash, backend environment, and release procedure, see [`../项目使用说明.md`](../项目使用说明.md) and [`../docs/TEST_PRODUCTION_ENVIRONMENTS.zh-CN.md`](../docs/TEST_PRODUCTION_ENVIRONMENTS.zh-CN.md).

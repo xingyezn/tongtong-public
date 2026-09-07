@@ -231,6 +231,16 @@ after a successful build when `-Flash` is supplied, and preserves verified build
 caches and firmware backups. Do not use upstream commands or `git clean` to
 remove those files. Build outputs remain local artifacts and must not be committed.
 
+## Release workflow
+
+1. Commit the current development-branch changes and preserve verified build caches and firmware artifacts.
+2. Fetch the latest remote `main`, merge it into the current development branch, resolve conflicts, and run required checks.
+3. Push the development branch and report the target commit and change scope.
+4. Wait for explicit user approval before changing remote `main`.
+5. After approval, fast-forward remote `main` to the development branch and verify both remote branches point to the same commit.
+
+Before approval, the development branch may be pushed, but remote `main` must not be updated.
+
 ## Verification
 
 Run the backend regression checks from the repository root:
