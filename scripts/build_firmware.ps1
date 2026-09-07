@@ -96,6 +96,13 @@ if (-not (Select-String -Path $uvcDriver -SimpleMatch "#define UVC_DEVICE_FRAME_
 # required for the ESP-DL face detector and must be reapplied after a fresh
 # Component Manager restore because managed_components is intentionally ignored.
 if (-not (Select-String -Path $uvcDriver -SimpleMatch "#define UVC_DEVICE_FRAME_WIDTH          480" -Quiet)) {
+    if (Select-String -Path $uvcDriver -SimpleMatch "#define UVC_DEVICE_FRAME_WIDTH          320" -Quiet) {
+        $uvcContent = Get-Content -LiteralPath $uvcDriver -Raw
+        $uvcContent = $uvcContent.Replace("#define UVC_DEVICE_FRAME_WIDTH          320", "#define UVC_DEVICE_FRAME_WIDTH          480")
+        $uvcContent = $uvcContent.Replace("#define UVC_DEVICE_FRAME_HEIGHT         240", "#define UVC_DEVICE_FRAME_HEIGHT         320")
+        [System.IO.File]::WriteAllText($uvcDriver, $uvcContent, (New-Object System.Text.UTF8Encoding($false)))
+        Write-Output "Restored UVC resolution from 320x240 to 480x320."
+    } else {
     git -C $repo apply --check $uvcResolutionPatch
     if ($LASTEXITCODE -ne 0) {
         throw "Cannot apply the ESP Video UVC 480x320 resolution patch; inspect $uvcDriver."
@@ -105,6 +112,7 @@ if (-not (Select-String -Path $uvcDriver -SimpleMatch "#define UVC_DEVICE_FRAME_
         throw "Failed to apply the ESP Video UVC 480x320 resolution patch."
     }
     Write-Output "Applied UVC 480x320 resolution patch."
+    }
 }
 
 # ESP-SR and ESP-DL on ESP32-S3 currently share conflicting conv2d symbols in
