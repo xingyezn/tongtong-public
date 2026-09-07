@@ -42,7 +42,7 @@ curl -X PATCH -H "Content-Type: application/json" -d '{"name":"新名称","note"
 curl -X DELETE http://127.0.0.1:8090/api/faces/1
 ```
 
-人脸资料和特征向量保存在 `data/faces.db`，识别阈值默认为 cosine `0.6`，只有分数大于该阈值的结果才会返回，可通过 `FACE_RECOGNITION_THRESHOLD`、`FACE_RECOGNITION_DB`、`FACE_YUNET_MODEL`、`FACE_SFACE_MODEL` 环境变量调整。录入图片必须且只能包含一张人脸，否则接口会返回整改说明且不会写入数据库。后台页面和管理接口需要登录，默认用户名为 `tongtong`、密码为 `tongtong-2026`，可通过 `FACE_ADMIN_USERNAME`、`FACE_ADMIN_PASSWORD`、`FACE_AUTH_SECRET` 环境变量修改；设备使用的 `/detect` 和 `/health` 保持公开。
+人脸资料和特征向量保存在 `data/faces.db`，识别阈值默认为 cosine `0.6`，可通过 `FACE_RECOGNITION_THRESHOLD`、`FACE_RECOGNITION_DB`、`FACE_YUNET_MODEL`、`FACE_SFACE_MODEL` 环境变量调整。后台页面和管理接口需要登录，必须通过 `FACE_ADMIN_USERNAME`、`FACE_ADMIN_PASSWORD` 和 `FACE_AUTH_SECRET` 环境变量配置，不在仓库中保存默认账号、密码或密钥；设备使用的 `/detect` 和 `/health` 保持公开。
 
 ## 部署（服务器执行）
 

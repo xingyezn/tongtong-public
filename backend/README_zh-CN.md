@@ -9,6 +9,7 @@
 - 设备 WebSocket 会话，以及唤醒、监听、打断、待命状态处理。
 - PCM/Opus 音频上下行、流式 TTS 播放和打断保护。
 - 自动发现设备 MCP 工具，并支持摄像头、屏幕、RGB 指示灯、电机、云台、舵机、跟随和 OTA 等能力。
+- 管理员可维护最多 20 个 `.bin` 固件版本，保存版本号、描述、大小和 SHA-256，并向指定在线终端下发指定版本。下发是异步的，仍需结合设备日志确认下载、校验和重启结果。
 - 每台设备独立配置模型、语言、音色、人物设定、VAD、记忆和对话超时。
 - 八位限时设备绑定码和按用户隔离的设备所有权。
 - 用户/管理员账号、审计记录、对话记录、Token 用量统计和长期记忆。
@@ -32,6 +33,12 @@
 
 上传代码时保留服务器原有的 `config.yaml`、SQLite 数据库、虚拟环境和环境变量文件，只重启当前选定环境的服务。更新远程 `main` 必须取得明确同意。
 
+## 固件上传和下发
+
+固件构建成功后，在管理员页面的固件版本库上传 `firmware/build/tongtong.bin`，填写唯一版本号和版本描述，并核对文件大小与 SHA-256。固件库最多保留 20 个版本。选择在线终端即可下发指定版本，页面会显示指令发送、下载、重启和重新上线进度；下发是异步的，最终结果需要结合设备日志确认。
+
+发布流程中是否同步发布固件必须单独取得明确确认。管理员账号、密码、API Key、设备 Token 和部署密钥不得提交到仓库，只能通过服务器环境变量、Git 忽略的本地配置或管理员页面提供。
+
 ## 本地开发
 
 在仓库根目录根据项目配置流程创建私有配置并启动后端。测试环境应从 `backend/config.test.example.yaml` 创建被 Git 忽略的 `backend/config.test.yaml`，使用已确认的测试端口和独立测试数据库。
@@ -51,6 +58,6 @@ python backend\tools\test_auth.py
 python backend\tools\test_dashboard.py
 ```
 
-后端常用接口包括 `/ws`、`/health`、`/ota`、`/ota/activate`、`/api/camera/upload`、`/api/test/tools` 和 `/api/test/mcp`。人脸服务接口见 [`../face-detect-service/README.md`](../face-detect-service/README.md)。
+后端常用接口包括 `/ws`、`/health`、`/ota`、`/ota/activate`、`/api/camera/upload`、`/api/test/tools` 和 `/api/test/mcp`。管理员固件接口包括 `/api/admin/firmware`（列表/上传）、`DELETE /api/admin/firmware/{id}` 和 `POST /api/admin/firmware/{id}/deploy`。固件下载使用短时效随机私有地址，文件保存在 `data/firmware`，不提交到 Git。人脸服务接口见 [`../face-detect-service/README.md`](../face-detect-service/README.md)。
 
 完整的项目构建、烧录、后端环境和发布流程见 [`../项目使用说明.md`](../项目使用说明.md) 以及 [`../docs/TEST_PRODUCTION_ENVIRONMENTS.zh-CN.md`](../docs/TEST_PRODUCTION_ENVIRONMENTS.zh-CN.md)。

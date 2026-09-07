@@ -14,8 +14,8 @@ class FaceService:
         settings = config.get("face_service", {})
         self.base_url = (settings.get(
             "base_url", "http://127.0.0.1:8090").rstrip("/"))
-        self.username = settings.get("username", "tongtong")
-        self.password = settings.get("password", "tongtong-2026")
+        self.username = settings.get("username", "")
+        self.password = settings.get("password", "")
         self._login_lock = asyncio.Lock()
         self._authenticated = False
 

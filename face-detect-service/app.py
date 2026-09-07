@@ -20,9 +20,9 @@ FACE_DB = os.getenv("FACE_RECOGNITION_DB", "/opt/face-detect-service/data/faces.
 FACE_YUNET_MODEL = os.getenv("FACE_YUNET_MODEL", "/opt/face-detect-service/model/recognition/face_detection_yunet_2023mar.onnx")
 FACE_SFACE_MODEL = os.getenv("FACE_SFACE_MODEL", "/opt/face-detect-service/model/recognition/face_recognition_sface_2021dec.onnx")
 FACE_RECOGNITION_THRESHOLD = float(os.getenv("FACE_RECOGNITION_THRESHOLD", "0.6"))
-FACE_ADMIN_USERNAME = os.getenv("FACE_ADMIN_USERNAME", "tongtong")
-FACE_ADMIN_PASSWORD = os.getenv("FACE_ADMIN_PASSWORD", "tongtong-2026")
-FACE_AUTH_SECRET = os.getenv("FACE_AUTH_SECRET", "tongtong-face-dashboard-change-me")
+FACE_ADMIN_USERNAME = os.getenv("FACE_ADMIN_USERNAME", "")
+FACE_ADMIN_PASSWORD = os.getenv("FACE_ADMIN_PASSWORD", "")
+FACE_AUTH_SECRET = os.getenv("FACE_AUTH_SECRET", "")
 
 app = Flask(__name__)
 app.secret_key = FACE_AUTH_SECRET

@@ -148,6 +148,19 @@ class AccountStore:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL DEFAULT ''
                 );
+                CREATE TABLE IF NOT EXISTS firmware_releases (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    version TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    stored_name TEXT NOT NULL UNIQUE,
+                    original_name TEXT NOT NULL DEFAULT '',
+                    sha256 TEXT NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_firmware_releases_created
+                    ON firmware_releases(created_at DESC, id DESC);
             """)
             user_columns = {
                 row["name"] for row in self._db.execute("PRAGMA table_info(users)")
@@ -500,21 +513,86 @@ class AccountStore:
             """, (int(admin_user_id), str(action), str(target_type), str(target_id),
                   json.dumps(details or {}, ensure_ascii=False), time.time()))
 
-    def list_admin_audit(self, limit=100):
+    def list_admin_audit(self, limit=100, page=1):
         limit = max(1, min(500, int(limit)))
+        page = max(1, int(page))
+        offset = (page - 1) * limit
         with self._lock:
+            total = self._db.execute(
+                "SELECT COUNT(*) FROM admin_audit_log").fetchone()[0]
             rows = self._db.execute("""
                 SELECT a.id,a.admin_user_id,u.username AS admin_username,a.action,
                        a.target_type,a.target_id,a.details,a.created_at
                 FROM admin_audit_log a LEFT JOIN users u ON u.id=a.admin_user_id
-                ORDER BY a.id DESC LIMIT ?
-            """, (limit,)).fetchall()
+                ORDER BY a.id DESC LIMIT ? OFFSET ?
+            """, (limit, offset)).fetchall()
         result = []
         for row in rows:
             item = dict(row)
             item["details"] = self._decode_json(item["details"])
             result.append(item)
-        return result
+        return result, int(total)
+
+    def create_firmware_release(self, version, description, stored_name,
+                                original_name, sha256, size_bytes, created_by):
+        version = str(version or "").strip()
+        description = str(description or "").strip()
+        if not version or len(version) > 64:
+            raise AccountError("固件版本号不能为空且不能超过 64 个字符")
+        if len(description) > 2000:
+            raise AccountError("固件描述不能超过 2000 个字符")
+        with self._lock, self._db:
+            count = self._db.execute(
+                "SELECT COUNT(*) FROM firmware_releases").fetchone()[0]
+            if count >= 20:
+                raise AccountError("固件库最多保留 20 个版本，请先删除旧版本")
+            if self._db.execute(
+                    "SELECT 1 FROM firmware_releases WHERE version=? LIMIT 1",
+                    (version,)).fetchone() is not None:
+                raise AccountError("该固件版本号已经存在")
+            try:
+                cursor = self._db.execute("""
+                    INSERT INTO firmware_releases(
+                        version,description,stored_name,original_name,sha256,
+                        size_bytes,created_by,created_at)
+                    VALUES(?,?,?,?,?,?,?,?)
+                """, (version, description, str(stored_name),
+                      str(original_name or ""), str(sha256), int(size_bytes),
+                      int(created_by), time.time()))
+            except sqlite3.IntegrityError as exc:
+                raise AccountError("固件存储文件名冲突") from exc
+            row = self._db.execute(
+                "SELECT * FROM firmware_releases WHERE id=?",
+                (cursor.lastrowid,)).fetchone()
+        return dict(row)
+
+    def list_firmware_releases(self):
+        with self._lock:
+            rows = self._db.execute("""
+                SELECT f.*,u.username AS created_by_username
+                FROM firmware_releases f
+                LEFT JOIN users u ON u.id=f.created_by
+                ORDER BY f.created_at DESC, f.id DESC
+            """).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_firmware_release(self, release_id):
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM firmware_releases WHERE id=?", (int(release_id),)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def delete_firmware_release(self, release_id):
+        with self._lock, self._db:
+            row = self._db.execute(
+                "SELECT * FROM firmware_releases WHERE id=?", (int(release_id),)
+            ).fetchone()
+            if row is None:
+                raise AccountError("固件版本不存在")
+            self._db.execute("DELETE FROM firmware_releases WHERE id=?",
+                             (int(release_id),))
+        return dict(row)
 
     @staticmethod
     def normalize_device_id(device_id):

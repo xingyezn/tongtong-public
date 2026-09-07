@@ -4,8 +4,8 @@ environment: "test"
 face_service:
   # Keep the recognition service separate from the 8081 backend listener.
   base_url: "http://127.0.0.1:8090"
-  username: "tongtong"
-  password: "tongtong-2026"
+  username: ""
+  password: ""
 
 server:
   host: "0.0.0.0"

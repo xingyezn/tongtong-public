@@ -157,6 +157,7 @@ class Session:
         self.connected_at = time.time()
 
         self.bin_version = BIN_V3          # 默认 v3（可由 hello/配置覆盖）
+        self.firmware_version = "?"
         self.server_sample_rate = config["dashscope"]["output_sample_rate"]
 
         # 编解码
@@ -352,10 +353,13 @@ class Session:
         version = msg.get("version")
         if version in (1, 2, 3):
             self.bin_version = version
+        firmware_version = msg.get("firmware_version")
+        if isinstance(firmware_version, str) and firmware_version.strip():
+            self.firmware_version = firmware_version.strip()[:64]
         features = msg.get("features", {})
         # 设备 hello 上报 sample_rate=16000, frame_duration=60（固定）
-        log.info("device %s hello, bin_version=%d, features=%s",
-                 self.device_id, self.bin_version, features)
+        log.info("device %s hello, firmware_version=%s, bin_version=%d, features=%s",
+                 self.device_id, self.firmware_version, self.bin_version, features)
 
     def _reset_vad_state(self):
         self._vad_speech = False

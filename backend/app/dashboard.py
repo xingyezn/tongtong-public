@@ -7,14 +7,17 @@
 """
 
 import asyncio
+import hashlib
 import hmac
 import json
 import logging
 import math
+import os
 import secrets
 import threading
 import time
 from collections import deque
+from pathlib import Path
 from urllib.parse import urlparse
 
 from aiohttp import web
@@ -742,7 +745,7 @@ function render(d) {
         <td>${esc(dev.name)}</td>
         <td class="mono">${esc(dev.identifier)}</td>
         <td class="mono">${esc(dev.device_id)}</td>
-        <td>v${esc(dev.bin_version)}</td>
+        <td>v${esc(dev.firmware_version || "?")}</td>
         <td>${st}</td>
         <td>${timeStr}</td>
         <td class="mono">${esc(dev.session_id || "—")}</td>
@@ -773,7 +776,7 @@ function renderHardwareTestControls(devices) {
   const previous = select.value;
   dashboardDevices = devices.filter(dev => dev.online);
   select.innerHTML = dashboardDevices.map(dev =>
-    `<option value="${esc(dev.device_id)}">${esc(dev.name)} · ${esc(dev.identifier)} (v${esc(dev.bin_version)})</option>`
+    `<option value="${esc(dev.device_id)}">${esc(dev.name)} · ${esc(dev.identifier)} (v${esc(dev.firmware_version || "?")})</option>`
   ).join("");
   select.disabled = dashboardDevices.length === 0;
   if (dashboardDevices.some(dev => dev.device_id === previous)) select.value = previous;
@@ -1399,26 +1402,33 @@ header{padding:18px 4vw;background:#fff;border-bottom:1px solid var(--line);disp
 </style></head><body>
 <header><h1>童童管理员端</h1><span id="env" class="tag">—</span><span class="spacer"></span><a class="btn" href="/">用户面板</a><a class="btn" href="/logout">退出</a></header>
 <main>
-<section class="card"><h2>服务器端人脸识别服务</h2><p>用于对话中的人脸录入、识别、删除和修改。修改后立即对新会话生效。</p><div class="row"><input id="face-service-url" style="min-width:340px" placeholder="服务地址"><input id="face-service-user" placeholder="登录用户名"><input id="face-service-password" type="password" placeholder="登录密码"></div><div class="row"><button class="primary" onclick="saveFaceServiceSettings()">保存人脸服务配置</button></div></section>
 <section class="stats"><div class="stat">用户<b id="user-count">0</b></div><div class="stat">管理员<b id="admin-count">0</b></div><div class="stat">设备<b id="device-count">0</b></div><div class="stat">在线设备<b id="online-count">0</b></div></section>
 <section class="card"><h2>用户管理</h2><div class="row"><input id="new-user" placeholder="用户名"><input id="new-password" type="password" placeholder="初始密码（至少 8 位）"><label><input id="new-admin" type="checkbox"> 管理员</label><button class="primary" onclick="createUser()">创建用户</button></div>
 <table><thead><tr><th>ID</th><th>用户名</th><th>角色</th><th>状态</th><th>设备</th><th>会话</th><th>累计 Token</th><th>操作</th></tr></thead><tbody id="users"></tbody></table></section>
 <section class="card"><h2>设备管理</h2><div class="row"><label>按用户查询 <select id="device-user-filter" onchange="load()"><option value="">全部用户 / 未绑定设备</option></select></label></div><table><thead><tr><th>设备 ID</th><th>名称/识别码</th><th>所有者</th><th>设备状态</th><th>在线</th><th>累计 / 本月 Token</th><th>最后出现</th><th>操作</th></tr></thead><tbody id="devices"></tbody></table></section>
+<section class="card"><h2>服务器端人脸识别服务</h2><p>用于对话中的人脸录入、识别、删除和修改。修改后立即对新会话生效。</p><div class="row"><input id="face-service-url" style="min-width:340px" placeholder="服务地址"><input id="face-service-user" placeholder="登录用户名"><input id="face-service-password" type="password" placeholder="登录密码"></div><div class="row"><button class="primary" onclick="saveFaceServiceSettings()">保存人脸服务配置</button></div></section>
+<section class="card"><h2>固件版本库（最多 20 个版本）</h2><p>上传后可选择在线设备下发指定版本。设备接受指令不代表已经完成下载和重启，请结合进度和日志确认结果。</p><div class="row"><input id="firmware-version" placeholder="版本号，例如 1.0.1"><input id="firmware-description" style="min-width:320px" placeholder="版本描述"><input id="firmware-file" type="file" accept=".bin"><button class="primary" onclick="uploadFirmware()">上传固件</button></div><table><thead><tr><th>ID</th><th>版本</th><th>描述</th><th>大小</th><th style="width:150px">SHA-256</th><th>上传时间</th><th>选择设备</th><th>下发</th><th>进度/日志</th><th>操作</th></tr></thead><tbody id="firmware-releases"></tbody></table></section>
 <section class="card"><h2>全局工具规则</h2><p>此规则适用于所有用户和所有设备，普通用户不可修改。</p><textarea id="global-tool-instructions" rows="6" style="width:100%;font:13px/1.5 Consolas,monospace;padding:9px"></textarea><div class="row"><button class="primary" onclick="saveGlobalSettings()">保存全局工具规则</button></div></section>
-<section class="card"><h2>管理员操作审计</h2><table><thead><tr><th>时间</th><th>管理员</th><th>操作</th><th>对象</th><th>详情</th></tr></thead><tbody id="audit"></tbody></table></section>
+<section class="card"><h2>管理员操作审计</h2><table><thead><tr><th>时间</th><th>管理员</th><th>操作</th><th>对象</th><th>详情</th></tr></thead><tbody id="audit"></tbody></table><div class="row" style="align-items:center;margin:14px 0 0"><button onclick="changeAuditPage(-1)">上一页</button><span id="audit-page-info" class="muted"></span><button onclick="changeAuditPage(1)">下一页</button><label>每页 <select id="audit-page-size" onchange="auditPage=1;load()"><option value="10">10</option><option value="20" selected>20</option><option value="50">50</option></select> 条</label></div></section>
 </main><div id="msg"></div>
 <script>
-let data={users:[],devices:[]}; const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+let data={users:[],devices:[]},firmware={releases:[]},auditPage=1; const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 async function api(url,options={}){const r=await fetch(url,options);let d={};try{d=await r.json()}catch{}if(!r.ok)throw Error(d.error||("HTTP "+r.status));return d}
 function toast(s,bad=false){const n=document.getElementById("msg");n.textContent=s;n.style.background=bad?"#a93649":"#17364d";n.style.display="block";setTimeout(()=>n.style.display="none",2800)}
-async function load(){try{const selected=document.getElementById("device-user-filter")?.value||"";data=await api("/api/admin/overview"+(selected?"?user_id="+encodeURIComponent(selected):""));render();const settings=await api("/api/admin/settings");document.getElementById("global-tool-instructions").value=settings.tool_instructions||""}catch(e){toast(e.message,true)}}
+async function load(){try{const selected=document.getElementById("device-user-filter")?.value||"";const params=new URLSearchParams();if(selected)params.set("user_id",selected);params.set("audit_page",auditPage);params.set("audit_page_size",document.getElementById("audit-page-size")?.value||20);data=await api("/api/admin/overview?"+params.toString());firmware=await api("/api/admin/firmware");firmware.deployments=(await api("/api/admin/firmware/deployments")).deployments||[];render();renderFirmware();const settings=await api("/api/admin/settings");document.getElementById("global-tool-instructions").value=settings.tool_instructions||""}catch(e){toast(e.message,true)}}
 async function saveGlobalSettings(){try{await api("/api/admin/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tool_instructions:document.getElementById("global-tool-instructions").value})});toast("全局工具规则已保存并应用")}catch(e){toast(e.message,true)}}
 function render(){document.getElementById("env").textContent="环境："+data.environment;document.getElementById("user-count").textContent=data.counts.users;document.getElementById("admin-count").textContent=data.counts.admins;document.getElementById("device-count").textContent=data.counts.devices;document.getElementById("online-count").textContent=data.counts.online_devices;
 const filter=document.getElementById("device-user-filter"),selected=String(data.selected_user_id??filter.value??"");filter.innerHTML='<option value="">全部用户 / 未绑定设备</option>'+data.users.map(u=>`<option value="${u.id}">${esc(u.username)}</option>`).join('');filter.value=selected;const usage=new Map((data.usage_by_user_device||[]).map(x=>[x.user_id+'|'+x.device_id,x]));const userTokens=id=>(data.usage_by_user_device||[]).filter(x=>x.user_id===id).reduce((s,x)=>s+Number(x.total_tokens||0),0);
 document.getElementById("users").innerHTML=data.users.map(u=>`<tr><td>${u.id}</td><td>${esc(u.username)}</td><td>${u.is_admin?'<span class="tag">管理员</span>':'用户'}</td><td>${u.is_active?'启用':'<span class="tag off">禁用</span>'}</td><td>${u.device_count}</td><td>${u.active_session_count}</td><td>${userTokens(u.id).toLocaleString()}</td><td><button onclick="toggleRole(${u.id},${!u.is_admin})">${u.is_admin?'取消管理员':'设为管理员'}</button> <button onclick="toggleActive(${u.id},${!u.is_active})">${u.is_active?'禁用':'启用'}</button> <button onclick="resetPassword(${u.id})">重置密码</button> <button class="danger" onclick="deleteUser(${u.id})">删除</button></td></tr>`).join("");
 const opts='<option value="">未绑定</option>'+data.users.filter(u=>u.is_active).map(u=>`<option value="${u.id}">${esc(u.username)}</option>`).join('');
 document.getElementById("devices").innerHTML=data.devices.map(d=>{const u=usage.get((d.owner_user_id||'')+'|'+d.device_id)||{};return `<tr><td><code>${esc(d.device_id)}</code></td><td>${esc(d.name||'—')}<br><small>${esc(d.identifier||'—')}</small></td><td><select id="owner-${esc(d.device_id)}">${opts}</select></td><td>${d.is_active?'<span class="tag">启用</span>':'<span class="tag off">已禁用</span>'}</td><td>${d.online?'<span class="tag">在线</span>':'离线'}</td><td>${Number(u.total_tokens||0).toLocaleString()} / ${Number(u.month_tokens||0).toLocaleString()}<br><small>${u.turns||0} 轮</small></td><td>${new Date(d.last_seen*1000).toLocaleString()}</td><td><button onclick="assignDevice('${esc(d.device_id)}')">保存所有者</button> <button onclick="toggleDevice('${esc(d.device_id)}',${!d.is_active})">${d.is_active?'禁用设备':'启用设备'}</button> <button onclick="switchEnvironment('${esc(d.device_id)}')" ${d.online&&d.is_active?'':'disabled'}>切换环境</button> <button onclick="unbindDevice('${esc(d.device_id)}')">解绑</button> <button class="danger" onclick="deleteDevice('${esc(d.device_id)}')">删除记录</button></td></tr>`}).join('');data.devices.forEach(d=>{const e=document.getElementById('owner-'+d.device_id);if(e)e.value=d.owner_user_id||''});
-document.getElementById("audit").innerHTML=data.audit.map(a=>`<tr><td>${new Date(a.created_at*1000).toLocaleString()}</td><td>${esc(a.admin_username||a.admin_user_id||'—')}</td><td>${esc(a.action)}</td><td>${esc(a.target_type)} #${esc(a.target_id)}</td><td><code>${esc(JSON.stringify(a.details))}</code></td></tr>`).join('')}
+auditPage=Number(data.audit_page||auditPage);document.getElementById("audit").innerHTML=data.audit.map(a=>`<tr><td>${new Date(a.created_at*1000).toLocaleString()}</td><td>${esc(a.admin_username||a.admin_user_id||'—')}</td><td>${esc(a.action)}</td><td>${esc(a.target_type)} #${esc(a.target_id)}</td><td><code>${esc(JSON.stringify(a.details))}</code></td></tr>`).join('')||'<tr><td colspan="5">暂无审计记录</td></tr>';const total=Number(data.audit_total||0),size=Number(data.audit_page_size||20),pages=Math.max(1,Math.ceil(total/size));document.getElementById('audit-page-info').textContent=`第 ${auditPage} / ${pages} 页，共 ${total} 条`;document.querySelector('#audit-page-info').previousElementSibling.disabled=auditPage<=1;document.querySelector('#audit-page-info').nextElementSibling.disabled=auditPage>=pages}
+function renderFirmware(){const devices=data.devices||[];document.getElementById('firmware-releases').innerHTML=(firmware.releases||[]).map(r=>{const opts='<option value="">选择在线设备</option>'+devices.filter(d=>d.online&&d.is_active).map(d=>`<option value="${esc(d.device_id)}">${esc(d.name||d.device_id)}</option>`).join('');const jobs=(firmware.deployments||[]).filter(j=>j.release_id===r.id);const j=jobs[jobs.length-1];const pct=j?Number(j.progress||0):0;const logs=j?(j.logs||[]).slice(-5).map(x=>new Date(x.time*1000).toLocaleTimeString()+' '+x.message).join('\\n'):'';return `<tr><td>${r.id}</td><td><b>${esc(r.version)}</b></td><td>${esc(r.description||'—')}</td><td>${(Number(r.size_bytes)/1024/1024).toFixed(2)} MiB</td><td style="max-width:150px;word-break:break-all;font-size:11px"><code>${esc(r.sha256)}</code></td><td>${new Date(r.created_at*1000).toLocaleString()}</td><td><select id="fw-device-${r.id}">${opts}</select></td><td><button onclick="deployFirmware(${r.id})">下发</button></td><td>${j?`<progress max="100" value="${pct}"></progress> ${pct}%<br><small>${esc(j.message)}</small><pre style="max-width:360px;white-space:pre-wrap;font-size:11px">${esc(logs)}</pre><button onclick="clearFirmwareLog('${j.id}')">清除日志</button>`:'—'}</td><td><a class="btn" href="/api/admin/firmware/${r.id}/download">下载</a> <button class="danger" onclick="deleteFirmware(${r.id})">删除</button></td></tr>`}).join('')||'<tr><td colspan="10">暂无固件版本</td></tr>'}
+async function uploadFirmware(){const file=document.getElementById('firmware-file').files[0];if(!file){toast('请选择 .bin 文件',true);return}const form=new FormData();form.append('version',document.getElementById('firmware-version').value);form.append('description',document.getElementById('firmware-description').value);form.append('file',file);try{await api('/api/admin/firmware',{method:'POST',body:form});toast('固件上传成功');document.getElementById('firmware-file').value='';await load()}catch(e){toast(e.message,true)}}
+async function deployFirmware(id){const device_id=document.getElementById('fw-device-'+id).value;if(!device_id){toast('请选择在线设备',true);return}if(!confirm('确认向该设备下发指定固件？设备将下载后重启。'))return;try{const d=await api('/api/admin/firmware/'+id+'/deploy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({device_id})});toast(d.message||'升级指令已下发')}catch(e){toast(e.message,true)}}
+async function deleteFirmware(id){if(!confirm('确认删除这个固件版本？'))return;try{await api('/api/admin/firmware/'+id,{method:'DELETE'});toast('固件版本已删除');await load()}catch(e){toast(e.message,true)}}
+async function clearFirmwareLog(id){try{await api('/api/admin/firmware/deployments/'+encodeURIComponent(id),{method:'DELETE'});toast('日志已清除');await load()}catch(e){toast(e.message,true)}}
+function changeAuditPage(delta){const total=Number(data.audit_total||0),size=Number(data.audit_page_size||20),pages=Math.max(1,Math.ceil(total/size));auditPage=Math.max(1,Math.min(pages,auditPage+delta));load()}
 async function post(url,body){await api(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});await load();toast('操作成功')}
 async function createUser(){try{await post('/api/admin/users/create',{username:document.getElementById('new-user').value,password:document.getElementById('new-password').value,is_admin:document.getElementById('new-admin').checked})}catch(e){toast(e.message,true)}}
 async function toggleRole(id,is_admin){try{await post('/api/admin/users/update',{user_id:id,is_admin})}catch(e){toast(e.message,true)}}async function toggleActive(id,is_active){try{await post('/api/admin/users/update',{user_id:id,is_active})}catch(e){toast(e.message,true)}}
@@ -1458,6 +1468,14 @@ class Dashboard:
         shared_photos = (getattr(gateway, "camera_photos", None)
                          if gateway is not None else None)
         self._camera_photos = shared_photos if shared_photos is not None else {}
+        storage_cfg = config.get("storage", {})
+        firmware_dir = storage_cfg.get("firmware_directory", "data/firmware")
+        self._firmware_dir = Path(firmware_dir)
+        if not self._firmware_dir.is_absolute():
+            self._firmware_dir = Path(__file__).resolve().parents[1] / self._firmware_dir
+        self._firmware_dir.mkdir(parents=True, exist_ok=True)
+        self._firmware_tokens = {}
+        self._firmware_deployments = {}
 
     def _render_page(self, template):
         """Add a prominent warning to the non-production dashboard only."""
@@ -1509,6 +1527,19 @@ class Dashboard:
         app.router.add_get("/api/admin/overview", self.api_admin_overview)
         app.router.add_get("/api/admin/settings", self.api_admin_settings_get)
         app.router.add_post("/api/admin/settings", self.api_admin_settings_set)
+        app.router.add_get("/api/admin/firmware", self.api_admin_firmware_list)
+        app.router.add_post("/api/admin/firmware", self.api_admin_firmware_upload)
+        app.router.add_delete("/api/admin/firmware/{release_id}",
+                              self.api_admin_firmware_delete)
+        app.router.add_get("/api/admin/firmware/{release_id}/download",
+                           self.api_admin_firmware_download)
+        app.router.add_post("/api/admin/firmware/{release_id}/deploy",
+                            self.api_admin_firmware_deploy)
+        app.router.add_delete("/api/admin/firmware/deployments/{deployment_id}",
+                              self.api_admin_firmware_deployment_clear)
+        app.router.add_get("/api/admin/firmware/deployments",
+                           self.api_admin_firmware_deployments)
+        app.router.add_get("/ota/firmware/{token}", self.ota_firmware_download)
         app.router.add_post("/api/admin/users/create", self.api_admin_user_create)
         app.router.add_post("/api/admin/users/update", self.api_admin_user_update)
         app.router.add_post("/api/admin/users/delete", self.api_admin_user_delete)
@@ -1649,6 +1680,10 @@ class Dashboard:
             device["online"] = bool(
                 session is not None and
                 not getattr(getattr(session, "ws", None), "closed", False))
+        audit_page_size = request.query.get("audit_page_size", 20)
+        audit_page = request.query.get("audit_page", 1)
+        audit, audit_total = self.account_store.list_admin_audit(
+            audit_page_size, audit_page)
         return web.json_response({
             "environment": self.config.get("environment", "production"),
             "counts": {
@@ -1662,7 +1697,10 @@ class Dashboard:
             "devices": devices,
             "selected_user_id": owner_filter,
             "usage_by_user_device": self.account_store.usage_by_user_device(),
-            "audit": self.account_store.list_admin_audit(100),
+            "audit": audit,
+            "audit_total": audit_total,
+            "audit_page": max(1, int(audit_page)),
+            "audit_page_size": max(1, min(100, int(audit_page_size))),
         })
 
     async def api_admin_settings_get(self, request):
@@ -1721,6 +1759,326 @@ class Dashboard:
             "tool_instructions": tool_instructions,
             "face_service": dict(self.config.get("face_service", {})),
         })
+
+    def _firmware_public_base(self):
+        base = self.config.get("server", {}).get("public_ws_url", "")
+        base = base.replace("wss://", "https://").replace("ws://", "http://")
+        if base.endswith("/ws"):
+            base = base[:-3]
+        return base.rstrip("/")
+
+    @staticmethod
+    def _firmware_json(row):
+        item = dict(row)
+        item["size_bytes"] = int(item["size_bytes"])
+        return item
+
+    async def api_admin_firmware_list(self, request):
+        self._require_admin(request)
+        return web.json_response({
+            "max_versions": 20,
+            "releases": [self._firmware_json(row)
+                         for row in self.account_store.list_firmware_releases()],
+        })
+
+    async def api_admin_firmware_upload(self, request):
+        admin = self._require_admin(request)
+        temp_path = None
+        target_path = None
+        try:
+            reader = await request.multipart()
+            version = ""
+            description = ""
+            original_name = "firmware.bin"
+            file_part = None
+            while True:
+                part = await reader.next()
+                if part is None:
+                    break
+                if part.name == "file":
+                    file_part = part
+                    original_name = Path(part.filename or "firmware.bin").name
+                    break
+                value = await part.text()
+                if part.name == "version":
+                    version = value
+                elif part.name == "description":
+                    description = value
+            if file_part is None:
+                raise ValueError("请选择固件 .bin 文件")
+            if not version.strip() or len(version.strip()) > 64 or any(
+                    char in version for char in "\\/\r\n"):
+                raise ValueError("版本号不能为空，且不能包含路径字符")
+            if len(description) > 2000:
+                raise ValueError("固件描述不能超过 2000 个字符")
+            if not original_name.lower().endswith(".bin"):
+                raise ValueError("固件文件必须是 .bin")
+            temp_path = self._firmware_dir / (".upload-{}".format(secrets.token_hex(12)))
+            digest = hashlib.sha256()
+            size = 0
+            with temp_path.open("wb") as handle:
+                while True:
+                    chunk = await file_part.read_chunk(1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > 16 * 1024 * 1024:
+                        raise ValueError("固件文件不能超过 16 MiB")
+                    digest.update(chunk)
+                    handle.write(chunk)
+            stored_name = "{}-{}.bin".format(
+                time.strftime("%Y%m%d%H%M%S"), secrets.token_hex(8))
+            target_path = self._firmware_dir / stored_name
+            os.replace(str(temp_path), str(target_path))
+            temp_path = None
+            try:
+                release = self.account_store.create_firmware_release(
+                    version.strip(), description.strip(), stored_name, original_name,
+                    digest.hexdigest(), size, admin["id"])
+            except Exception:
+                try:
+                    target_path.unlink()
+                except FileNotFoundError:
+                    pass
+                target_path = None
+                raise
+            target_path = None
+            self.account_store.audit_admin_action(
+                admin["id"], "firmware.upload", "firmware", release["id"], {
+                    "version": release["version"], "size_bytes": size,
+                    "sha256": release["sha256"]})
+            return web.json_response(self._firmware_json(release), status=201)
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        finally:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink()
+                except FileNotFoundError:
+                    pass
+            if target_path is not None:
+                try:
+                    target_path.unlink()
+                except FileNotFoundError:
+                    pass
+
+    async def api_admin_firmware_delete(self, request):
+        admin = self._require_admin(request)
+        try:
+            release = self.account_store.delete_firmware_release(
+                int(request.match_info["release_id"]))
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        path = self._firmware_dir / Path(release["stored_name"]).name
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        self.account_store.audit_admin_action(
+            admin["id"], "firmware.delete", "firmware", release["id"],
+            {"version": release["version"]})
+        return web.json_response({"success": True})
+
+    async def api_admin_firmware_download(self, request):
+        self._require_admin(request)
+        try:
+            release = self.account_store.get_firmware_release(
+                int(request.match_info["release_id"]))
+        except (ValueError, TypeError):
+            release = None
+        if release is None:
+            raise web.HTTPNotFound(text="firmware release not found")
+        path = self._firmware_dir / Path(release["stored_name"]).name
+        if not path.is_file():
+            raise web.HTTPNotFound(text="firmware file not found")
+        return web.FileResponse(path, headers={
+            "Content-Disposition": "attachment; filename={}".format(
+                Path(release["original_name"]).name),
+            "X-Firmware-Version": release["version"],
+            "X-Firmware-SHA256": release["sha256"],
+        })
+
+    def _firmware_deployment_update(self, deployment_id, status, progress, message):
+        job = self._firmware_deployments.get(deployment_id)
+        if job is None:
+            return
+        job["status"] = status
+        job["progress"] = int(progress)
+        job["message"] = message
+        job["updated_at"] = time.time()
+        logs = job.setdefault("logs", [])
+        if not logs or any(logs[-1].get(key) != value for key, value in (
+                ("status", status), ("progress", int(progress)),
+                ("message", message))):
+            logs.append({
+                "time": job["updated_at"], "status": status,
+                "progress": int(progress), "message": message})
+
+    async def _run_firmware_deployment(self, deployment_id, session):
+        job = self._firmware_deployments[deployment_id]
+        self._firmware_deployment_update(
+            deployment_id, "command_sent", 20, "已向设备发送 OTA 指令，等待设备处理")
+        try:
+            result = await session.mcp.call_tool(
+                "self.upgrade_firmware", {"url": job["url"]}, timeout=8)
+            job["tool_result"] = result
+            self._firmware_deployment_update(
+                deployment_id, "command_accepted", 35, "设备返回 OTA 指令已接受")
+        except Exception as exc:
+            # The firmware starts OTA asynchronously and normally reboots before
+            # its JSON-RPC response can reach this connection.
+            job["tool_error"] = str(exc) or type(exc).__name__
+            if job["status"] != "downloaded":
+                self._firmware_deployment_update(
+                    deployment_id, "rebooting", 35,
+                    "设备连接已断开，推测正在重启并执行 OTA；继续等待下载请求")
+            else:
+                self._firmware_deployment_update(
+                    deployment_id, "downloaded", 80,
+                    "固件已经下载，MCP 等待因设备重启断开；继续等待设备上线")
+        for _ in range(180):
+            await asyncio.sleep(1)
+            if job["status"] in ("download_failed", "version_mismatch"):
+                return
+            if job["status"] == "downloaded":
+                session_now = self.sessions.get(job["device_id"])
+                if session_now is not None and not getattr(
+                        getattr(session_now, "ws", None), "closed", False):
+                    actual_version = getattr(session_now, "firmware_version", "?")
+                    if actual_version == job["expected_version"]:
+                        self._firmware_deployment_update(
+                            deployment_id, "completed", 100,
+                            "固件已完整下载，设备已重新上线并上报目标版本 {}".format(
+                                actual_version))
+                        return
+                    self._firmware_deployment_update(
+                        deployment_id, "version_mismatch", 100,
+                        "设备已重新上线，但版本校验失败：期望 {}，实际 {}".format(
+                            job["expected_version"], actual_version))
+                    return
+                self._firmware_deployment_update(
+                    deployment_id, "downloaded", 80,
+                    "固件已下载，等待设备重启后重新上线")
+            elif job["status"] in ("command_sent", "rebooting", "command_accepted"):
+                self._firmware_deployment_update(
+                    deployment_id, "waiting_download", 35,
+                    "等待设备请求固件文件")
+        if job["status"] == "downloaded":
+            self._firmware_deployment_update(
+                deployment_id, "downloaded", 80,
+                "固件已下载，但设备尚未重新上线；请检查设备串口日志")
+        elif job["status"] != "completed":
+            self._firmware_deployment_update(
+                deployment_id, "failed", 100, "超时：未观察到固件下载请求")
+
+    async def api_admin_firmware_deploy(self, request):
+        admin = self._require_admin(request)
+        try:
+            data = await request.json()
+            device_id = self.account_store.normalize_device_id(data.get("device_id"))
+            release = self.account_store.get_firmware_release(
+                int(request.match_info["release_id"]))
+            if release is None:
+                raise ValueError("固件版本不存在")
+            path = self._firmware_dir / Path(release["stored_name"]).name
+            if not path.is_file():
+                raise ValueError("固件文件不存在，请重新上传")
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        session = self.sessions.get(device_id)
+        if session is None or getattr(getattr(session, "ws", None), "closed", False):
+            return web.json_response({"error": "设备不在线，无法下发 OTA"}, status=409)
+        token = secrets.token_urlsafe(32)
+        deployment_id = secrets.token_hex(12)
+        self._firmware_tokens[token] = {
+            "release_id": release["id"], "device_id": device_id,
+            "deployment_id": deployment_id, "expires_at": time.time() + 15 * 60}
+        url = self._firmware_public_base() + "/ota/firmware/" + token
+        if session.mcp is None:
+            self._firmware_tokens.pop(token, None)
+            return web.json_response({"error": "设备 MCP 尚未就绪"}, status=409)
+        self._firmware_deployments[deployment_id] = {
+            "id": deployment_id, "release_id": release["id"],
+            "version": release["version"], "expected_version": release["version"],
+            "device_id": device_id,
+            "url": url, "status": "queued", "progress": 5,
+            "message": "任务已创建", "created_at": time.time(),
+            "updated_at": time.time(), "logs": []}
+        asyncio.create_task(self._run_firmware_deployment(deployment_id, session))
+        self.account_store.audit_admin_action(
+            admin["id"], "firmware.deploy", "device", device_id, {
+                "release_id": release["id"], "version": release["version"]})
+        return web.json_response({
+            "accepted": True, "deployment_id": deployment_id,
+            "device_id": device_id, "release": self._firmware_json(release),
+            "message": "升级任务已创建，请查看进度和日志"}, status=202)
+
+    async def api_admin_firmware_deployments(self, request):
+        self._require_admin(request)
+        now = time.time()
+        for key in list(self._firmware_deployments):
+            if now - self._firmware_deployments[key]["updated_at"] > 3600:
+                self._firmware_deployments.pop(key, None)
+        return web.json_response({"deployments": list(self._firmware_deployments.values())})
+
+    async def api_admin_firmware_deployment_clear(self, request):
+        self._require_admin(request)
+        deployment_id = request.match_info["deployment_id"]
+        job = self._firmware_deployments.get(deployment_id)
+        if job is None:
+            return web.json_response({"error": "deployment not found"}, status=404)
+        job["logs"] = []
+        job["message"] = "日志已清除"
+        job["updated_at"] = time.time()
+        return web.json_response({"success": True})
+
+    async def ota_firmware_download(self, request):
+        token = request.match_info["token"]
+        entry = self._firmware_tokens.get(token)
+        if entry is None or entry["expires_at"] < time.time():
+            self._firmware_tokens.pop(token, None)
+            raise web.HTTPNotFound(text="firmware download link expired")
+        release = self.account_store.get_firmware_release(entry["release_id"])
+        if release is None:
+            raise web.HTTPNotFound(text="firmware release not found")
+        path = self._firmware_dir / Path(release["stored_name"]).name
+        if not path.is_file():
+            raise web.HTTPNotFound(text="firmware file not found")
+        response = web.StreamResponse(status=200, headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Disposition": "attachment; filename=firmware.bin",
+            "Content-Length": str(release["size_bytes"]),
+            "X-Firmware-Version": release["version"],
+            "X-Firmware-SHA256": release["sha256"],
+        })
+        await response.prepare(request)
+        sent = 0
+        try:
+            with path.open("rb") as handle:
+                while True:
+                    chunk = handle.read(64 * 1024)
+                    if not chunk:
+                        break
+                    await response.write(chunk)
+                    sent += len(chunk)
+            await response.write_eof()
+        except (ConnectionResetError, asyncio.CancelledError):
+            self._firmware_deployment_update(
+                entry["deployment_id"], "download_failed", 40,
+                "设备中断固件传输：已发送 {}/{} 字节".format(
+                    sent, release["size_bytes"]))
+            raise
+        if sent != int(release["size_bytes"]):
+            self._firmware_deployment_update(
+                entry["deployment_id"], "download_failed", 40,
+                "固件传输大小不一致：已发送 {}/{} 字节".format(
+                    sent, release["size_bytes"]))
+            return response
+        self._firmware_deployment_update(
+            entry["deployment_id"], "downloaded", 80,
+            "服务器已完整发送固件：{}/{} 字节".format(
+                sent, release["size_bytes"]))
+        return response
 
     async def api_admin_user_create(self, request):
         admin = self._require_admin(request)
@@ -2188,6 +2546,7 @@ class Dashboard:
                 "name": device["name"],
                 "session_id": s.session_id if online else "",
                 "bin_version": getattr(s, "bin_version", "?") if online else "?",
+                "firmware_version": getattr(s, "firmware_version", "?") if online else "?",
                 "online": online,
                 "idle": not online,
                 "listening": getattr(s, "listening", False) if online else False,

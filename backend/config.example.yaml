@@ -5,8 +5,8 @@ environment: "production"
 face_service:
   # Server-side YuNet/SFace face management service.
   base_url: "http://127.0.0.1:8090"
-  username: "tongtong"
-  password: "tongtong-2026"
+  username: ""
+  password: ""
 server:
   host: "0.0.0.0"
   port: 8080
@@ -50,6 +50,8 @@ dashboard:
 
 storage:
   database: "data/tongtong.db"
+  # Firmware binaries are kept outside Git; metadata is stored in SQLite.
+  firmware_directory: "data/firmware"
 
 memory:
   enabled: true

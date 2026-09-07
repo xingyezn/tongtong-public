@@ -1,4 +1,5 @@
 #include "websocket_protocol.h"
+#include <esp_app_desc.h>
 #include "board.h"
 #include "audio/audio_service.h"
 #include "system_info.h"
@@ -208,6 +209,8 @@ std::string WebsocketProtocol::GetHelloMessage() {
     cJSON* root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "type", "hello");
     cJSON_AddNumberToObject(root, "version", version_);
+    const auto* app_desc = esp_app_get_description();
+    cJSON_AddStringToObject(root, "firmware_version", app_desc->version);
     cJSON* features = cJSON_CreateObject();
 #if CONFIG_USE_SERVER_AEC
     cJSON_AddBoolToObject(features, "aec", true);
