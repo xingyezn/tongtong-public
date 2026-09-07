@@ -208,24 +208,28 @@ registration after onboarding if the service is not intended for public signup.
 
 ## Build and flash firmware
 
+Before building, read [`firmware/docs/BUILD_GUIDE_CN.md`](firmware/docs/BUILD_GUIDE_CN.md) completely. It is the single source of truth for the current firmware build and flash workflow, including IDF v5.5.5, compatibility fixes, UVC 480x320 configuration, backend selection, incremental/full builds, cache retention, serial validation, and automatic flashing.
+
 The default configuration targets the bread-compact Wi-Fi ESP32-S3 board. On
-Windows with ESP-IDF installed:
+Windows with ESP-IDF 5.5.5 installed:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/build_firmware.ps1
+Get-Content firmware\docs\BUILD_GUIDE_CN.md
+.\scripts\build_firmware.ps1 -TestBackendPort 8081
 ```
 
-Build and flash a connected device:
+Build and flash a connected device after confirming the target port and backend:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/build_firmware.ps1 -Flash -Port COM3
+.\scripts\build_firmware.ps1 -TestBackendPort 8081 -Flash -Port COM3
 ```
 
-The script regenerates private configuration, configures ESP-IDF, and applies
-the tracked low-memory UVC patch needed to share N16R8 PSRAM with ESP-SR and
-ESP-DL. Firmware configuration rejects the public `your-server.example`
-placeholder so a deployable image cannot silently contain an invalid OTA URL.
-Build outputs are private artifacts and must not be committed.
+For `main`, use the production backend. For non-`main` branches, the test
+backend port must be explicitly selected: 8081 is Hao Ran and 8082 is Hao Xin.
+The script applies the tracked UVC and ESP-SR/ESP-DL fixes, automatically flashes
+after a successful build when `-Flash` is supplied, and preserves verified build
+caches and firmware backups. Do not use upstream commands or `git clean` to
+remove those files. Build outputs remain local artifacts and must not be committed.
 
 ## Verification
 

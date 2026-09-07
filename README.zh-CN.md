@@ -171,22 +171,22 @@ python main.py
 
 ## 构建和烧录固件
 
-默认配置面向 bread-compact Wi-Fi ESP32-S3 板型。在已安装 ESP-IDF 的 Windows 上执行：
+编译前必须完整阅读 [`firmware/docs/BUILD_GUIDE_CN.md`](firmware/docs/BUILD_GUIDE_CN.md)。该文件是当前固件编译、烧录和串口验收的唯一推荐入口，包含 ESP-IDF v5.5.5、兼容修复、UVC 480×320、后端选择、增量/全量编译、缓存保留和自动烧录流程。
+
+默认配置面向 bread-compact Wi-Fi ESP32-S3 板型。在已安装 ESP-IDF v5.5.5 的 Windows 上执行：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/build_firmware.ps1
+Get-Content firmware\docs\BUILD_GUIDE_CN.md
+.\scripts\build_firmware.ps1 -TestBackendPort 8081
 ```
 
-构建并烧录已连接设备：
+确认目标串口和后端环境后，构建并烧录设备：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/build_firmware.ps1 -Flash -Port COM3
+.\scripts\build_firmware.ps1 -TestBackendPort 8081 -Flash -Port COM3
 ```
 
-脚本会重新生成私有配置、配置 ESP-IDF，并应用仓库内的低内存 UVC 补丁，使 N16R8 的
-PSRAM 能够同时供 ESP-SR 和 ESP-DL 使用。固件配置会拒绝公共占位地址
-`your-server.example`，避免生成包含无效 OTA 地址的可部署固件。构建产物属于私有文件，
-不得提交。
+`main` 分支使用生产后端；非 `main` 分支必须明确选择测试后端：8081 为浩然，8082 为浩鑫。脚本会应用 UVC 和 ESP-SR/ESP-DL 修复，指定 `-Flash` 且编译成功后自动烧录，并保留已验证构建缓存和固件备份。不要直接照搬上游命令，也不要使用 `git clean` 删除这些文件；构建产物仍属于本地文件，不得提交。
 
 ## 验证
 
