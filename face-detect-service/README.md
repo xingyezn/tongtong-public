@@ -1,22 +1,21 @@
 # face-detect-service
 
-服务器端人脸检测 HTTP 服务（方案一：YOLOv11n-face-v2 INT8 + OpenVINO）。
+服务器端人脸识别 HTTP 服务（YuNet + SFace）。
 
-- 部署模型：`yolo11n-face-v2` INT8 OpenVINO IR（GitHub Release v1.0.0），mAP@0.5≈0.9494，2.48 MB
 - 运行时仅依赖 `openvino` + `numpy` + `opencv`（无 PyTorch/Ultralytics），2 线程推理
 - 来源/报告：https://github.com/rubythalib-ai/face-detection-openvino-edge
 
 ## 目录
 
-- `ov_runtime.py` — 上游推理路径（vendored, MIT）：letterbox → OpenVINO → NMS
+- `recognition.py` — YuNet 人脸检测、SFace 特征提取和人脸库匹配
 - `app.py` — Flask + waitress REST 服务
 - `requirements.txt` — Python 依赖
 - `deploy/` — systemd unit + 一键安装脚本
 
 ## REST API（默认 8090）
 
-- `POST /detect` — 上传图片（`multipart` 字段 `image` 或裸 JPEG/PNG body）
-  返回：`{"count", "faces":[{"box":[x1,y1,x2,y2],"confidence"}], "size", "total_ms"}`
+- `POST /api/recognize` — 上传图片并返回检测到的人脸数量、已识别数量、身份、框和置信度
+  返回：`{"count", "detected_count", "recognized_count", "faces":[{"box":[x,y,w,h],"id","name","score"}], "threshold"}`
 - `GET /health` — 服务与模型状态
 - `GET /login` / `POST /login` — 后台登录
 - `GET /logout` — 退出后台登录
@@ -25,7 +24,6 @@
 - `GET /api/faces/{id}` — 查询单个人脸
 - `PUT/PATCH /api/faces/{id}` — 修改资料；可用 multipart 更新图片，也可用 JSON 更新文字字段
 - `DELETE /api/faces/{id}` — 删除人脸
-- `POST /api/recognize` — 上传图片进行 1:N 身份识别（multipart `image` 或裸图片）
 
 ## 人脸识别接口示例
 
@@ -42,7 +40,7 @@ curl -X PATCH -H "Content-Type: application/json" -d '{"name":"新名称","note"
 curl -X DELETE http://127.0.0.1:8090/api/faces/1
 ```
 
-人脸资料和特征向量保存在 `data/faces.db`，识别阈值默认为 cosine `0.6`，可通过 `FACE_RECOGNITION_THRESHOLD`、`FACE_RECOGNITION_DB`、`FACE_YUNET_MODEL`、`FACE_SFACE_MODEL` 环境变量调整。后台页面和管理接口需要登录，必须通过 `FACE_ADMIN_USERNAME`、`FACE_ADMIN_PASSWORD` 和 `FACE_AUTH_SECRET` 环境变量配置，不在仓库中保存默认账号、密码或密钥；设备使用的 `/detect` 和 `/health` 保持公开。
+人脸资料和特征向量保存在 `data/faces.db`，识别阈值默认为 cosine `0.6`，可通过 `FACE_RECOGNITION_THRESHOLD`、`FACE_RECOGNITION_DB`、`FACE_YUNET_MODEL`、`FACE_SFACE_MODEL` 环境变量调整。后台页面和管理接口需要登录，必须通过 `FACE_ADMIN_USERNAME`、`FACE_ADMIN_PASSWORD` 和 `FACE_AUTH_SECRET` 环境变量配置，不在仓库中保存默认账号、密码或密钥；公开接口仅保留 `/health`，人脸处理统一使用已认证的 `/api/recognize`。
 
 ## 部署（服务器执行）
 

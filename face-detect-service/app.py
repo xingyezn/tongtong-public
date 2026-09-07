@@ -10,10 +10,8 @@ import cv2
 import numpy as np
 from flask import Flask, jsonify, request, render_template_string, session, redirect
 
-from ov_runtime import FaceDetector
 from recognition import FaceRecognitionStore
 
-MODEL_DIR = os.getenv("FACE_DETECT_MODEL", "/opt/face-detect-service/model/int8_openvino_model")
 PORT = int(os.getenv("FACE_DETECT_PORT", "8090"))
 MAX_BYTES = int(os.getenv("FACE_DETECT_MAX_BYTES", "10")) * 1024 * 1024
 FACE_DB = os.getenv("FACE_RECOGNITION_DB", "/opt/face-detect-service/data/faces.db")
@@ -27,6 +25,10 @@ FACE_AUTH_SECRET = os.getenv("FACE_AUTH_SECRET", "")
 app = Flask(__name__)
 app.secret_key = FACE_AUTH_SECRET
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax", SESSION_COOKIE_SECURE=False)
+# Keep the human-readable summary as the first field in JSON responses.
+app.config["JSON_SORT_KEYS"] = False
+if hasattr(app, "json"):
+    app.json.sort_keys = False
 _lock = threading.Lock()
 _history_lock = threading.Lock()
 _history = deque(maxlen=10)
@@ -55,7 +57,7 @@ PAGE = r"""<!doctype html>
     input[type=file] { max-width: 100%; }
     button { border: 0; border-radius: 8px; padding: 10px 17px; background: #2563eb; color: white; cursor: pointer; font-size: 14px; }
     button:disabled { opacity: .6; cursor: wait; }
-    #result { white-space: pre-wrap; background: #101828; color: #d1fadf; border-radius: 8px; padding: 13px; margin-top: 14px; min-height: 22px; font: 13px ui-monospace,SFMono-Regular,Consolas,monospace; overflow: auto; }
+    #result { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; background: #101828; color: #d1fadf; border-radius: 8px; padding: 13px; margin: 0; min-height: 22px; height: 100%; font: 13px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace; overflow: auto; }
     .table-wrap { overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 800px; }
     th, td { text-align: left; border-bottom: 1px solid #edf0f5; padding: 10px 8px; vertical-align: top; }
@@ -63,6 +65,12 @@ PAGE = r"""<!doctype html>
     .ok { color: #067647; font-weight: 600; } .bad { color: #b42318; font-weight: 600; }
     .faces { max-width: 420px; white-space: pre-wrap; word-break: break-word; color: #475467; }
     .thumb { width: 72px; height: 54px; object-fit: cover; border-radius: 5px; border: 1px solid #d0d5dd; background: #f2f4f7; }
+    .test-visual { margin-top: 14px; overflow: auto; background: #f8fafc; border: 1px solid #e4e8f0; border-radius: 8px; padding: 8px; max-width: 480px; height: 320px; display: flex; align-items: center; justify-content: center; }
+    #test-canvas { display: block; max-width: 480px; max-height: 320px; width: auto; height: auto; }
+    .test-result-layout { display: grid; grid-template-columns: minmax(0, 480px) minmax(300px, 1fr); gap: 14px; align-items: stretch; margin-top: 14px; }
+    .test-result-layout .test-visual { margin-top: 0; min-width: 0; }
+    .test-result-layout .json-panel { min-width: 0; height: 320px; }
+    @media(max-width:800px){.test-result-layout{grid-template-columns:1fr;}.test-result-layout .json-panel{min-height:220px;}}
     .face-form { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; align-items:end; }
     .face-form label { display:flex; flex-direction:column; gap:5px; color:#667085; font-size:13px; }
     .face-form input { box-sizing:border-box; width:100%; padding:9px; border:1px solid #d0d5dd; border-radius:7px; font-size:14px; }
@@ -77,7 +85,7 @@ PAGE = r"""<!doctype html>
 </head>
 <body>
 <main>
-  <div class="topline"><div><h1>人脸检测服务</h1><div class="muted">YOLOv11n-face-v2 INT8 + OpenVINO · 最近 10 次检测请求</div></div><div><span id="health" class="muted">检查服务状态中…</span>　<a href="/logout">退出登录</a></div></div>
+  <div class="topline"><div><h1>人脸识别服务</h1><div class="muted">YuNet + SFace · 最近 10 次识别请求</div></div><div><span id="health" class="muted">检查服务状态中…</span>　<a href="/logout">退出登录</a></div></div>
   <section class="card">
     <div class="topline"><h2>服务器监控</h2><span id="metrics-time" class="muted">加载中…</span></div>
     <div class="metrics">
@@ -90,8 +98,11 @@ PAGE = r"""<!doctype html>
   </section>
   <section class="card">
     <h2>手动测试</h2>
-    <div class="form"><input id="image" type="file" accept="image/jpeg,image/png,image/webp"><button id="test" onclick="runTest()">上传并检测</button></div>
-    <div id="result">请选择一张图片后点击“上传并检测”。</div>
+    <div class="form"><input id="image" type="file" accept="image/jpeg,image/png,image/webp"><button id="test" onclick="runTest()">上传并识别</button></div>
+    <div class="test-result-layout">
+      <div id="test-visual" class="test-visual" hidden><canvas id="test-canvas"></canvas></div>
+      <div class="json-panel"><div id="result">请选择一张图片后点击“上传并识别”。</div></div>
+    </div>
   </section>
   <section class="card">
     <div class="topline"><h2>人脸库管理</h2><span id="face-status" class="muted">加载中…</span></div>
@@ -122,8 +133,12 @@ async function runTest() {
   const file = document.getElementById('image').files[0], btn = document.getElementById('test'), out = document.getElementById('result');
   if (!file) { out.textContent = '请先选择图片。'; return; }
   btn.disabled = true; out.textContent = '检测中…'; const fd = new FormData(); fd.append('image', file);
-  try { const res = await fetch('/detect', {method:'POST', body:fd}); out.textContent = JSON.stringify(await res.json(), null, 2); }
+  try { const res = await fetch('/api/recognize', {method:'POST', body:fd}); const data=await res.json(); out.textContent = JSON.stringify(data, null, 2); drawTestResult(file, data); }
   catch (e) { out.textContent = '请求失败：' + e; } finally { btn.disabled = false; loadHistory(); }
+}
+function drawTestResult(file, data) {
+  const holder=document.getElementById('test-visual'), canvas=document.getElementById('test-canvas');
+  const image=new Image(); image.onload=()=>{const maxWidth=480, maxHeight=320, scale=Math.min(1,maxWidth/image.width,maxHeight/image.height); canvas.width=Math.round(image.width*scale); canvas.height=Math.round(image.height*scale); const ctx=canvas.getContext('2d'); ctx.drawImage(image,0,0,canvas.width,canvas.height); ctx.lineWidth=Math.max(2,3*scale); ctx.font=`${Math.max(13,18*scale)}px sans-serif`; (data.detected_faces||[]).forEach(face=>{const [x,y,w,h]=face.box||[]; const color=face.recognized?'#16a34a':'#f59e0b'; ctx.strokeStyle=color;ctx.fillStyle=color;ctx.strokeRect(x*scale,y*scale,w*scale,h*scale);const label=(face.name||'unknown')+' '+(face.score==null?'未匹配':Number(face.score).toFixed(3));const tw=ctx.measureText(label).width+10, ty=Math.max(20,y*scale);ctx.fillRect(x*scale,ty-20,tw,20);ctx.fillStyle='#fff';ctx.fillText(label,x*scale+5,ty-5);}); holder.hidden=false;}; image.src=URL.createObjectURL(file);
 }
 async function loadFaces() {
   try { const data=await (await fetch('/api/faces')).json(); document.getElementById('face-status').textContent=data.recognition_ready?'识别模型正常 · '+data.count+' 条':'识别模型未就绪'; const rows=data.faces||[]; document.getElementById('faces').innerHTML=rows.length?rows.map(f=>`<tr><td>${esc(f.id)}</td><td>${f.image_url?`<a href="${esc(f.image_url)}" target="_blank"><img class="thumb" src="${esc(f.image_url)}"></a>`:'-'}</td><td>${esc(f.name)}</td><td>${esc(f.external_id||'-')}</td><td>${esc(f.note||'-')}</td><td>${esc(f.updated_at)}</td><td><button class="secondary" onclick="editFace(${f.id})">编辑</button> <button class="danger" onclick="deleteFace(${f.id})">删除</button></td></tr>`).join(''):'<tr><td colspan="7" class="muted">暂无人脸资料</td></tr>'; window.faceRows=rows; } catch(e) { document.getElementById('face-status').textContent='读取失败'; }
@@ -160,7 +175,7 @@ LOGIN_PAGE = r"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><
 
 @app.before_request
 def require_login():
-    public_paths = ("/login", "/logout", "/health", "/detect")
+    public_paths = ("/login", "/logout", "/health")
     if request.path in public_paths:
         return None
     if session.get("face_admin"):
@@ -169,13 +184,10 @@ def require_login():
         return jsonify({"error": "authentication required", "login": "/login"}), 401
     return redirect("/login")
 
-try:
-    _detector = FaceDetector(MODEL_DIR)
-    _model_desc = str(MODEL_DIR)
-except Exception as exc:  # surface at request time so /health stays useful
-    _detector = None
-    _model_desc = f"NOT LOADED: {exc}"
-
+# The legacy YOLO/OpenVINO detector is intentionally disabled.  All face
+# detection and recognition now goes through YuNet + SFace below.
+_detector = None
+_model_desc = "YuNet + SFace"
 _face_store = FaceRecognitionStore(FACE_DB, FACE_YUNET_MODEL, FACE_SFACE_MODEL, FACE_RECOGNITION_THRESHOLD)
 
 
@@ -381,6 +393,7 @@ def recognize_face():
         record.update({
             "count": result.get("count", 0),
             "faces": result.get("faces", []),
+            "detected_faces": result.get("detected_faces", []),
             "threshold": result.get("threshold"),
             "total_ms": round((time.perf_counter() - started) * 1000.0, 2),
             "ok": True,
@@ -468,7 +481,7 @@ def detect():
     if _detector is None:
         record["error"] = _model_desc
         _record(record)
-        return jsonify({"error": _model_desc}), 500
+        return jsonify({"error": _model_desc}), 410
     try:
         img, image_data, image_type = _image_from_request()
     except ValueError as exc:

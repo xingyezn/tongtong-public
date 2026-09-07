@@ -4,7 +4,6 @@
 set -euo pipefail
 
 APP_DIR=/opt/face-detect-service
-MODEL_URL=https://github.com/rubythalib-ai/face-detection-openvino-edge/releases/download/v1.0.0/yolo11n-face-v2_openvino.tar.gz
 RECOG_DIR=$APP_DIR/model/recognition
 
 mkdir -p "$APP_DIR"
@@ -20,14 +19,6 @@ echo "==> Python venv"
 python3 -m venv venv
 ./venv/bin/python -m pip install --upgrade pip -q
 ./venv/bin/pip install -r requirements.txt
-
-echo "==> Download + extract OpenVINO INT8 model"
-mkdir -p model
-if [ ! -d model/int8_openvino_model ]; then
-  curl -fsSL -o /tmp/yolo11n-face-v2_openvino.tar.gz "$MODEL_URL"
-  tar xzf /tmp/yolo11n-face-v2_openvino.tar.gz -C model
-fi
-ls model/
 
 echo "==> Download face recognition models"
 mkdir -p "$RECOG_DIR" "$APP_DIR/data"

@@ -111,12 +111,21 @@ class FaceRecognitionStore:
             raise RuntimeError("recognition model not ready: " + self.error)
         faces = self._faces(image)
         if len(faces) == 0:
-            return {"count": 0, "faces": [], "threshold": self.threshold, "message": "图片中未检测到人脸。"}
+            return {"summary": "共检测到 0 张人脸，识别出 0 张；图片中未检测到人脸。",
+                    "count": 0, "detected_count": 0, "recognized_count": 0,
+                    "faces": [], "threshold": self.threshold}
         with self._lock:
             rows = list(self._db.execute("SELECT * FROM faces"))
         if not rows:
-            return {"count": 0, "faces": [], "threshold": self.threshold, "message": "人脸库为空。"}
+            return {"summary": "共检测到 {} 张人脸，识别出 0 张；人脸库为空。".format(len(faces)),
+                    "count": 0, "detected_count": len(faces),
+                    "recognized_count": 0, "faces": [],
+                    "detected_faces": [{"box": [round(float(v), 1) for v in face[:4]],
+                                        "recognized": False, "name": "unknown"}
+                                       for face in faces],
+                    "threshold": self.threshold}
         results = []
+        detected = []
         for face in faces:
             aligned = self._recognizer.alignCrop(image, face)
             query = np.asarray(self._recognizer.feature(aligned), dtype=np.float32).reshape(-1)
@@ -127,8 +136,29 @@ class FaceRecognitionStore:
                 if best is None or score > best["score"]:
                     best = {"id": row["id"], "name": row["name"], "external_id": row["external_id"], "score": score,
                             "box": [round(float(v), 1) for v in face[:4]]}
-            if best and best["score"] > self.threshold:
+            box = [round(float(v), 1) for v in face[:4]]
+            if best:
                 best["score"] = round(best["score"], 4)
+            known = bool(best and best["score"] > self.threshold)
+            detected_item = {"box": box, "recognized": known}
+            if known:
                 results.append(best)
-        return {"count": len(results), "faces": results, "threshold": self.threshold,
-                "message": "未找到相似度大于 {:.2f} 的已登记人脸。".format(self.threshold) if not results else None}
+                detected_item.update({"id": best["id"], "name": best["name"],
+                                      "score": best["score"]})
+            else:
+                detected_item.update({"name": "unknown"})
+            detected.append(detected_item)
+        names = []
+        for item in results:
+            if item["name"] not in names:
+                names.append(item["name"])
+        known_names = "、".join(names) if names else "无"
+        summary = "共检测到 {} 张人脸，识别出 {} 张；认识的人有：{}。".format(
+            len(faces), len(results), known_names)
+        if not results:
+            summary += "未找到相似度大于 {:.2f} 的已登记人脸。".format(self.threshold)
+        return {"summary": summary, "count": len(results),
+                "detected_count": len(faces),
+                "recognized_count": len(results), "faces": results,
+                "detected_faces": detected,
+                "threshold": self.threshold}

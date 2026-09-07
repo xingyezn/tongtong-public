@@ -1,5 +1,5 @@
 [Unit]
-Description=Face detection HTTP service (YOLOv11n-face-v2 INT8 + OpenVINO)
+Description=Face recognition HTTP service (YuNet + SFace)
 After=network-online.target
 Wants=network-online.target
 
@@ -8,7 +8,6 @@ Type=simple
 WorkingDirectory=/opt/face-detect-service
 Environment=PYTHONUNBUFFERED=1
 Environment=OV_NUM_THREADS=2
-Environment=FACE_DETECT_MODEL=/opt/face-detect-service/model/int8_openvino_model
 Environment=FACE_DETECT_PORT=8090
 ExecStartPre=/bin/bash /opt/face-detect-service/deploy/setup-port-monitor.sh
 ExecStart=/opt/face-detect-service/venv/bin/python app.py
