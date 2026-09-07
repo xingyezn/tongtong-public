@@ -34,11 +34,27 @@ class WsGateway:
 
     def _device_config(self, device_id: str) -> dict:
         config = copy.deepcopy(self.config)
+        config["motor_defaults"] = {
+            "speed": 85, "duration_ms": 1000, "swap_wheels": False}
         if self.account_store:
             config.setdefault("dashscope", {}).update(
                 self.account_store.get_model_settings(device_id))
             config.setdefault("dashscope", {})["tool_instructions"] = (
                 self.account_store.get_global_setting("tool_instructions"))
+            for key, minimum, maximum in (("motor_default_speed", 0, 100),
+                                          ("motor_default_duration_ms", 1, 10000)):
+                value = self.account_store.get_global_setting(key)
+                try:
+                    value = int(value)
+                except (TypeError, ValueError):
+                    continue
+                config["motor_defaults"][
+                    "speed" if key.endswith("speed") else "duration_ms"] = max(
+                        minimum, min(maximum, value))
+            swap_value = self.account_store.get_global_setting(
+                "motor_swap_wheels", "0")
+            config["motor_defaults"]["swap_wheels"] = str(
+                swap_value).strip().lower() in ("1", "true", "yes", "on")
             config.setdefault("vad", {}).update(
                 self.account_store.get_vad_settings(device_id))
             features = self.account_store.get_device_features(device_id)

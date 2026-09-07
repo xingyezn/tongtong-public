@@ -8,6 +8,7 @@
 """
 
 import asyncio
+import copy
 import inspect
 import json
 import logging
@@ -71,7 +72,7 @@ class McpBridge:
             req["call_id"] = call_id  # 自定义字段，关联 Omni tool_call id
         return req
 
-    def make_omni_tools(self) -> list:
+    def make_omni_tools(self, motor_defaults=None) -> list:
         """Convert the device MCP tools/list result to Realtime function tools.
 
         The ESP32 is the source of truth for capabilities.  Keeping this
@@ -88,12 +89,22 @@ class McpBridge:
             annotations = tool.get("annotations") or {}
             if annotations.get("audience") == ["user"]:
                 continue
-            parameters = tool.get("inputSchema") or {
+            parameters = copy.deepcopy(tool.get("inputSchema") or {
                 "type": "object",
                 "properties": {},
-            }
+            })
             if not isinstance(parameters, dict):
                 continue
+            if (motor_defaults and isinstance(name, str)
+                    and name.startswith("self.chassis.")):
+                properties = parameters.setdefault("properties", {})
+                if isinstance(properties, dict):
+                    speed = motor_defaults.get("speed")
+                    duration = motor_defaults.get("duration_ms")
+                    if "speed" in properties and isinstance(speed, int):
+                        properties["speed"]["default"] = speed
+                    if "duration_ms" in properties and isinstance(duration, int):
+                        properties["duration_ms"]["default"] = duration
             result.append({
                 "type": "function",
                 "function": {

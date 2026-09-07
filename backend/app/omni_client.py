@@ -78,6 +78,20 @@ FACE_TOOL_INSTRUCTIONS = (
     "这些工具是服务器端人脸接口的实际调用，不要只根据记忆直接回答。"
 )
 
+def motor_tool_instructions(config):
+    defaults = config.get("motor_defaults", {})
+    speed = defaults.get("speed", 85)
+    duration_ms = defaults.get("duration_ms", 1000)
+    return (
+        "电机执行规则：涉及电机动作时必须调用 MCP 工具，禁止只用文字回复或复用历史动作结果。"
+        "自然语言指令与工具的固定对应关系为：‘前进’调用 self.chassis.go_forward；"
+        "‘后退’调用 self.chassis.go_back；‘左转’调用 self.chassis.turn_left；"
+        "‘右转’调用 self.chassis.turn_right；‘原地旋转’或‘旋转’调用 self.chassis.spin。"
+        "识别到这些指令后，直接调用对应工具，不要来回确认。默认速度为 {}，默认持续时间为 {}ms；"
+        "只有用户明确指定速度或持续时间时，才使用用户指定的值。每次动作都必须使用当前工具规则中的默认值，"
+        "动作完成后再简短告知结果。"
+    ).format(speed, duration_ms)
+
 
 class _PersistentRealtimeContext:
     """Reuse one Realtime WebSocket for the lifetime of a device session."""
@@ -190,6 +204,7 @@ class OmniClient:
             self.instructions.strip(),
             LANGUAGE_PROMPTS[self.language],
             tool_instructions.strip(),
+            motor_tool_instructions(self.config),
             FACE_TOOL_INSTRUCTIONS,
         ]
         user_memory = self.config.get("dashscope", {}).get("user_memory_prompt", "")

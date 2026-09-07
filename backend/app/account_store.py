@@ -22,7 +22,12 @@ VAD_SETTING_KEYS = {"silence_duration_ms", "energy_threshold"}
 INTERRUPTION_SETTING_KEYS = {
     "automatic_interrupt", "button_interrupt", "double_click_end",
 }
-GLOBAL_SETTING_KEYS = {"tool_instructions"}
+GLOBAL_SETTING_KEYS = {
+    "tool_instructions",
+    "motor_default_speed",
+    "motor_default_duration_ms",
+    "motor_swap_wheels",
+}
 
 
 class AccountError(ValueError):

@@ -20,7 +20,7 @@ private:
     static constexpr int kPwmFrequencyHz = 20000;
     static constexpr int kPwmResolutionBits = 10;
     static constexpr int kPwmMaxDuty = (1 << kPwmResolutionBits) - 1;
-    static constexpr int kDefaultSpeed = 60;
+    static constexpr int kDefaultSpeed = 85;
     static constexpr int kDefaultDurationMs = 1000;
     static constexpr int kMaxDurationMs = 10000;
 
@@ -275,27 +275,27 @@ public:
         mcp_server.AddTool("self.chassis.get_state", "Get the chassis motor state. Motors are stopped after every motion command.",
             PropertyList(), [this](const PropertyList&) -> ReturnValue { return GetStateJson(); });
 
-        mcp_server.AddTool("self.chassis.go_forward", "Drive both wheels forward. speed is 0-100 and duration_ms is 1-10000. The chassis stops automatically when the time expires.",
+        mcp_server.AddTool("self.chassis.go_forward", "前进：驱动左右两个电机向前行驶。除非用户明确指定，否则使用默认速度85、持续时间1000ms，直接执行无需确认。速度范围0-100，持续时间范围1-10000ms，到时自动停止。",
             MotionProperties(), [this](const PropertyList& properties) -> ReturnValue {
                 int speed = properties["speed"].value<int>();
                 return DriveFor(speed, speed, properties["duration_ms"].value<int>());
             });
-        mcp_server.AddTool("self.chassis.go_back", "Drive both wheels backward. speed is 0-100 and duration_ms is 1-10000. The chassis stops automatically when the time expires.",
+        mcp_server.AddTool("self.chassis.go_back", "后退：驱动左右两个电机向后行驶。除非用户明确指定，否则使用默认速度85、持续时间1000ms，直接执行无需确认。速度范围0-100，持续时间范围1-10000ms，到时自动停止。",
             MotionProperties(), [this](const PropertyList& properties) -> ReturnValue {
                 int speed = properties["speed"].value<int>();
                 return DriveFor(-speed, -speed, properties["duration_ms"].value<int>());
             });
-        mcp_server.AddTool("self.chassis.turn_left", "Turn left in place: left wheel backward and right wheel forward. speed is 0-100 and duration_ms is 1-10000; the chassis then stops.",
+        mcp_server.AddTool("self.chassis.turn_left", "左转：左轮后退、右轮前进，使底盘原地向左旋转。除非用户明确指定，否则使用默认速度85、持续时间1000ms，直接执行无需确认。速度范围0-100，持续时间范围1-10000ms，完成后自动停止。",
             MotionProperties(), [this](const PropertyList& properties) -> ReturnValue {
                 int speed = properties["speed"].value<int>();
                 return DriveFor(-speed, speed, properties["duration_ms"].value<int>());
             });
-        mcp_server.AddTool("self.chassis.turn_right", "Make a short right turn: left wheel forward and right wheel backward. Use a short duration_ms (typically 300-1000 ms); speed is 0-100 and the chassis then stops.",
+        mcp_server.AddTool("self.chassis.turn_right", "右转：左轮前进、右轮后退，使底盘原地向右旋转。除非用户明确指定，否则使用默认速度85、持续时间1000ms，直接执行无需确认。速度范围0-100，持续时间范围1-10000ms，完成后自动停止。",
             MotionProperties(), [this](const PropertyList& properties) -> ReturnValue {
                 int speed = properties["speed"].value<int>();
                 return DriveFor(speed, -speed, properties["duration_ms"].value<int>());
             });
-        mcp_server.AddTool("self.chassis.spin", "Spin continuously clockwise in place with the left wheel forward and right wheel backward. Use a longer duration_ms (typically 2000-5000 ms) for a full turn; speed is 0-100 and the chassis then stops.",
+        mcp_server.AddTool("self.chassis.spin", "原地旋转：左轮前进、右轮后退，使底盘按顺时针方向原地旋转。除非用户明确指定，否则使用默认速度85、持续时间1000ms，直接执行无需确认。速度范围0-100，持续时间范围1-10000ms，完成后自动停止。",
             MotionProperties(), [this](const PropertyList& properties) -> ReturnValue {
                 int speed = properties["speed"].value<int>();
                 return DriveFor(speed, -speed, properties["duration_ms"].value<int>());

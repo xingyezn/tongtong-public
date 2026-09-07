@@ -907,6 +907,7 @@ async function saveVad() {
 // ---- 模型/音色/人物设定 ----
 let hardwareTools = {};
 let hardwareToolsDevice = "";
+let motorDefaults = { speed: 85, duration_ms: 1000, swap_wheels: false };
 
 const HARDWARE_TEST_GROUPS = [
   { title: "电机驱动", items: [
@@ -946,11 +947,11 @@ function hardwareArgs(name) {
   if (name === "self.led.set_color") return ledRgbValues();
   if (name === "self.chassis.test_direct_drive") {
     return { left_direction: 1, right_direction: 1,
-             duration_ms: parseInt($("test-duration").value, 10) || 500 };
+             duration_ms: parseInt($("test-duration").value, 10) || motorDefaults.duration_ms };
   }
   if (name.indexOf("self.chassis.") === 0 && name !== "self.chassis.stop") {
-    return { speed: parseInt($("test-speed").value, 10) || 30,
-             duration_ms: parseInt($("test-duration").value, 10) || 500 };
+    return { speed: parseInt($("test-speed").value, 10) || motorDefaults.speed,
+             duration_ms: parseInt($("test-duration").value, 10) || motorDefaults.duration_ms };
   }
   if (name === "self.camera.take_photo") {
     return { question: "检查摄像头是否能正常拍照" };
@@ -1061,9 +1062,17 @@ function renderHardwareTests() {
         (available ? "" : "（不可用）") + '</button>';
     }).join("");
     const faceActions = group.items.some(item => item[0] === "self.camera.take_photo") ? '<div class="hint" style="margin:8px 0">服务器端人脸测试（识别、录入或替换照片都会重新拍摄当前画面）</div><div class="test-actions"><button class="btn" onclick="runFaceTest(\'recognize_current\', this)">识别当前画面</button><button class="btn" onclick="runFaceTest(\'list\', this)">查询已录入人脸</button><button class="btn" onclick="runFaceTest(\'register_current\', this)">录入当前画面</button><button class="btn" onclick="runFaceTest(\'delete\', this)">删除人脸</button><button class="btn" onclick="runFaceTest(\'update\', this)">修改人脸</button></div>' : '';
-    const groupInputs = group.items.some(item => item[0].indexOf("self.chassis.") === 0)
-      ? '<div class="row" style="margin-bottom:8px"><label class="muted">速度 <input class="test-input" id="test-speed" type="number" min="0" max="100" value="30"></label>' +
-        '<label class="muted">持续时间(ms) <input class="test-input" id="test-duration" type="number" min="1" max="10000" value="500"></label></div>'
+    const groupInputs = group.title === "电机驱动"
+      ? '<div class="row" style="margin-bottom:8px"><label class="muted">默认速度 <input class="test-input" id="user-motor-default-speed" type="number" min="0" max="100" value="' + motorDefaults.speed + '"></label>' +
+        '<label class="muted">默认持续时间(ms) <input class="test-input" id="user-motor-default-duration" type="number" min="1" max="10000" value="' + motorDefaults.duration_ms + '"></label>' +
+        '<label class="muted"><input id="user-motor-swap-wheels" type="checkbox"' + (motorDefaults.swap_wheels ? ' checked' : '') + '> 互换左右轮</label>' +
+        '<button class="btn" onclick="saveUserMotorDefaults()">保存电机参数</button><span class="muted" id="user-motor-status"></span></div>' +
+        '<div class="hint" style="margin-bottom:8px">保存后同时应用于大模型和手动测试；互换左右轮可在不改变接线的情况下修正方向。</div>' +
+        '<div class="row" style="margin-bottom:8px"><label class="muted">本次测试速度 <input class="test-input" id="test-speed" type="number" min="0" max="100" value="' + motorDefaults.speed + '"></label>' +
+        '<label class="muted">本次测试持续时间(ms) <input class="test-input" id="test-duration" type="number" min="1" max="10000" value="' + motorDefaults.duration_ms + '"></label></div>'
+      : group.items.some(item => item[0].indexOf("self.chassis.") === 0)
+      ? '<div class="row" style="margin-bottom:8px"><label class="muted">速度 <input class="test-input" id="test-speed" type="number" min="0" max="100" value="85"></label>' +
+        '<label class="muted">持续时间(ms) <input class="test-input" id="test-duration" type="number" min="1" max="10000" value="1000"></label></div>'
       : group.items.some(item => item[0].indexOf("self.screen.") === 0)
         ? '<div class="row" style="margin-bottom:8px"><label class="muted">亮度 <input class="test-input" id="test-brightness" type="number" min="0" max="100" value="50"></label>' +
           '<label class="muted">主题 <select id="test-theme"><option value="light">浅色</option><option value="dark">深色</option></select></label></div>'
@@ -1082,6 +1091,8 @@ function renderHardwareTests() {
     const input = $(id);
     if (input) input.value = value;
   });
+  if ($("test-speed")) $("test-speed").value = motorDefaults.speed;
+  if ($("test-duration")) $("test-duration").value = motorDefaults.duration_ms;
   if ($("test-led-color")) syncLedColorFromRgb();
 }
 
@@ -1140,6 +1151,52 @@ async function runFaceTest(operation, button) {
   if (operation === "delete" || operation === "update") { const id = parseInt(prompt("请输入人脸 ID"), 10); if (!Number.isInteger(id)) return; args.face_id = id; if (operation === "delete" && !confirm("确认删除人脸 ID " + id + "？")) return; if (operation === "update") { const name = prompt("请输入新姓名（留空表示不修改）", ""); if (name) args.name = name; } }
   button.disabled = true; $("hardware-test-result").textContent = "执行服务器端人脸测试中：" + operation;
   try { const r = await fetch("/api/test/face", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({device_id:device.device_id, operation:operation, arguments:args})}); const data = await r.json(); if (!r.ok) throw new Error(data.error || "调用失败"); $("hardware-test-result").textContent = JSON.stringify(data.result, null, 2); if (operation !== "list" && operation !== "delete") showCameraPreview(device.device_id); showToast("服务器端人脸测试完成", "ok"); } catch(e) { $("hardware-test-result").textContent = "失败：" + e.message; showToast("服务器端人脸测试失败：" + e.message, "err"); } finally { button.disabled = false; }
+}
+
+async function loadUserMotorDefaults() {
+  try {
+    const response = await fetch("/api/motor-settings");
+    const settings = await response.json();
+    if (!response.ok) throw new Error(settings.error || "加载电机参数失败");
+    motorDefaults = Object.assign(motorDefaults, settings.motor_defaults || {});
+    if (!$('user-motor-default-speed')) return;
+    $("user-motor-default-speed").value = motorDefaults.speed;
+    $("user-motor-default-duration").value = motorDefaults.duration_ms;
+    $("user-motor-swap-wheels").checked = !!motorDefaults.swap_wheels;
+    updateHardwareTestPanel();
+  } catch (error) {
+    $("user-motor-status").textContent = error.message;
+    $("user-motor-status").style.color = "var(--bad)";
+  }
+}
+
+async function saveUserMotorDefaults() {
+  const speed = parseInt($("user-motor-default-speed").value, 10);
+  const duration_ms = parseInt($("user-motor-default-duration").value, 10);
+  const swap_wheels = $("user-motor-swap-wheels").checked;
+  const status = $("user-motor-status");
+  if (!Number.isInteger(speed) || speed < 0 || speed > 100 ||
+      !Number.isInteger(duration_ms) || duration_ms < 1 || duration_ms > 10000) {
+    status.textContent = "速度或持续时间范围无效";
+    status.style.color = "var(--bad)";
+    return;
+  }
+  try {
+    const response = await fetch("/api/motor-settings", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({speed, duration_ms, swap_wheels}),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "保存电机参数失败");
+    motorDefaults = result.motor_defaults;
+    status.textContent = "已持久化并应用";
+    status.style.color = "var(--ok)";
+    updateHardwareTestPanel();
+  } catch (error) {
+    status.textContent = error.message;
+    status.style.color = "var(--bad)";
+  }
 }
 
 function renderLocalFaceResult(result) {
@@ -1386,6 +1443,7 @@ $("autorefresh").addEventListener("change", e => { autoRefresh = e.target.checke
 setInterval(() => { if (autoRefresh) refresh(); }, 3000);
 refresh();
 loadMemories();
+loadUserMotorDefaults();
 </script>
 </body>
 </html>
@@ -1524,6 +1582,8 @@ class Dashboard:
         app.router.add_post("/api/test/face", self.api_test_face)
         app.router.add_post("/api/camera/upload", self.api_camera_upload)
         app.router.add_get("/api/camera/latest", self.api_camera_latest)
+        app.router.add_get("/api/motor-settings", self.api_motor_settings_get)
+        app.router.add_post("/api/motor-settings", self.api_motor_settings_set)
         app.router.add_get("/api/admin/overview", self.api_admin_overview)
         app.router.add_get("/api/admin/settings", self.api_admin_settings_get)
         app.router.add_post("/api/admin/settings", self.api_admin_settings_set)
@@ -1707,12 +1767,33 @@ class Dashboard:
         self._require_admin(request)
         from .omni_client import DEFAULT_TOOL_INSTRUCTIONS
         face_service = dict(self.config.get("face_service", {}))
+        motor_defaults = {
+            "speed": self._global_int_setting("motor_default_speed", 85, 0, 100),
+            "duration_ms": self._global_int_setting(
+                "motor_default_duration_ms", 1000, 1, 10000),
+            "swap_wheels": self._global_bool_setting(
+                "motor_swap_wheels", False),
+        }
         return web.json_response({
             "tool_instructions": (
                 self.account_store.get_global_setting("tool_instructions")
                 or DEFAULT_TOOL_INSTRUCTIONS),
             "face_service": face_service,
+            "motor_defaults": motor_defaults,
         })
+
+    def _global_int_setting(self, key, default, minimum, maximum):
+        try:
+            value = int(self.account_store.get_global_setting(key))
+        except (TypeError, ValueError):
+            value = default
+        return max(minimum, min(maximum, value))
+
+    def _global_bool_setting(self, key, default=False):
+        value = self.account_store.get_global_setting(key, "")
+        if value == "":
+            return default
+        return str(value).strip().lower() in ("1", "true", "yes", "on")
 
     async def api_admin_settings_set(self, request):
         admin = self._require_admin(request)
@@ -1723,6 +1804,32 @@ class Dashboard:
                 raise ValueError("invalid tool instructions")
             self.account_store.set_global_setting(
                 "tool_instructions", tool_instructions)
+            motor_speed = self._global_int_setting(
+                "motor_default_speed", 85, 0, 100)
+            motor_duration = self._global_int_setting(
+                "motor_default_duration_ms", 1000, 1, 10000)
+            motor_swap_wheels = self._global_bool_setting(
+                "motor_swap_wheels", False)
+            if "motor_defaults" in data:
+                motor_data = data.get("motor_defaults") or {}
+                if not isinstance(motor_data, dict):
+                    raise ValueError("invalid motor defaults")
+                try:
+                    motor_speed = int(motor_data.get("speed", motor_speed))
+                    motor_duration = int(motor_data.get(
+                        "duration_ms", motor_duration))
+                    motor_swap_wheels = bool(motor_data.get(
+                        "swap_wheels", motor_swap_wheels))
+                except (TypeError, ValueError):
+                    raise ValueError("invalid motor defaults")
+                if not 0 <= motor_speed <= 100 or not 1 <= motor_duration <= 10000:
+                    raise ValueError("invalid motor defaults")
+                self.account_store.set_global_setting(
+                    "motor_default_speed", str(motor_speed))
+                self.account_store.set_global_setting(
+                    "motor_default_duration_ms", str(motor_duration))
+                self.account_store.set_global_setting(
+                    "motor_swap_wheels", "1" if motor_swap_wheels else "0")
             face_data = data.get("face_service")
             if face_data is not None:
                 if not isinstance(face_data, dict):
@@ -1751,6 +1858,9 @@ class Dashboard:
             for session in self.sessions.values():
                 session.config.setdefault("dashscope", {})[
                     "tool_instructions"] = tool_instructions
+                session.config["motor_defaults"] = {
+                    "speed": motor_speed, "duration_ms": motor_duration,
+                    "swap_wheels": motor_swap_wheels}
             self.account_store.audit_admin_action(
                 admin["id"], "settings.update", "app", "tool_instructions", {})
         except (ValueError, TypeError) as exc:
@@ -1758,7 +1868,56 @@ class Dashboard:
         return web.json_response({
             "tool_instructions": tool_instructions,
             "face_service": dict(self.config.get("face_service", {})),
+            "motor_defaults": {"speed": motor_speed,
+                               "duration_ms": motor_duration,
+                               "swap_wheels": motor_swap_wheels},
         })
+
+    async def api_motor_settings_get(self, request):
+        self._require_user(request)
+        return web.json_response({
+            "motor_defaults": {
+                "speed": self._global_int_setting(
+                    "motor_default_speed", 85, 0, 100),
+                "duration_ms": self._global_int_setting(
+                    "motor_default_duration_ms", 1000, 1, 10000),
+                "swap_wheels": self._global_bool_setting(
+                    "motor_swap_wheels", False),
+            }
+        })
+
+    async def api_motor_settings_set(self, request):
+        self._require_user(request)
+        try:
+            data = await request.json()
+            if not isinstance(data, dict):
+                raise ValueError("invalid motor settings")
+            speed = int(data.get("speed", 85))
+            duration_ms = int(data.get("duration_ms", 1000))
+            swap_wheels = data.get("swap_wheels", False)
+            if isinstance(swap_wheels, str):
+                swap_wheels = swap_wheels.strip().lower() in (
+                    "1", "true", "yes", "on")
+            else:
+                swap_wheels = bool(swap_wheels)
+            if not 0 <= speed <= 100 or not 1 <= duration_ms <= 10000:
+                raise ValueError("invalid motor settings")
+            self.account_store.set_global_setting(
+                "motor_default_speed", str(speed))
+            self.account_store.set_global_setting(
+                "motor_default_duration_ms", str(duration_ms))
+            self.account_store.set_global_setting(
+                "motor_swap_wheels", "1" if swap_wheels else "0")
+            for session in self.sessions.values():
+                session.config["motor_defaults"] = {
+                    "speed": speed, "duration_ms": duration_ms,
+                    "swap_wheels": swap_wheels}
+            return web.json_response({
+                "motor_defaults": {
+                    "speed": speed, "duration_ms": duration_ms,
+                    "swap_wheels": swap_wheels}})
+        except (TypeError, ValueError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
 
     def _firmware_public_base(self):
         base = self.config.get("server", {}).get("public_ws_url", "")
@@ -2267,6 +2426,13 @@ class Dashboard:
         model.pop("api_key_configured", None)
         session.config.setdefault("dashscope", {}).update(model)
         session.config.setdefault("vad", {}).update(self._effective_vad_settings(device_id))
+        session.config["motor_defaults"] = {
+            "speed": self._global_int_setting("motor_default_speed", 85, 0, 100),
+            "duration_ms": self._global_int_setting(
+                "motor_default_duration_ms", 1000, 1, 10000),
+            "swap_wheels": self._global_bool_setting(
+                "motor_swap_wheels", False),
+        }
         features = self.account_store.get_device_features(device_id)
         session.config["features"] = features
         owner_id = self.account_store.device_owner_id(device_id)

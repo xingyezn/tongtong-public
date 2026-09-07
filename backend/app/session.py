@@ -41,6 +41,8 @@ TTS_STARTUP_BUFFER_MS = 900
 TTS_MIN_STARTUP_BUFFER_MS = 240
 TTS_MAX_STARTUP_BUFFER_MS = 1500
 AI_DISPLAY_UPDATE_INTERVAL_S = 0.18
+DEFAULT_MOTOR_SPEED = 85
+DEFAULT_MOTOR_DURATION_MS = 1000
 # Covers WebSocket transit and the device's decoder/DMA pipeline after the
 # model has finished generating its audio stream.
 TTS_PLAYBACK_TRANSPORT_MARGIN_S = 0.20
@@ -63,6 +65,37 @@ CONVERSATION_END_TOOL = {
 }
 
 FACE_TOOL_PREFIX = "server.face."
+MOTOR_FALLBACK_COMMANDS = (
+    ("self.chassis.turn_left", ("左转", "向左转", "往左转")),
+    ("self.chassis.turn_right", ("右转", "向右转", "往右转")),
+    ("self.chassis.go_forward", ("前进", "向前走", "往前走", "向前进")),
+    ("self.chassis.go_back", ("后退", "向后走", "往后走", "向后退")),
+    ("self.chassis.spin", ("原地旋转", "原地转", "旋转")),
+)
+
+
+def detect_motor_fallback_tool(transcript):
+    """Return a deterministic motor tool for an explicit user command.
+
+    This is only a fallback for turns where the model returned no motor
+    function call.  Negated phrases are ignored so that requests such as
+    “不要前进” cannot move the chassis.
+    """
+    text = str(transcript or "").strip()
+    if not text:
+        return None
+    for tool_name, phrases in MOTOR_FALLBACK_COMMANDS:
+        for phrase in phrases:
+            index = text.find(phrase)
+            if index < 0:
+                continue
+            prefix = text[max(0, index - 4):index]
+            if any(word in prefix for word in ("不要", "别", "不许", "禁止", "不能")):
+                continue
+            return tool_name
+    return None
+
+
 FACE_TOOLS = [
     {"type": "function", "function": {"name": "server.face.register_current",
      "description": "录入当前摄像头画面中的人脸。每次调用都会重新拍摄当前帧并上传，不能使用历史图片；必须先向用户确认姓名。",
@@ -174,6 +207,7 @@ class Session:
         self.speaking = False
         self._mcp = None
         self._tools_cached = False
+        self._motor_tool_called = False
         self.omni_busy = False
         self._latest_call_id = 0
         self._omni_task = None
@@ -201,6 +235,28 @@ class Session:
 
     def _vad_energy_threshold(self) -> float:
         return float(self.config.get("vad", {}).get("energy_threshold", 120.0))
+
+    def _apply_motor_wheel_swap(self, name, arguments):
+        """Translate logical wheel commands for crossed motor wiring."""
+        if not self.config.get("motor_defaults", {}).get("swap_wheels"):
+            return name, arguments
+        if name == "self.chassis.turn_left":
+            return "self.chassis.turn_right", arguments
+        if name == "self.chassis.turn_right":
+            return "self.chassis.turn_left", arguments
+        if name == "self.chassis.spin":
+            # spin is clockwise (left forward/right backward); after the
+            # physical channels are crossed, turn_left produces that motion.
+            return "self.chassis.turn_left", arguments
+        if name == "self.chassis.drive":
+            arguments["left_speed"], arguments["right_speed"] = (
+                arguments.get("right_speed", 0),
+                arguments.get("left_speed", 0))
+        elif name == "self.chassis.test_direct_drive":
+            arguments["left_direction"], arguments["right_direction"] = (
+                arguments.get("right_direction", 0),
+                arguments.get("left_direction", 0))
+        return name, arguments
 
     def _tts_startup_prebuffer_frames(self) -> int:
         """Return the number of 60 ms frames held before starting playback.
@@ -506,11 +562,14 @@ class Session:
         self._active_stream_state = stream_state
         text_parts = []
         input_transcript = ""
+        self._motor_tool_called = False
         token_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         last_display_update = 0.0
         last_display_text = ""
 
-        tools = self._mcp.make_omni_tools() if self._mcp else []
+        motor_defaults = self.config.get("motor_defaults", {})
+        tools = (self._mcp.make_omni_tools(motor_defaults)
+                 if self._mcp else [])
         tools.extend(FACE_TOOLS)
         tools.append(CONVERSATION_END_TOOL)
         async for evt in self.omni.chat_stream(
@@ -547,6 +606,19 @@ class Session:
                     await self._stream_omni_audio(evt, stream_state)
             elif et == "done":
                 break
+
+        fallback_tool = (
+            detect_motor_fallback_tool(input_transcript)
+            if not self._motor_tool_called else None)
+        if fallback_tool:
+            log.warning(
+                "model returned no motor MCP call; forcing fallback: %s -> %s",
+                input_transcript, fallback_tool)
+            await self._handle_tool_call({
+                "id": "backend-motor-fallback",
+                "name": fallback_tool,
+                "arguments": {},
+            })
 
         assistant_text = "".join(text_parts).strip()
         if assistant_text and assistant_text != last_display_text:
@@ -765,6 +837,18 @@ class Session:
             log.warning("Omni 调用未知工具 %s，忽略", name)
             return json.dumps({"error": f"unknown tool {name}"})
 
+        if isinstance(name, str) and name.startswith("self.chassis."):
+            self._motor_tool_called = True
+            defaults = self.config.get("motor_defaults", {})
+            if "speed" not in arguments and name not in (
+                    "self.chassis.drive", "self.chassis.test_direct_drive"):
+                arguments["speed"] = int(defaults.get(
+                    "speed", DEFAULT_MOTOR_SPEED))
+            if "duration_ms" not in arguments:
+                arguments["duration_ms"] = int(defaults.get(
+                    "duration_ms", DEFAULT_MOTOR_DURATION_MS))
+
+        name, arguments = self._apply_motor_wheel_swap(name, arguments)
         req = self._mcp.make_tools_call(name, arguments, call_id)
         req_id = req["payload"]["id"]
 
