@@ -33,6 +33,7 @@ private:
     bool right_reversed_;
     int last_left_speed_ = 0;
     int last_right_speed_ = 0;
+    bool direct_mode_ = false;
     esp_timer_handle_t stop_timer_ = nullptr;
     std::mutex mutex_;
 
@@ -82,7 +83,44 @@ private:
         }
     }
 
+    void StopPwmOutputs() {
+        ESP_ERROR_CHECK(ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0));
+        ESP_ERROR_CHECK(ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_2, 0));
+        ESP_ERROR_CHECK(ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_3, 0));
+        ESP_ERROR_CHECK(ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_4, 0));
+    }
+
+    void ConfigureDirectOutputs() {
+        gpio_reset_pin(left_in1_gpio_);
+        gpio_reset_pin(left_in2_gpio_);
+        gpio_reset_pin(right_in1_gpio_);
+        gpio_reset_pin(right_in2_gpio_);
+        ConfigureOutput(left_in1_gpio_);
+        ConfigureOutput(left_in2_gpio_);
+        ConfigureOutput(right_in1_gpio_);
+        ConfigureOutput(right_in2_gpio_);
+    }
+
+    void ApplyDirectMotor(gpio_num_t in1_gpio, gpio_num_t in2_gpio, int direction, bool reversed) {
+        if (reversed) {
+            direction = -direction;
+        }
+        if (direction > 0) {
+            ESP_ERROR_CHECK(gpio_set_level(in1_gpio, 1));
+            ESP_ERROR_CHECK(gpio_set_level(in2_gpio, 0));
+        } else if (direction < 0) {
+            ESP_ERROR_CHECK(gpio_set_level(in1_gpio, 0));
+            ESP_ERROR_CHECK(gpio_set_level(in2_gpio, 1));
+        } else {
+            ESP_ERROR_CHECK(gpio_set_level(in1_gpio, 0));
+            ESP_ERROR_CHECK(gpio_set_level(in2_gpio, 0));
+        }
+    }
+
     void DriveLocked(int left_speed, int right_speed) {
+        if (direct_mode_) {
+            StopLocked();
+        }
         left_speed = Clamp(left_speed, -100, 100);
         right_speed = Clamp(right_speed, -100, 100);
         if (left_speed == 0 && right_speed == 0) {
@@ -98,13 +136,24 @@ private:
     }
 
     void StopLocked() {
-        SetPwmDuty(LEDC_CHANNEL_1, 0);
-        SetPwmDuty(LEDC_CHANNEL_2, 0);
-        SetPwmDuty(LEDC_CHANNEL_3, 0);
-        SetPwmDuty(LEDC_CHANNEL_4, 0);
+        if (direct_mode_) {
+            ESP_ERROR_CHECK(gpio_set_level(left_in1_gpio_, 0));
+            ESP_ERROR_CHECK(gpio_set_level(left_in2_gpio_, 0));
+            ESP_ERROR_CHECK(gpio_set_level(right_in1_gpio_, 0));
+            ESP_ERROR_CHECK(gpio_set_level(right_in2_gpio_, 0));
+        } else {
+            SetPwmDuty(LEDC_CHANNEL_1, 0);
+            SetPwmDuty(LEDC_CHANNEL_2, 0);
+            SetPwmDuty(LEDC_CHANNEL_3, 0);
+            SetPwmDuty(LEDC_CHANNEL_4, 0);
+        }
         ESP_ERROR_CHECK(gpio_set_level(standby_gpio_, 0));
         last_left_speed_ = 0;
         last_right_speed_ = 0;
+        if (direct_mode_) {
+            direct_mode_ = false;
+            InitializePwm();
+        }
     }
 
     void StopTimer() {
@@ -133,6 +182,23 @@ private:
         std::lock_guard<std::mutex> lock(mutex_);
         StopTimer();
         StopLocked();
+        return StateJson();
+    }
+
+    ReturnValue DirectDriveFor(int left_direction, int right_direction, int duration_ms) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        StopTimer();
+        if (!direct_mode_) {
+            StopPwmOutputs();
+            ConfigureDirectOutputs();
+            direct_mode_ = true;
+        }
+        ESP_ERROR_CHECK(gpio_set_level(standby_gpio_, 1));
+        ApplyDirectMotor(left_in1_gpio_, left_in2_gpio_, Clamp(left_direction, -1, 1), left_reversed_);
+        ApplyDirectMotor(right_in1_gpio_, right_in2_gpio_, Clamp(right_direction, -1, 1), right_reversed_);
+        last_left_speed_ = Clamp(left_direction, -1, 1) * 100;
+        last_right_speed_ = Clamp(right_direction, -1, 1) * 100;
+        ESP_ERROR_CHECK(esp_timer_start_once(stop_timer_, Clamp(duration_ms, 1, kMaxDurationMs) * 1000));
         return StateJson();
     }
 
@@ -246,6 +312,19 @@ public:
         mcp_server.AddTool("self.chassis.stop", "Immediately stop both chassis motors and disable the motor driver.",
             PropertyList(), [this](const PropertyList&) -> ReturnValue {
                 return StopNow();
+            });
+        mcp_server.AddTool("self.chassis.test_direct_drive",
+            "TEST ONLY: drive the DRV8833 with static HIGH/LOW direction levels, bypassing PWM. "
+            "left_direction and right_direction are -1 reverse, 0 stop, or 1 forward. "
+            "The driver stops automatically after duration_ms.",
+            PropertyList({
+                Property("left_direction", kPropertyTypeInteger, 0, -1, 1),
+                Property("right_direction", kPropertyTypeInteger, 0, -1, 1),
+                Property("duration_ms", kPropertyTypeInteger, 1000, 1, kMaxDurationMs),
+            }), [this](const PropertyList& properties) -> ReturnValue {
+                return DirectDriveFor(properties["left_direction"].value<int>(),
+                    properties["right_direction"].value<int>(),
+                    properties["duration_ms"].value<int>());
             });
     }
 };

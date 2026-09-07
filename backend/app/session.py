@@ -20,6 +20,7 @@ import uuid
 
 from .opus_codec import OpusCodec, resample_pcm
 from .omni_client import OmniClient
+from .face_service import FaceService
 
 log = logging.getLogger("session")
 
@@ -60,6 +61,31 @@ CONVERSATION_END_TOOL = {
         "parameters": {"type": "object", "properties": {}},
     },
 }
+
+FACE_TOOL_PREFIX = "server.face."
+FACE_TOOLS = [
+    {"type": "function", "function": {"name": "server.face.register_current",
+     "description": "录入当前摄像头画面中的人脸。每次调用都会重新拍摄当前帧并上传，不能使用历史图片；必须先向用户确认姓名。",
+     "parameters": {"type": "object", "properties": {
+         "name": {"type": "string", "description": "要录入的姓名"},
+         "external_id": {"type": "string"}, "note": {"type": "string"}},
+         "required": ["name"]}}},
+    {"type": "function", "function": {"name": "server.face.recognize_current",
+     "description": "识别当前摄像头画面中的人脸。每次调用必须重新拍摄当前帧，绝不能复用之前的图片或识别结果。",
+     "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "server.face.delete",
+     "description": "删除已录入的人脸。只有用户明确提供人脸 id 时才能调用；不能查询或猜测其他用户的人脸数据。",
+     "parameters": {"type": "object", "properties": {
+         "face_id": {"type": "integer", "description": "列表返回的人脸 id"}},
+         "required": ["face_id"]}}},
+    {"type": "function", "function": {"name": "server.face.update",
+     "description": "修改已录入人脸的姓名、外部编号或备注。只有用户明确提供人脸 id 时才能调用；用户明确要求更新照片时才重新拍摄当前帧。",
+     "parameters": {"type": "object", "properties": {
+         "face_id": {"type": "integer"}, "name": {"type": "string"},
+         "external_id": {"type": "string"}, "note": {"type": "string"},
+         "replace_image": {"type": "boolean", "description": "是否用当前新拍照片替换样本"}},
+         "required": ["face_id"]}}},
+]
 
 
 class BinaryProtocolError(Exception):
@@ -108,7 +134,8 @@ class Session:
 
     def __init__(self, ws, config: dict, omni: OmniClient, device_id: str,
                  conversation_memory=None, binding_code=None, turn_recorder=None,
-                 conversation_ender=None, conversation_ended_callback=None):
+                 conversation_ender=None, conversation_ended_callback=None,
+                 camera_photos=None):
         self.ws = ws
         self.config = config
         # Each device gets an isolated Realtime client while its text memory is
@@ -120,6 +147,8 @@ class Session:
         self.turn_recorder = turn_recorder
         self.conversation_ender = conversation_ender
         self.conversation_ended_callback = conversation_ended_callback
+        self.camera_photos = camera_photos if camera_photos is not None else {}
+        self.face_service = FaceService(config)
         self.session_id = uuid.uuid4().hex
         # This token only lives for the current WebSocket connection. It lets
         # the camera upload a photo without firmware storing a dashboard
@@ -478,6 +507,7 @@ class Session:
         last_display_text = ""
 
         tools = self._mcp.make_omni_tools() if self._mcp else []
+        tools.extend(FACE_TOOLS)
         tools.append(CONVERSATION_END_TOOL)
         async for evt in self.omni.chat_stream(
                 pcm, tools=tools, tool_handler=self._handle_tool_call):
@@ -716,6 +746,12 @@ class Session:
                 "accepted": True,
                 "instruction": "请给出简短告别回复；播放和保存完成后系统将进入待命。",
             }, ensure_ascii=False)
+        if isinstance(name, str) and name.startswith(FACE_TOOL_PREFIX):
+            if name == "server.face.list":
+                log.warning("blocked model access to face list: device=%s", self.device_id)
+                return json.dumps({"error": "face list is not available to the model"},
+                                  ensure_ascii=False)
+            return await self._handle_face_tool(name, arguments)
         if not name or not self._mcp:
             return None
 
@@ -753,6 +789,79 @@ class Session:
                      if isinstance(c, dict)]
             return json.dumps({"result": texts})
         return json.dumps({"result": result})
+
+    async def _capture_current_photo(self):
+        """Trigger a fresh device capture and return the uploaded JPEG."""
+        if not self._mcp:
+            return None, {"error": "device MCP unavailable"}
+        tool_names = {t.get("name") for t in self._mcp.tools}
+        if "self.camera.take_photo" not in tool_names:
+            return None, {"error": "device camera capture tool unavailable"}
+        req = self._mcp.make_tools_call(
+            "self.camera.take_photo",
+            {"question": "仅上传当前帧供服务器人脸操作，不需要进行视觉回答。"})
+        previous_nonce = (self.camera_photos.get(self.device_id) or {}).get("nonce")
+        req_id = req["payload"]["id"]
+        fut = asyncio.get_event_loop().create_future()
+        self._mcp.register_pending(req_id, fut)
+        await self.send_json(req)
+        try:
+            result = await asyncio.wait_for(fut, timeout=15)
+        except asyncio.TimeoutError:
+            return None, {"error": "device camera capture timeout"}
+        finally:
+            self._mcp._pending_calls.pop(req_id, None)
+        photo = self.camera_photos.get(self.device_id)
+        if (not photo or not photo.get("data") or
+                photo.get("nonce") == previous_nonce):
+            return None, {"error": "fresh camera frame was not uploaded"}
+        return photo["data"], {"capture": "fresh", "device_result": result}
+
+    async def _handle_face_tool(self, name, arguments):
+        http_session = await self.omni.ensure_session()
+        if name == "server.face.list":
+            result = await self.face_service.request(http_session, "GET", "/api/faces")
+            return json.dumps(result, ensure_ascii=False)
+        if name == "server.face.register_current":
+            image, capture = await self._capture_current_photo()
+            if image is None:
+                return json.dumps(capture, ensure_ascii=False)
+            fields = {key: arguments.get(key) for key in ("name", "external_id", "note")}
+            result = await self.face_service.request(
+                http_session, "POST", "/api/faces", image=image, fields=fields)
+            result["capture"] = "fresh"
+            return json.dumps(result, ensure_ascii=False)
+        if name == "server.face.recognize_current":
+            image, capture = await self._capture_current_photo()
+            if image is None:
+                return json.dumps(capture, ensure_ascii=False)
+            result = await self.face_service.request(
+                http_session, "POST", "/api/recognize", image=image)
+            result["capture"] = "fresh"
+            return json.dumps(result, ensure_ascii=False)
+        face_id = arguments.get("face_id")
+        if not isinstance(face_id, int) or isinstance(face_id, bool):
+            return json.dumps({"error": "face_id must be an integer"}, ensure_ascii=False)
+        if name == "server.face.delete":
+            result = await self.face_service.request(
+                http_session, "DELETE", "/api/faces/{}".format(face_id))
+            return json.dumps(result, ensure_ascii=False)
+        if name == "server.face.update":
+            fields = {key: arguments.get(key) for key in ("name", "external_id", "note")
+                      if key in arguments}
+            image = None
+            if arguments.get("replace_image"):
+                image, capture = await self._capture_current_photo()
+                if image is None:
+                    return json.dumps(capture, ensure_ascii=False)
+            result = await self.face_service.request(
+                http_session, "PATCH", "/api/faces/{}".format(face_id),
+                image=image, fields=fields if image is not None else None,
+                json_body=None if image is not None else fields)
+            if image is not None:
+                result["capture"] = "fresh"
+            return json.dumps(result, ensure_ascii=False)
+        return json.dumps({"error": "unknown face tool"}, ensure_ascii=False)
 
     # ------------------------------------------------------------------
     # 打断

@@ -67,6 +67,14 @@ DEFAULT_TOOL_INSTRUCTIONS = (
     "不得调用前使用、推测或复用历史对话中的图片、工具结果或人数，必须以本次新检测结果回答。"
 )
 
+FACE_TOOL_INSTRUCTIONS = (
+    "人脸管理工具规则：server.face.register_current 用于录入当前摄像头画面，"
+    "server.face.recognize_current 用于识别当前画面；这两个工具每次都会重新拍摄，"
+    "严禁复用历史图片、历史识别结果或对话记忆。删除和修改只能使用用户明确提供的人脸 id，"
+    "不得调用或暴露人脸列表、其他用户的人脸信息；用户明确要求修改照片时才使用 replace_image。"
+    "这些工具是服务器端人脸接口的实际调用，不要只根据记忆直接回答。"
+)
+
 
 class _PersistentRealtimeContext:
     """Reuse one Realtime WebSocket for the lifetime of a device session."""
@@ -179,6 +187,7 @@ class OmniClient:
             self.instructions.strip(),
             LANGUAGE_PROMPTS[self.language],
             tool_instructions.strip(),
+            FACE_TOOL_INSTRUCTIONS,
         ]
         user_memory = self.config.get("dashscope", {}).get("user_memory_prompt", "")
         if user_memory:
@@ -231,7 +240,13 @@ class OmniClient:
 
     async def ensure_session(self):
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120))
+            # The face service is accessed by its numeric LAN/public IP and
+            # authenticates with a Flask session cookie.  aiohttp's default
+            # cookie jar rejects cookies from IP hosts, so explicitly allow
+            # them for this backend session.
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=120),
+                cookie_jar=aiohttp.CookieJar(unsafe=True))
         return self._session
 
     async def close(self):

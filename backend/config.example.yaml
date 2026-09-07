@@ -1,6 +1,12 @@
 # Public-safe backend configuration example.
 # Use private/local.example.yaml plus scripts/configure_local.py for real values.
 environment: "production"
+
+face_service:
+  # Server-side YuNet/SFace face management service.
+  base_url: "http://127.0.0.1:8090"
+  username: "tongtong"
+  password: "tongtong-2026"
 server:
   host: "0.0.0.0"
   port: 8080

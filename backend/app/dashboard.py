@@ -909,7 +909,8 @@ const HARDWARE_TEST_GROUPS = [
   { title: "电机驱动", items: [
     ["self.chassis.go_forward", "前进"], ["self.chassis.go_back", "后退"],
     ["self.chassis.turn_left", "左转"], ["self.chassis.turn_right", "右转"],
-    ["self.chassis.spin", "原地转圈"], ["self.chassis.stop", "停止"]
+    ["self.chassis.spin", "原地转圈"], ["self.chassis.test_direct_drive", "高低电平前进测试"],
+    ["self.chassis.stop", "停止"]
   ]},
   { title: "摄像头", items: [["self.camera.take_photo", "拍照测试"], ["self.camera.face_detect_local", "本地 ESP-DL 人脸检测"]] },
   { title: "舵机 / 云台", items: [
@@ -940,6 +941,10 @@ function showCameraPreview(deviceId) {
 
 function hardwareArgs(name) {
   if (name === "self.led.set_color") return ledRgbValues();
+  if (name === "self.chassis.test_direct_drive") {
+    return { left_direction: 1, right_direction: 1,
+             duration_ms: parseInt($("test-duration").value, 10) || 500 };
+  }
   if (name.indexOf("self.chassis.") === 0 && name !== "self.chassis.stop") {
     return { speed: parseInt($("test-speed").value, 10) || 30,
              duration_ms: parseInt($("test-duration").value, 10) || 500 };
@@ -1052,6 +1057,7 @@ function renderHardwareTests() {
         ' onclick=\'runHardwareTest("' + name + '", this)\'>' + label +
         (available ? "" : "（不可用）") + '</button>';
     }).join("");
+    const faceActions = group.items.some(item => item[0] === "self.camera.take_photo") ? '<div class="hint" style="margin:8px 0">服务器端人脸测试（识别、录入或替换照片都会重新拍摄当前画面）</div><div class="test-actions"><button class="btn" onclick="runFaceTest(\'recognize_current\', this)">识别当前画面</button><button class="btn" onclick="runFaceTest(\'list\', this)">查询已录入人脸</button><button class="btn" onclick="runFaceTest(\'register_current\', this)">录入当前画面</button><button class="btn" onclick="runFaceTest(\'delete\', this)">删除人脸</button><button class="btn" onclick="runFaceTest(\'update\', this)">修改人脸</button></div>' : '';
     const groupInputs = group.items.some(item => item[0].indexOf("self.chassis.") === 0)
       ? '<div class="row" style="margin-bottom:8px"><label class="muted">速度 <input class="test-input" id="test-speed" type="number" min="0" max="100" value="30"></label>' +
         '<label class="muted">持续时间(ms) <input class="test-input" id="test-duration" type="number" min="1" max="10000" value="500"></label></div>'
@@ -1066,7 +1072,7 @@ function renderHardwareTests() {
         '<label class="muted">G <input class="test-input" id="test-led-green" type="number" min="0" max="255" value="0" oninput="syncLedColorFromRgb()"></label>' +
         '<label class="muted">B <input class="test-input" id="test-led-blue" type="number" min="0" max="255" value="255" oninput="syncLedColorFromRgb()"></label></div>' +
         '<div class="hint" style="margin:0 0 8px">色盘与 RGB 数值会同步；当前固件仅提供颜色、开关控制。亮度设置目前仅适用于“屏幕亮度”，RGB 指示灯没有独立亮度接口。</div>' : '';
-    return '<div class="test-group"><h3>' + group.title + '</h3>' + groupInputs + colorInputs + '<div class="test-actions">' + actions + '</div></div>';
+    return '<div class="test-group"><h3>' + group.title + '</h3>' + groupInputs + colorInputs + '<div class="test-actions">' + actions + '</div>' + faceActions + '</div>';
   }).join("");
   box.innerHTML = html;
   Object.entries(previousValues).forEach(([id, value]) => {
@@ -1122,6 +1128,15 @@ async function runHardwareTest(name, button) {
   } finally {
     renderHardwareTests();
   }
+}
+
+async function runFaceTest(operation, button) {
+  const device = selectedHardwareDevice(); if (!device) return;
+  let args = {};
+  if (operation === "register_current") { const name = prompt("请输入要录入的姓名"); if (!name) return; args.name = name; }
+  if (operation === "delete" || operation === "update") { const id = parseInt(prompt("请输入人脸 ID"), 10); if (!Number.isInteger(id)) return; args.face_id = id; if (operation === "delete" && !confirm("确认删除人脸 ID " + id + "？")) return; if (operation === "update") { const name = prompt("请输入新姓名（留空表示不修改）", ""); if (name) args.name = name; } }
+  button.disabled = true; $("hardware-test-result").textContent = "执行服务器端人脸测试中：" + operation;
+  try { const r = await fetch("/api/test/face", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({device_id:device.device_id, operation:operation, arguments:args})}); const data = await r.json(); if (!r.ok) throw new Error(data.error || "调用失败"); $("hardware-test-result").textContent = JSON.stringify(data.result, null, 2); if (operation !== "list" && operation !== "delete") showCameraPreview(device.device_id); showToast("服务器端人脸测试完成", "ok"); } catch(e) { $("hardware-test-result").textContent = "失败：" + e.message; showToast("服务器端人脸测试失败：" + e.message, "err"); } finally { button.disabled = false; }
 }
 
 function renderLocalFaceResult(result) {
@@ -1384,6 +1399,7 @@ header{padding:18px 4vw;background:#fff;border-bottom:1px solid var(--line);disp
 </style></head><body>
 <header><h1>童童管理员端</h1><span id="env" class="tag">—</span><span class="spacer"></span><a class="btn" href="/">用户面板</a><a class="btn" href="/logout">退出</a></header>
 <main>
+<section class="card"><h2>服务器端人脸识别服务</h2><p>用于对话中的人脸录入、识别、删除和修改。修改后立即对新会话生效。</p><div class="row"><input id="face-service-url" style="min-width:340px" placeholder="服务地址"><input id="face-service-user" placeholder="登录用户名"><input id="face-service-password" type="password" placeholder="登录密码"></div><div class="row"><button class="primary" onclick="saveFaceServiceSettings()">保存人脸服务配置</button></div></section>
 <section class="stats"><div class="stat">用户<b id="user-count">0</b></div><div class="stat">管理员<b id="admin-count">0</b></div><div class="stat">设备<b id="device-count">0</b></div><div class="stat">在线设备<b id="online-count">0</b></div></section>
 <section class="card"><h2>用户管理</h2><div class="row"><input id="new-user" placeholder="用户名"><input id="new-password" type="password" placeholder="初始密码（至少 8 位）"><label><input id="new-admin" type="checkbox"> 管理员</label><button class="primary" onclick="createUser()">创建用户</button></div>
 <table><thead><tr><th>ID</th><th>用户名</th><th>角色</th><th>状态</th><th>设备</th><th>会话</th><th>累计 Token</th><th>操作</th></tr></thead><tbody id="users"></tbody></table></section>
@@ -1410,6 +1426,9 @@ async function resetPassword(id){const password=prompt('输入新密码（至少
 async function assignDevice(id){const owner=document.getElementById('owner-'+id).value;try{await post('/api/admin/devices/assign',{device_id:id,owner_user_id:owner||null})}catch(e){toast(e.message,true)}}async function unbindDevice(id){if(!confirm('确认解绑设备？'))return;try{await post('/api/admin/devices/assign',{device_id:id,owner_user_id:null})}catch(e){toast(e.message,true)}}async function deleteDevice(id){if(!confirm('永久删除设备登记？设备再次连接时会重新登记。'))return;try{await post('/api/admin/devices/delete',{device_id:id})}catch(e){toast(e.message,true)}}load();setInterval(load,10000);
 async function toggleDevice(id,is_active){if(!confirm(is_active?'确认启用该设备？':'确认禁用该设备？禁用后设备会断开且无法连接。'))return;try{await post('/api/admin/devices/update',{device_id:id,is_active})}catch(e){toast(e.message,true)}}
 async function switchEnvironment(id){const environment=prompt('目标环境：test 或 production','test');if(!environment)return;const ota_url=prompt('目标环境 OTA 地址，例如 http://192.168.31.237:8082/ota');if(!ota_url)return;if(!confirm('设备将保存新地址并立即重启，确认继续？'))return;try{await post('/api/admin/devices/switch-environment',{device_id:id,environment,ota_url,reboot:true})}catch(e){toast(e.message,true)}}
+async function loadFaceServiceSettings(){try{const s=await api("/api/admin/settings");const f=s.face_service||{};document.getElementById("face-service-url").value=f.base_url||"";document.getElementById("face-service-user").value=f.username||"";document.getElementById("face-service-password").value=f.password||""}catch(e){toast(e.message,true)}}
+async function saveFaceServiceSettings(){try{await api("/api/admin/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({face_service:{base_url:document.getElementById("face-service-url").value,username:document.getElementById("face-service-user").value,password:document.getElementById("face-service-password").value}})});toast("人脸服务配置已保存并应用")}catch(e){toast(e.message,true)}}
+loadFaceServiceSettings();
 </script></body></html>"""
 
 
@@ -1436,7 +1455,9 @@ class Dashboard:
         self._binding_failures = {}
         # Latest JPEG per device. Photos are intentionally ephemeral: they
         # are lost on restart and never written to disk.
-        self._camera_photos = {}
+        shared_photos = (getattr(gateway, "camera_photos", None)
+                         if gateway is not None else None)
+        self._camera_photos = shared_photos if shared_photos is not None else {}
 
     def _render_page(self, template):
         """Add a prominent warning to the non-production dashboard only."""
@@ -1482,6 +1503,7 @@ class Dashboard:
         app.router.add_post("/api/model", self.api_model_set)
         app.router.add_get("/api/test/tools", self.api_test_tools)
         app.router.add_post("/api/test/mcp", self.api_test_mcp)
+        app.router.add_post("/api/test/face", self.api_test_face)
         app.router.add_post("/api/camera/upload", self.api_camera_upload)
         app.router.add_get("/api/camera/latest", self.api_camera_latest)
         app.router.add_get("/api/admin/overview", self.api_admin_overview)
@@ -1609,7 +1631,9 @@ class Dashboard:
 
     async def admin_page(self, request):
         self._require_admin(request)
-        return web.Response(text=ADMIN_HTML, content_type="text/html", charset="utf-8")
+        return web.Response(
+            text=ADMIN_HTML, content_type="text/html", charset="utf-8",
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
 
     async def api_admin_overview(self, request):
         self._require_admin(request)
@@ -1644,10 +1668,12 @@ class Dashboard:
     async def api_admin_settings_get(self, request):
         self._require_admin(request)
         from .omni_client import DEFAULT_TOOL_INSTRUCTIONS
+        face_service = dict(self.config.get("face_service", {}))
         return web.json_response({
             "tool_instructions": (
                 self.account_store.get_global_setting("tool_instructions")
-                or DEFAULT_TOOL_INSTRUCTIONS)
+                or DEFAULT_TOOL_INSTRUCTIONS),
+            "face_service": face_service,
         })
 
     async def api_admin_settings_set(self, request):
@@ -1659,6 +1685,31 @@ class Dashboard:
                 raise ValueError("invalid tool instructions")
             self.account_store.set_global_setting(
                 "tool_instructions", tool_instructions)
+            face_data = data.get("face_service")
+            if face_data is not None:
+                if not isinstance(face_data, dict):
+                    raise ValueError("invalid face service settings")
+                base_url = str(face_data.get("base_url", "")).strip().rstrip("/")
+                username = str(face_data.get("username", "")).strip()
+                password = str(face_data.get("password", ""))
+                if (not base_url.startswith(("http://", "https://")) or
+                        len(base_url) > 300 or not username or len(username) > 100 or
+                        not password or len(password) > 200):
+                    raise ValueError("invalid face service settings")
+                self.config["face_service"] = {
+                    "base_url": base_url,
+                    "username": username,
+                    "password": password,
+                }
+                from .face_service import FaceService
+                for session in self.sessions.values():
+                    session.config["face_service"] = dict(self.config["face_service"])
+                    session.face_service = FaceService(session.config)
+                if self.save_config:
+                    self.save_config(self.config)
+                self.account_store.audit_admin_action(
+                    admin["id"], "settings.update", "app", "face_service", {
+                        "base_url": base_url, "username": username})
             for session in self.sessions.values():
                 session.config.setdefault("dashscope", {})[
                     "tool_instructions"] = tool_instructions
@@ -1666,7 +1717,10 @@ class Dashboard:
                 admin["id"], "settings.update", "app", "tool_instructions", {})
         except (ValueError, TypeError) as exc:
             return web.json_response({"error": str(exc)}, status=400)
-        return web.json_response({"tool_instructions": tool_instructions})
+        return web.json_response({
+            "tool_instructions": tool_instructions,
+            "face_service": dict(self.config.get("face_service", {})),
+        })
 
     async def api_admin_user_create(self, request):
         admin = self._require_admin(request)
@@ -2345,6 +2399,31 @@ class Dashboard:
             "device_id": device_id,
             "tools": self._testable_tools(session),
         })
+
+    async def api_test_face(self, request):
+        """Run one authenticated conversational face operation manually."""
+        self._require_user(request)
+        try:
+            data = await request.json()
+            device_id = data.get("device_id", "")
+            operation = data.get("operation", "")
+            arguments = data.get("arguments") or {}
+        except Exception:
+            return web.json_response({"error": "bad json"}, status=400)
+        self._require_owned_device(request, device_id)
+        allowed = {"list", "register_current", "recognize_current", "delete", "update"}
+        if operation not in allowed or not isinstance(arguments, dict):
+            return web.json_response({"error": "invalid face operation"}, status=400)
+        session = self._get_test_session(device_id)
+        if session is None:
+            return web.json_response({"error": "device is not online"}, status=404)
+        result = await session._handle_face_tool(
+            "server.face." + operation, arguments)
+        try:
+            result = json.loads(result)
+        except (TypeError, ValueError):
+            pass
+        return web.json_response({"device_id": device_id, "result": result})
 
     async def api_test_mcp(self, request):
         """Send one supervised bench-test MCP command to an online device."""

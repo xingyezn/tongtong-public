@@ -1,0 +1,5 @@
+flask>=2.2
+waitress>=2.1
+openvino>=2025.0
+opencv-python-headless>=4.9
+numpy>=1.22

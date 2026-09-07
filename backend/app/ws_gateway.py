@@ -28,6 +28,9 @@ class WsGateway:
         self.device_conversations: dict = {}  # device_id -> persistent text memory
         self.account_store = account_store
         self.memory_service = memory_service
+        # Ephemeral current JPEGs uploaded by the camera. Shared with the
+        # dashboard and consumed by conversational face tools.
+        self.camera_photos = {}
 
     def _device_config(self, device_id: str) -> dict:
         config = copy.deepcopy(self.config)
@@ -148,6 +151,7 @@ class WsGateway:
             conversation_ended_callback=(
                 self.summarize_conversation
                 if self.memory_service else None),
+            camera_photos=self.camera_photos,
         )
         mcp = McpBridge(session.send_json)
         session.set_mcp(mcp)
