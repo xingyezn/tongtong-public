@@ -10,6 +10,8 @@ from aiohttp import ClientSession, FormData, web
 sys.path.insert(0, ".")
 from app.account_store import AccountStore  # noqa: E402
 from app.dashboard import AUTH_COOKIE, BroadcastLogHandler, Dashboard  # noqa: E402
+from app.mcp_bridge import McpBridge  # noqa: E402
+from app.omni_client import filter_tool_instructions_for_categories  # noqa: E402
 
 
 class FakeHttpApi:
@@ -59,6 +61,30 @@ class FakeSession:
 
 
 async def main():
+    rules = ("终端动作规则：调用 self.chassis.go_forward。\n\n"
+             "实时视觉规则：调用 server.face.recognize_current。\n\n"
+             "普通通用规则。")
+    filtered = filter_tool_instructions_for_categories(
+        rules, {"chassis": False, "camera": False})
+    assert filtered == "普通通用规则。"
+
+    bridge = McpBridge(lambda _: None)
+    bridge.tools = [
+        {"name": "self.chassis.go_forward", "description": "forward",
+         "inputSchema": {"type": "object", "properties": {}}},
+        {"name": "self.camera.take_photo", "description": "camera",
+         "inputSchema": {"type": "object", "properties": {}}},
+        {"name": "self.gimbal.pan", "description": "gimbal",
+         "inputSchema": {"type": "object", "properties": {}}},
+        {"name": "self.audio_speaker.set_volume", "description": "volume",
+         "inputSchema": {"type": "object", "properties": {}}},
+    ]
+    visible = bridge.make_omni_tools(
+        model_tool_categories={"chassis": False, "camera": False,
+                               "gimbal_servo": True})
+    assert [item["function"]["name"] for item in visible] == [
+        "self.gimbal.pan", "self.audio_speaker.set_volume"]
+
     with tempfile.TemporaryDirectory() as tmp:
         store = AccountStore(Path(tmp) / "dashboard.db")
         alice = store.register_user("alice", "strong-pass-123")
@@ -159,6 +185,25 @@ async def main():
                                         "energy_threshold": 250})
             assert r.status == 200 and session.config["vad"]["silence_duration_ms"] == 350
 
+            categories_url = ("http://127.0.0.1:8099/api/model-tool-categories?device_id=" +
+                              first["device_id"])
+            r = await client.get(categories_url, headers=headers)
+            categories = await r.json()
+            assert r.status == 200 and all(categories["model_tool_categories"].values())
+            r = await client.post("http://127.0.0.1:8099/api/model-tool-categories",
+                                  headers=headers, json={
+                                      "device_id": first["device_id"],
+                                      "model_tool_categories": {
+                                          "chassis": False, "camera": True,
+                                          "gimbal_servo": False,
+                                      }})
+            categories = await r.json()
+            assert r.status == 200 and categories["model_tool_categories"] == {
+                "chassis": False, "camera": True,
+                "gimbal_servo": False,
+            }
+            assert session.config["model_tool_categories"] == categories["model_tool_categories"]
+
             r = await client.get(
                 "http://127.0.0.1:8099/api/conversations?device_id=" + first["device_id"],
                 headers=headers)
@@ -249,7 +294,7 @@ async def main():
                 "http://127.0.0.1:8099/api/test/tools?device_id=" + first["device_id"],
                 headers=headers)
             assert [tool["name"] for tool in (await r.json())["tools"]] == [
-                "self.chassis.go_forward", "self.led.turn_on"]
+                "self.chassis.go_forward"]
             r = await client.post("http://127.0.0.1:8099/api/test/mcp", headers=headers,
                                   json={"device_id": first["device_id"],
                                         "name": "self.chassis.go_forward",

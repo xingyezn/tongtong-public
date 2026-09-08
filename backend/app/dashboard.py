@@ -22,6 +22,8 @@ from urllib.parse import urlparse
 
 from aiohttp import web
 
+from .mcp_bridge import normalize_model_tool_categories
+
 log = logging.getLogger("dash")
 
 # 登录 cookie 名
@@ -48,6 +50,7 @@ class BroadcastLogHandler(logging.Handler):
         self.buf = deque(maxlen=maxlen)
         self.access_buf = deque(maxlen=max(50, maxlen // 4))
         self.periodic_buf = deque(maxlen=max(30, maxlen // 8))
+        self.model_debug_buf = deque(maxlen=100)
         self._sequence = 0
         self._loop = None
         self._evt = None
@@ -66,7 +69,9 @@ class BroadcastLogHandler(logging.Handler):
         with self._lock:
             self._sequence += 1
             entry = {"id": self._sequence, "category": category, "text": msg}
-            if category == "periodic":
+            if category == "model_debug":
+                self.model_debug_buf.append(entry)
+            elif category == "periodic":
                 self.periodic_buf.append(entry)
             elif category == "access":
                 self.access_buf.append(entry)
@@ -90,6 +95,8 @@ class BroadcastLogHandler(logging.Handler):
             return "device"
         if name == "mcp" or name.startswith("mcp."):
             return "mcp"
+        if name == "model_debug" or name.startswith("model_debug."):
+            return "model_debug"
         if "omni" in name or "dashscope" in name:
             return "model"
         return "system"
@@ -101,13 +108,15 @@ class BroadcastLogHandler(logging.Handler):
     def snapshot(self):
         with self._lock:
             return sorted(
-                list(self.buf) + list(self.access_buf) + list(self.periodic_buf),
+                list(self.buf) + list(self.access_buf) + list(self.periodic_buf) +
+                list(self.model_debug_buf),
                 key=lambda entry: entry["id"],
             )
 
     def events_after(self, sequence):
         with self._lock:
-            entries = list(self.buf) + list(self.access_buf) + list(self.periodic_buf)
+            entries = (list(self.buf) + list(self.access_buf) +
+                       list(self.periodic_buf) + list(self.model_debug_buf))
         return sorted(
             (entry for entry in entries if entry["id"] > sequence),
             key=lambda entry: entry["id"],
@@ -368,6 +377,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <button class="btn" onclick="loadHardwareTests(true)">刷新测试项</button>
     </div>
     <div class="hint" id="hardware-test-status">等待设备上线…</div>
+    <div class="row" id="model-tool-category-panel" style="margin:10px 0"><span class="muted">大模型可见工具：</span><label><input id="user-model-tool-chassis" type="checkbox"> 底盘运动控制</label><label><input id="user-model-tool-camera" type="checkbox"> 摄像头</label><label><input id="user-model-tool-gimbal-servo" type="checkbox"> 舵机 / 云台</label><button class="btn" id="user-model-tool-save" onclick="saveUserModelToolCategories()">保存工具可见性</button></div>
+    <div class="hint" id="model-tool-category-status">取消勾选后，对应类别不会传给大模型，以减少上下文；手动测试仍可用。</div>
     <div id="hardware-test-groups" class="test-grid"></div>
     <div id="hardware-test-result">尚未执行测试。</div>
     <div id="camera-preview"><div class="muted" style="margin-bottom:7px">最近拍摄/截取的图片（仅保存在后端内存，重启后自动清除）</div><img id="camera-preview-image" alt="设备最近拍摄或截取的图片"></div>
@@ -555,11 +566,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <label><input type="checkbox" data-log-category="device" checked onchange="renderLogs()"> 设备</label>
       <label><input type="checkbox" data-log-category="mcp" checked onchange="renderLogs()"> MCP</label>
       <label><input type="checkbox" data-log-category="model" checked onchange="renderLogs()"> 模型</label>
+      <label><input type="checkbox" data-log-category="model_debug" onchange="renderLogs()"> 模型调试</label>
       <label><input type="checkbox" data-log-category="system" checked onchange="renderLogs()"> 系统</label>
       <label><input type="checkbox" data-log-category="access" checked onchange="renderLogs()"> 普通请求</label>
       <label><input type="checkbox" data-log-category="periodic" onchange="renderLogs()"> 周期状态请求</label>
     </div>
-    <div class="hint">“周期状态请求”是面板自动刷新产生的 `/api/status` 日志，默认隐藏且在服务器上独立限额保存，不会挤掉调试信息。</div>
+    <div class="hint">“模型调试”包含最近100次模型交互的提示词、工具定义和完整文本/工具回复；音频 Base64 仅记录大小以避免日志膨胀。“周期状态请求”是面板自动刷新产生的 `/api/status` 日志，默认隐藏且在服务器上独立限额保存，不会挤掉调试信息。</div>
     <div id="logs"></div>
   </div>
 
@@ -792,10 +804,12 @@ function updateHardwareTestPanel() {
     hardwareToolsDevice = "";
     hardwareTools = {};
     renderHardwareTests();
+    loadUserModelToolCategories(false);
     return;
   }
   status.textContent = "设备在线，可直接执行手动硬件测试。";
   loadHardwareTests(false);
+  loadUserModelToolCategories(false);
 }
 
 // ---- 实时日志 (SSE) ----
@@ -840,7 +854,7 @@ function renderLogs() {
   div.className = cls;
     const category = document.createElement("span");
     category.className = "log-category";
-    category.textContent = ({ device:"设备", mcp:"MCP", model:"模型", system:"系统", access:"请求", periodic:"周期" })[event.category] || "系统";
+    category.textContent = ({ device:"设备", mcp:"MCP", model:"模型", model_debug:"模型调试", system:"系统", access:"请求", periodic:"周期" })[event.category] || "系统";
     div.prepend(category);
   box.appendChild(div);
   }
@@ -908,6 +922,7 @@ async function saveVad() {
 let hardwareTools = {};
 let hardwareToolsDevice = "";
 let motorDefaults = { speed: 85, duration_ms: 600, swap_wheels: false };
+let modelToolCategoriesDevice = "";
 
 const HARDWARE_TEST_GROUPS = [
   { title: "设备控制", items: [
@@ -1143,6 +1158,70 @@ async function runFaceTest(operation, button) {
   if (operation === "delete" || operation === "update") { const id = parseInt(prompt("请输入人脸 ID"), 10); if (!Number.isInteger(id)) return; args.face_id = id; if (operation === "delete" && !confirm("确认删除人脸 ID " + id + "？")) return; if (operation === "update") { const name = prompt("请输入新姓名（留空表示不修改）", ""); if (name) args.name = name; } }
   button.disabled = true; $("hardware-test-result").textContent = "执行服务器端人脸测试中：" + operation;
   try { const r = await fetch("/api/test/face", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({device_id:device.device_id, operation:operation, arguments:args})}); const data = await r.json(); if (!r.ok) throw new Error(data.error || "调用失败"); $("hardware-test-result").textContent = JSON.stringify(data.result, null, 2); if (operation !== "list" && operation !== "delete") showCameraPreview(device.device_id); showToast("服务器端人脸测试完成", "ok"); } catch(e) { $("hardware-test-result").textContent = "失败：" + e.message; showToast("服务器端人脸测试失败：" + e.message, "err"); } finally { button.disabled = false; }
+}
+
+function setUserModelToolCategories(categories) {
+  const c = categories || {};
+  $("user-model-tool-chassis").checked = c.chassis !== false;
+  $("user-model-tool-camera").checked = c.camera !== false;
+  $("user-model-tool-gimbal-servo").checked = c.gimbal_servo !== false;
+}
+
+function userModelToolCategories() {
+  return {
+    chassis: $("user-model-tool-chassis").checked,
+    camera: $("user-model-tool-camera").checked,
+    gimbal_servo: $("user-model-tool-gimbal-servo").checked,
+  };
+}
+
+async function loadUserModelToolCategories(force) {
+  const device = selectedHardwareDevice();
+  const panel = $("model-tool-category-panel");
+  const status = $("model-tool-category-status");
+  const save = $("user-model-tool-save");
+  const inputs = panel.querySelectorAll("input");
+  if (!device) {
+    modelToolCategoriesDevice = "";
+    inputs.forEach(input => input.disabled = true);
+    save.disabled = true;
+    status.textContent = "选择在线设备后可设置该设备向大模型提供的 MCP 类别。";
+    return;
+  }
+  inputs.forEach(input => input.disabled = false);
+  save.disabled = false;
+  if (!force && modelToolCategoriesDevice === device.device_id) return;
+  modelToolCategoriesDevice = device.device_id;
+  status.textContent = "正在读取当前设备的大模型工具可见性…";
+  try {
+    const response = await fetch("/api/model-tool-categories?device_id=" + encodeURIComponent(device.device_id));
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "读取失败");
+    setUserModelToolCategories(data.model_tool_categories);
+    status.textContent = "仅影响“" + (device.name || device.device_id) + "”的大模型工具列表；手动测试不受影响。";
+  } catch (error) {
+    status.textContent = "读取工具可见性失败：" + error.message;
+  }
+}
+
+async function saveUserModelToolCategories() {
+  const device = selectedHardwareDevice();
+  if (!device) return;
+  const status = $("model-tool-category-status");
+  try {
+    const response = await fetch("/api/model-tool-categories", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({device_id: device.device_id, model_tool_categories: userModelToolCategories()}),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "保存失败");
+    setUserModelToolCategories(data.model_tool_categories);
+    status.textContent = "已保存并立即应用于后续对话。";
+    showToast("大模型工具可见性已保存", "ok");
+  } catch (error) {
+    status.textContent = "保存失败：" + error.message;
+    showToast("保存工具可见性失败：" + error.message, "err");
+  }
 }
 
 async function loadUserMotorDefaults() {
@@ -1579,6 +1658,10 @@ class Dashboard:
         app.router.add_post("/api/vad", self.api_vad_set)
         app.router.add_get("/api/model", self.api_model_get)
         app.router.add_post("/api/model", self.api_model_set)
+        app.router.add_get("/api/model-tool-categories",
+                           self.api_model_tool_categories_get)
+        app.router.add_post("/api/model-tool-categories",
+                            self.api_model_tool_categories_set)
         app.router.add_get("/api/test/tools", self.api_test_tools)
         app.router.add_post("/api/test/mcp", self.api_test_mcp)
         app.router.add_post("/api/test/face", self.api_test_face)
@@ -1808,6 +1891,11 @@ class Dashboard:
             "motor_defaults": motor_defaults,
         })
 
+    def _model_tool_categories_for_device(self, device_id):
+        settings = self.account_store.get_model_settings(device_id)
+        return normalize_model_tool_categories(
+            settings.get("model_tool_categories", {}))
+
     def _global_int_setting(self, key, default, minimum, maximum):
         try:
             value = int(self.account_store.get_global_setting(key))
@@ -1826,8 +1914,11 @@ class Dashboard:
         try:
             data = await request.json()
             from .omni_client import DEFAULT_GLOBAL_TOOL_INSTRUCTIONS
-            tool_instructions = (data.get("tool_instructions") or
-                                 DEFAULT_GLOBAL_TOOL_INSTRUCTIONS).strip()
+            current_instructions = self.account_store.get_global_setting(
+                "tool_instructions") or DEFAULT_GLOBAL_TOOL_INSTRUCTIONS
+            tool_instructions = (data.get("tool_instructions")
+                                 if "tool_instructions" in data
+                                 else current_instructions).strip()
             if len(tool_instructions) > 12000:
                 raise ValueError("invalid tool instructions")
             self.account_store.set_global_setting(
@@ -2472,7 +2563,9 @@ class Dashboard:
         settings["language"] = settings.get("language") or "zh"
         settings["conversation_timeout_minutes"] = (
             settings.get("conversation_timeout_minutes") or 10)
-        settings.update(self.account_store.get_model_settings(device_id))
+        device_settings = self.account_store.get_model_settings(device_id)
+        device_settings.pop("model_tool_categories", None)
+        settings.update(device_settings)
         settings["api_key_configured"] = bool(
             self.config.get("dashscope", {}).get("api_key"))
         return settings
@@ -2500,6 +2593,8 @@ class Dashboard:
             "swap_wheels": self._global_bool_setting(
                 "motor_swap_wheels", False),
         }
+        session.config["model_tool_categories"] = self._model_tool_categories_for_device(
+            device_id)
         features = self.account_store.get_device_features(device_id)
         session.config["features"] = features
         owner_id = self.account_store.device_owner_id(device_id)
@@ -2880,6 +2975,38 @@ class Dashboard:
                  user["username"], device_id, model, language, voice)
         return web.json_response(self._effective_model_settings(device_id))
 
+    async def api_model_tool_categories_get(self, request):
+        device_id = request.query.get("device_id", "")
+        self._require_owned_device(request, device_id)
+        return web.json_response({
+            "model_tool_categories": self._model_tool_categories_for_device(
+                device_id),
+        })
+
+    async def api_model_tool_categories_set(self, request):
+        user = self._require_user(request)
+        try:
+            data = await request.json()
+            device_id = data.get("device_id", "")
+            self._require_owned_device(request, device_id)
+            categories = data.get("model_tool_categories")
+            defaults = normalize_model_tool_categories({})
+            if (not isinstance(categories, dict) or
+                    any(key not in defaults for key in categories) or
+                    any(not isinstance(value, bool)
+                        for value in categories.values())):
+                raise ValueError("invalid model tool categories")
+            categories = normalize_model_tool_categories(categories)
+            current = self.account_store.get_model_settings(device_id)
+            current["model_tool_categories"] = categories
+            self.account_store.set_model_settings(user["id"], device_id, current)
+            self._refresh_active_device_config(device_id)
+            log.info("模型 MCP 类别更新: user=%s device=%s categories=%s",
+                     user["username"], device_id, categories)
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        return web.json_response({"model_tool_categories": categories})
+
     @staticmethod
     def _testable_tools(session):
         """Only expose actuator tools intended for supervised bench tests."""
@@ -2893,13 +3020,11 @@ class Dashboard:
         allowed_names = {
             "self.reboot",
             "self.get_system_info",
-            "self.upgrade_firmware",
             "self.camera.take_photo",
             "self.camera.face_detect_local",
             "self.screen.get_info",
             "self.screen.snapshot",
             "self.screen.preview_image",
-            "self.assets.set_download_url",
         }
         result = []
         for tool in tools:

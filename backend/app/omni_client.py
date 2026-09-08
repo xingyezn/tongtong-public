@@ -17,7 +17,10 @@ from typing import Optional
 
 import aiohttp
 
+from .mcp_bridge import normalize_model_tool_categories
+
 log = logging.getLogger("omni")
+model_debug_log = logging.getLogger("model_debug")
 
 LANGUAGE_PROMPTS = {
     "auto": "Detect the user's language and reply in the same language.",
@@ -103,6 +106,31 @@ DEFAULT_GLOBAL_TOOL_INSTRUCTIONS = "\n\n".join((
                                                 "duration_ms": 600}}),
     FACE_TOOL_INSTRUCTIONS,
 ))
+
+
+def filter_tool_instructions_for_categories(instructions, categories):
+    """Remove rules for model-hidden device capability categories.
+
+    The administrator keeps one shared rule editor.  Filtering at request
+    time lets each device use its own enabled categories without mutating that
+    shared text for every other device.
+    """
+    enabled = normalize_model_tool_categories(categories)
+    blocked_markers = []
+    if not enabled["chassis"]:
+        blocked_markers.extend(("self.chassis.", "终端动作规则", "电机工具规则"))
+    if not enabled["camera"]:
+        # The server-side face functions always capture a fresh camera frame,
+        # so their visual rules belong to the camera category as well.
+        blocked_markers.extend(("server.face.", "实时视觉规则", "人脸工具规则",
+                                "人脸管理工具规则"))
+    if not blocked_markers:
+        return instructions
+    paragraphs = str(instructions or "").split("\n\n")
+    return "\n\n".join(
+        paragraph for paragraph in paragraphs
+        if not any(marker in paragraph for marker in blocked_markers)
+    )
 
 
 class _PersistentRealtimeContext:
@@ -212,6 +240,8 @@ class OmniClient:
     def effective_instructions(self, include_history: bool = False) -> str:
         tool_instructions = self.config.get("dashscope", {}).get(
             "tool_instructions") or DEFAULT_GLOBAL_TOOL_INSTRUCTIONS
+        tool_instructions = filter_tool_instructions_for_categories(
+            tool_instructions, self.config.get("model_tool_categories", {}))
         parts = [
             self.instructions.strip(),
             LANGUAGE_PROMPTS[self.language],
@@ -378,6 +408,12 @@ class OmniClient:
             return
 
         session = await self.ensure_session()
+        debug_record = {
+            "device_id": self.config.get("device_id", ""),
+            "request": {},
+            "response_events": [],
+            "tool_results": [],
+        }
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "X-DashScope-WorkSpace": self.workspace,
@@ -406,11 +442,18 @@ class OmniClient:
                 if tools:
                     session_config["tools"] = tools
 
-                await ws.send_json({
+                session_update = {
                     "event_id": self._next_event_id("session"),
                     "type": "session.update",
                     "session": session_config,
-                })
+                }
+                debug_record["request"]["session_update"] = session_update
+                debug_record["request"]["audio"] = {
+                    "pcm_bytes": len(pcm),
+                    "chunk_count": (len(pcm) + 3199) // 3200,
+                    "base64": "<omitted to control log size>",
+                }
+                await ws.send_json(session_update)
 
                 # 等 session.updated 就绪
                 ready = False
@@ -442,14 +485,17 @@ class OmniClient:
                     })
 
                 # 3. 手动提交 + 请求响应
-                await ws.send_json({
+                commit_event = {
                     "event_id": self._next_event_id("commit"),
                     "type": "input_audio_buffer.commit",
-                })
-                await ws.send_json({
+                }
+                response_event = {
                     "event_id": self._next_event_id("response"),
                     "type": "response.create",
-                })
+                }
+                debug_record["request"]["events"] = [commit_event, response_event]
+                await ws.send_json(commit_event)
+                await ws.send_json(response_event)
                 log.info("omni: sent %d bytes audio, waiting response", len(pcm))
 
                 # 4. 收响应：音频 delta / 文本 delta / function call。
@@ -466,6 +512,8 @@ class OmniClient:
                     if msg.type == aiohttp.WSMsgType.TEXT:
                         obj = json.loads(msg.data)
                         t = obj.get("type", "")
+                        if t != "response.audio.delta":
+                            debug_record["response_events"].append(obj)
                         emotion = self._extract_emotion(obj)
                         if emotion:
                             yield {"type": "emotion", "emotion": emotion}
@@ -516,15 +564,33 @@ class OmniClient:
                                     completed_call_ids.add(call_id)
 
                             if pending_tool_calls:
-                                await self._complete_tool_calls(ws, pending_tool_calls, tool_handler)
+                                tool_output_events = await self._complete_tool_calls(
+                                    ws, pending_tool_calls, tool_handler)
+                                debug_record["user_transcript"] = user_transcript
+                                debug_record["assistant_text"] = (
+                                    assistant_transcript or "".join(assistant_text_parts))
+                                debug_record["tool_calls"] = pending_tool_calls
+                                model_debug_log.info(json.dumps(
+                                    debug_record, ensure_ascii=False))
+                                debug_record = {
+                                    "device_id": self.config.get("device_id", ""),
+                                    "request": {
+                                        "tool_output_events": tool_output_events,
+                                    },
+                                    "response_events": [],
+                                    "tool_results": [],
+                                }
                                 pending_tool_calls = []
                                 tool_round += 1
-                                await ws.send_json({
+                                followup_response_event = {
                                     "event_id": self._next_event_id(
                                         "tool-response-{}".format(tool_round)),
                                     "type": "response.create",
                                     "response": {"modalities": ["text", "audio"]},
-                                })
+                                }
+                                debug_record["request"].setdefault(
+                                    "events", []).append(followup_response_event)
+                                await ws.send_json(followup_response_event)
                                 continue
                             assistant_text = assistant_transcript or "".join(assistant_text_parts)
                             assistant_text, inline_emotion = self._split_inline_emotion(
@@ -533,6 +599,12 @@ class OmniClient:
                                 yield {"type": "emotion", "emotion": inline_emotion}
                             if assistant_text:
                                 yield {"type": "text", "text": assistant_text}
+                            debug_record["user_transcript"] = user_transcript
+                            debug_record["assistant_text"] = assistant_text
+                            debug_record["tool_call_count"] = tool_round
+                            model_debug_log.info(json.dumps(
+                                debug_record, ensure_ascii=False))
+                            debug_record = None
                             self._remember_turn(
                                 user_transcript,
                                 assistant_text,
@@ -551,6 +623,9 @@ class OmniClient:
         except Exception as e:
             log.error("omni ws error: %s", e)
             yield {"type": "error", "message": str(e)}
+        finally:
+            if debug_record is not None:
+                model_debug_log.info(json.dumps(debug_record, ensure_ascii=False))
 
     @staticmethod
     def _parse_arguments(arguments):
@@ -587,6 +662,7 @@ class OmniClient:
 
     async def _complete_tool_calls(self, ws, calls, tool_handler):
         """Execute device tools, return each result, then let the model reply."""
+        output_events = []
         for call in calls:
             if not call.get("name"):
                 result = json.dumps({"error": "missing function name"})
@@ -602,11 +678,14 @@ class OmniClient:
                 result = json.dumps({"error": "device tool did not return a result"})
             if not isinstance(result, str):
                 result = json.dumps(result, ensure_ascii=False)
-            await ws.send_json({
+            output_event = {
                 "type": "conversation.item.create",
                 "item": {
                     "type": "function_call_output",
                     "call_id": call["id"],
                     "output": result,
                 },
-            })
+            }
+            output_events.append(output_event)
+            await ws.send_json(output_event)
+        return output_events

@@ -23,6 +23,55 @@ MODEL_MOTOR_ACTIONS = {
     "self.chassis.turn_right",
 }
 
+# These switches control only which device functions are supplied to the LLM.
+# The device still advertises every supported MCP tool, so the supervised
+# manual-test panel remains available while a category is hidden.
+MODEL_TOOL_CATEGORY_DEFAULTS = {
+    "chassis": True,
+    "camera": True,
+    "gimbal_servo": True,
+}
+
+
+def model_tool_category(name):
+    """Return the configurable LLM-visibility category for a device tool."""
+    if not isinstance(name, str):
+        return None
+    lowered = name.lower()
+    if lowered.startswith("self.chassis."):
+        return "chassis"
+    if lowered.startswith("self.camera."):
+        return "camera"
+    if (lowered.startswith(("self.gimbal.", "self.servo.")) or
+            "servo" in lowered or "gimbal" in lowered or
+            "pan_tilt" in lowered or "face_tracking" in lowered):
+        return "gimbal_servo"
+    if (lowered.startswith(("self.led.", "self.led_strip.")) or
+            "rgb" in lowered):
+        # RGB LED control is intentionally not exposed to the model.  The
+        # board LED is reserved for firmware status indications.
+        return "__removed__"
+    return None
+
+
+def normalize_model_tool_categories(value):
+    """Merge stored settings with safe backward-compatible defaults."""
+    normalized = dict(MODEL_TOOL_CATEGORY_DEFAULTS)
+    if isinstance(value, dict):
+        for key in normalized:
+            if key in value:
+                normalized[key] = bool(value[key])
+    return normalized
+
+
+def is_model_tool_visible(name, categories=None):
+    category = model_tool_category(name)
+    if category == "__removed__":
+        return False
+    if category is None:
+        return True
+    return normalize_model_tool_categories(categories).get(category, True)
+
 
 class McpBridge:
     """管理单个设备会话的 MCP 交互。"""
@@ -80,7 +129,7 @@ class McpBridge:
             req["call_id"] = call_id  # 自定义字段，关联 Omni tool_call id
         return req
 
-    def make_omni_tools(self, motor_defaults=None) -> list:
+    def make_omni_tools(self, motor_defaults=None, model_tool_categories=None) -> list:
         """Convert the device MCP tools/list result to Realtime function tools.
 
         The ESP32 is the source of truth for capabilities.  Keeping this
@@ -93,6 +142,8 @@ class McpBridge:
                 continue
             name = tool.get("name")
             if not isinstance(name, str) or not name:
+                continue
+            if not is_model_tool_visible(name, model_tool_categories):
                 continue
             annotations = tool.get("annotations") or {}
             if annotations.get("audience") == ["user"]:

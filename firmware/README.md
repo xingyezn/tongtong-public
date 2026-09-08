@@ -2,6 +2,8 @@
 
 [中文](README_zh.md) | English
 
+> **Upstream notice:** This firmware is a derivative work based on the open-source [xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) project. Tongtong-specific hardware support, backend integration, MCP capabilities, and product features are subsequent modifications. The upstream copyright and license are retained in [LICENSE](LICENSE).
+
 This directory contains the current Tongtong ESP32 firmware. The device connects to the self-hosted backend over WebSocket and exposes device capabilities through MCP. Speech recognition, model conversation, TTS, and server-side face management are handled by the backend.
 
 ## Implemented features

@@ -2,6 +2,8 @@
 
 [English](README.md) | 中文
 
+> **上游项目声明：** 本固件基于开源项目 [xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) 进行二次开发。Tongtong 的硬件适配、自建后端接入、MCP 能力和产品功能均为后续改动；上游项目的著作权声明和许可证继续保留，详见 [LICENSE](LICENSE)。
+
 这是当前 Tongtong 项目的 ESP32 固件。固件通过 WebSocket 连接自建后端，并通过 MCP 提供设备能力；语音识别、模型对话、TTS 和服务器端人脸管理由后端完成。
 
 ## 已实现功能

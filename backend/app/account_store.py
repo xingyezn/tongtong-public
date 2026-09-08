@@ -17,6 +17,7 @@ BINDING_CODE_RE = re.compile(r"^[0-9]{8}$")
 BINDING_CODE_TTL_SECONDS = 10 * 60
 MODEL_SETTING_KEYS = {
     "model", "language", "voice", "instructions", "conversation_timeout_minutes",
+    "model_tool_categories",
 }
 VAD_SETTING_KEYS = {"silence_duration_ms", "energy_threshold"}
 INTERRUPTION_SETTING_KEYS = {
@@ -935,11 +936,20 @@ class AccountStore:
             raise PermissionError("无权访问该设备")
         clean = {key: settings[key] for key in MODEL_SETTING_KEYS if key in settings}
         with self._lock, self._db:
+            row = self._db.execute(
+                "SELECT model_settings FROM devices WHERE device_id=?", (device_id,)
+            ).fetchone()
+            try:
+                merged = json.loads((row["model_settings"] if row else "") or "{}")
+            except (TypeError, ValueError):
+                merged = {}
+            merged.update(clean)
+            merged = {key: merged[key] for key in MODEL_SETTING_KEYS if key in merged}
             self._db.execute(
                 "UPDATE devices SET model_settings=? WHERE device_id=?",
-                (json.dumps(clean, ensure_ascii=False), device_id),
+                (json.dumps(merged, ensure_ascii=False), device_id),
             )
-        return clean
+        return merged
 
     def get_global_setting(self, key, default=""):
         if key not in GLOBAL_SETTING_KEYS:

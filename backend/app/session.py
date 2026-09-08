@@ -21,6 +21,7 @@ import uuid
 from .opus_codec import OpusCodec, resample_pcm
 from .omni_client import OmniClient
 from .face_service import FaceService
+from .mcp_bridge import is_model_tool_visible
 
 log = logging.getLogger("session")
 
@@ -572,9 +573,11 @@ class Session:
         response_emotion_source = None
 
         motor_defaults = self.config.get("motor_defaults", {})
-        tools = (self._mcp.make_omni_tools(motor_defaults)
+        model_tool_categories = self.config.get("model_tool_categories", {})
+        tools = (self._mcp.make_omni_tools(motor_defaults, model_tool_categories)
                  if self._mcp else [])
-        tools.extend(FACE_TOOLS)
+        if is_model_tool_visible("self.camera.take_photo", model_tool_categories):
+            tools.extend(FACE_TOOLS)
         tools.append(CONVERSATION_END_TOOL)
         async for evt in self.omni.chat_stream(
                 pcm, tools=tools, tool_handler=self._handle_tool_call):
@@ -620,7 +623,9 @@ class Session:
 
         fallback_tool = (
             detect_motor_fallback_tool(input_transcript)
-            if not self._motor_tool_called else None)
+            if (not self._motor_tool_called and
+                is_model_tool_visible("self.chassis.go_forward",
+                                      model_tool_categories)) else None)
         if fallback_tool:
             log.warning(
                 "model returned no motor MCP call; forcing fallback: %s -> %s",
@@ -839,6 +844,13 @@ class Session:
                 "instruction": "请给出简短告别回复；播放和保存完成后系统将进入待命。",
             }, ensure_ascii=False)
         if isinstance(name, str) and name.startswith(FACE_TOOL_PREFIX):
+            if not is_model_tool_visible(
+                    "self.camera.take_photo",
+                    self.config.get("model_tool_categories", {})):
+                log.warning("model called disabled camera/face tool %s; ignored", name)
+                return json.dumps(
+                    {"error": "camera category is disabled for the model"},
+                    ensure_ascii=False)
             if name == "server.face.list":
                 log.warning("blocked model access to face list: device=%s", self.device_id)
                 return json.dumps({"error": "face list is not available to the model"},
@@ -846,6 +858,12 @@ class Session:
             return await self._handle_face_tool(name, arguments)
         if not name or not self._mcp:
             return None
+
+        if not is_model_tool_visible(name,
+                                     self.config.get("model_tool_categories", {})):
+            log.warning("model called disabled MCP category tool %s; ignored", name)
+            return json.dumps({"error": "tool category is disabled for the model"},
+                              ensure_ascii=False)
 
         # 先确认工具存在
         tool_names = {t.get("name") for t in self._mcp.tools}

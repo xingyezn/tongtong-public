@@ -14,6 +14,7 @@ from aiohttp import web, WSMsgType
 
 from .session import Session
 from .mcp_bridge import McpBridge
+from .mcp_bridge import normalize_model_tool_categories
 
 log = logging.getLogger("ws")
 
@@ -37,10 +38,13 @@ class WsGateway:
         config["motor_defaults"] = {
             "speed": 85, "duration_ms": 600, "swap_wheels": False}
         if self.account_store:
-            config.setdefault("dashscope", {}).update(
-                self.account_store.get_model_settings(device_id))
+            model_settings = self.account_store.get_model_settings(device_id)
+            model_tool_categories = model_settings.pop("model_tool_categories", {})
+            config.setdefault("dashscope", {}).update(model_settings)
             config.setdefault("dashscope", {})["tool_instructions"] = (
                 self.account_store.get_global_setting("tool_instructions"))
+            config["model_tool_categories"] = normalize_model_tool_categories(
+                model_tool_categories)
             for key, minimum, maximum in (("motor_default_speed", 0, 100),
                                           ("motor_default_duration_ms", 1, 10000)):
                 value = self.account_store.get_global_setting(key)
@@ -150,6 +154,7 @@ class WsGateway:
             if device_record and device_record.get("owner_user_id") is None else None
         )
         device_config = self._device_config(device_id)
+        device_config["device_id"] = device_id
         turn_recorder = None
         if self.account_store:
             def turn_recorder(did, user_text, assistant_text, usage=None,
