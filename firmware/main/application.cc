@@ -19,7 +19,7 @@
 #include <font_awesome.h>
 
 #define TAG "Application"
-#define TTS_ECHO_GUARD_US (500 * 1000)
+#define TTS_ECHO_GUARD_US (300 * 1000)
 
 const char* Application::SelectSpeakingEmotion(const char* text) {
     if (text == nullptr || text[0] == '\0') {

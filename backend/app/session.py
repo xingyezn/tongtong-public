@@ -47,7 +47,9 @@ DEFAULT_MOTOR_DURATION_MS = 600
 # Covers WebSocket transit and the device's decoder/DMA pipeline after the
 # model has finished generating its audio stream.
 TTS_PLAYBACK_TRANSPORT_MARGIN_S = 0.20
-VAD_POST_PLAYBACK_DISCARD_FRAMES = 4  # 240 ms of simplex speaker tail
+# Device audio is packetized in 60 ms frames; two frames are the closest safe
+# representation of the requested 100 ms post-playback discard window.
+VAD_POST_PLAYBACK_DISCARD_FRAMES = 2  # 120 ms of simplex speaker tail
 VAD_MIN_CONSECUTIVE_SPEECH_FRAMES = 3  # 180 ms of sustained energy
 VAD_PREROLL_FRAMES = 5  # keep 300 ms before confirmed speech
 CONVERSATION_END_TOOL_NAME = "server.conversation.end"
