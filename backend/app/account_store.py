@@ -588,6 +588,25 @@ class AccountStore:
             ).fetchone()
         return dict(row) if row else None
 
+    def update_firmware_release_description(self, release_id, description):
+        description = str(description or "").strip()
+        if len(description) > 2000:
+            raise AccountError("鍥轰欢鎻忚堪涓嶈兘瓒呰繃 2000 涓瓧绗?")
+        with self._lock, self._db:
+            row = self._db.execute(
+                "SELECT * FROM firmware_releases WHERE id=?", (int(release_id),)
+            ).fetchone()
+            if row is None:
+                raise AccountError("鍥轰欢鐗堟湰涓嶅瓨鍦?")
+            self._db.execute(
+                "UPDATE firmware_releases SET description=? WHERE id=?",
+                (description, int(release_id)),
+            )
+            row = self._db.execute(
+                "SELECT * FROM firmware_releases WHERE id=?", (int(release_id),)
+            ).fetchone()
+        return dict(row)
+
     def delete_firmware_release(self, release_id):
         with self._lock, self._db:
             row = self._db.execute(

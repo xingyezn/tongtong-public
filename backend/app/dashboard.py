@@ -1496,6 +1496,10 @@ async function toggleDevice(id,is_active){if(!confirm(is_active?'确认启用该
 async function switchEnvironment(id){const environment=prompt('目标环境：test 或 production','test');if(!environment)return;const ota_url=prompt('目标环境 OTA 地址，例如 http://192.168.31.237:8082/ota');if(!ota_url)return;if(!confirm('设备将保存新地址并立即重启，确认继续？'))return;try{await post('/api/admin/devices/switch-environment',{device_id:id,environment,ota_url,reboot:true})}catch(e){toast(e.message,true)}}
 async function loadFaceServiceSettings(){try{const s=await api("/api/admin/settings");const f=s.face_service||{};document.getElementById("face-service-url").value=f.base_url||"";document.getElementById("face-service-user").value=f.username||"";document.getElementById("face-service-password").value=f.password||""}catch(e){toast(e.message,true)}}
 async function saveFaceServiceSettings(){try{await api("/api/admin/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({face_service:{base_url:document.getElementById("face-service-url").value,username:document.getElementById("face-service-user").value,password:document.getElementById("face-service-password").value}})});toast("人脸服务配置已保存并应用")}catch(e){toast(e.message,true)}}
+function arrangeAdminSections(){const cards=[...document.querySelectorAll('main > section.card')];const face=cards.find(x=>x.querySelector('h2')?.textContent.includes('服务器端人脸识别服务'));const fw=cards.find(x=>x.querySelector('h2')?.textContent.includes('固件版本库'));if(face&&fw)fw.after(face)}
+function renderFirmware(){const devices=data.devices||[];document.getElementById('firmware-releases').innerHTML=(firmware.releases||[]).map(r=>{const opts='<option value="">选择在线设备</option>'+devices.filter(d=>d.online&&d.is_active).map(d=>`<option value="${esc(d.device_id)}">${esc(d.name||d.device_id)}</option>`).join('');const jobs=(firmware.deployments||[]).filter(j=>j.release_id===r.id);const j=jobs[jobs.length-1];const pct=j?Number(j.progress||0):0;const logs=j?(j.logs||[]).slice(-5).map(x=>new Date(x.time*1000).toLocaleTimeString()+' '+x.message).join('\\n'):'';return `<tr><td>${r.id}</td><td><b>${esc(r.version)}</b></td><td><input id="fw-desc-${r.id}" value="${esc(r.description||'')}" style="min-width:220px"><br><button onclick="updateFirmwareDescription(${r.id})">保存描述</button></td><td>${(Number(r.size_bytes)/1024/1024).toFixed(2)} MiB</td><td style="max-width:150px;word-break:break-all;font-size:11px"><code>${esc(r.sha256)}</code></td><td>${new Date(r.created_at*1000).toLocaleString()}</td><td><select id="fw-device-${r.id}">${opts}</select></td><td><button onclick="deployFirmware(${r.id})">下发</button></td><td>${j?`<progress max="100" value="${pct}"></progress> ${pct}%<br><small>${esc(j.message)}</small><pre style="max-width:360px;white-space:pre-wrap;font-size:11px">${esc(logs)}</pre><button onclick="clearFirmwareLog('${j.id}')">清除日志</button>`:'—'}</td><td><a class="btn" href="/api/admin/firmware/${r.id}/download">下载</a> <button class="danger" onclick="deleteFirmware(${r.id})">删除</button></td></tr>`}).join('')||'<tr><td colspan="10">暂无固件版本</td></tr>'}
+async function updateFirmwareDescription(id){const input=document.getElementById('fw-desc-'+id);if(!input)return;try{await api('/api/admin/firmware/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({description:input.value})});toast('固件描述已保存');await load()}catch(e){toast(e.message,true)}}
+arrangeAdminSections();
 loadFaceServiceSettings();
 </script></body></html>"""
 
@@ -1589,6 +1593,8 @@ class Dashboard:
         app.router.add_post("/api/admin/settings", self.api_admin_settings_set)
         app.router.add_get("/api/admin/firmware", self.api_admin_firmware_list)
         app.router.add_post("/api/admin/firmware", self.api_admin_firmware_upload)
+        app.router.add_put("/api/admin/firmware/{release_id}",
+                           self.api_admin_firmware_update)
         app.router.add_delete("/api/admin/firmware/{release_id}",
                               self.api_admin_firmware_delete)
         app.router.add_get("/api/admin/firmware/{release_id}/download",
@@ -1765,8 +1771,26 @@ class Dashboard:
 
     async def api_admin_settings_get(self, request):
         self._require_admin(request)
-        from .omni_client import DEFAULT_TOOL_INSTRUCTIONS
+        from .omni_client import DEFAULT_GLOBAL_TOOL_INSTRUCTIONS
         face_service = dict(self.config.get("face_service", {}))
+        tool_instructions = self.account_store.get_global_setting(
+            "tool_instructions") or ""
+        if not tool_instructions.strip():
+            tool_instructions = DEFAULT_GLOBAL_TOOL_INSTRUCTIONS
+            self.account_store.set_global_setting(
+                "tool_instructions", tool_instructions)
+        else:
+            additions = []
+            if "self.chassis.go_forward" not in tool_instructions:
+                additions.append("电机工具规则：\n" +
+                                 DEFAULT_GLOBAL_TOOL_INSTRUCTIONS.split("\n\n", 1)[1].split("\n\n", 1)[0])
+            if "server.face.recognize_current" not in tool_instructions:
+                additions.append("人脸工具规则：\n" +
+                                 DEFAULT_GLOBAL_TOOL_INSTRUCTIONS.rsplit("\n\n", 1)[-1])
+            if additions:
+                tool_instructions = tool_instructions.rstrip() + "\n\n" + "\n\n".join(additions)
+                self.account_store.set_global_setting(
+                    "tool_instructions", tool_instructions)
         motor_defaults = {
             "speed": self._global_int_setting("motor_default_speed", 85, 0, 100),
             "duration_ms": self._global_int_setting(
@@ -1775,9 +1799,7 @@ class Dashboard:
                 "motor_swap_wheels", False),
         }
         return web.json_response({
-            "tool_instructions": (
-                self.account_store.get_global_setting("tool_instructions")
-                or DEFAULT_TOOL_INSTRUCTIONS),
+            "tool_instructions": tool_instructions,
             "face_service": face_service,
             "motor_defaults": motor_defaults,
         })
@@ -1799,7 +1821,9 @@ class Dashboard:
         admin = self._require_admin(request)
         try:
             data = await request.json()
-            tool_instructions = (data.get("tool_instructions") or "").strip()
+            from .omni_client import DEFAULT_GLOBAL_TOOL_INSTRUCTIONS
+            tool_instructions = (data.get("tool_instructions") or
+                                 DEFAULT_GLOBAL_TOOL_INSTRUCTIONS).strip()
             if len(tool_instructions) > 12000:
                 raise ValueError("invalid tool instructions")
             self.account_store.set_global_setting(
@@ -2020,6 +2044,22 @@ class Dashboard:
                     target_path.unlink()
                 except FileNotFoundError:
                     pass
+
+    async def api_admin_firmware_update(self, request):
+        admin = self._require_admin(request)
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError("请求体必须是 JSON 对象")
+            release_id = int(request.match_info["release_id"])
+            release = self.account_store.update_firmware_release_description(
+                release_id, payload.get("description", ""))
+        except (ValueError, TypeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        self.account_store.audit_admin_action(
+            admin["id"], "firmware.update", "firmware", release["id"], {
+                "version": release["version"], "fields": ["description"]})
+        return web.json_response(self._firmware_json(release))
 
     async def api_admin_firmware_delete(self, request):
         admin = self._require_admin(request)

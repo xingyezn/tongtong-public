@@ -93,6 +93,14 @@ def motor_tool_instructions(config):
     ).format(speed, duration_ms)
 
 
+DEFAULT_GLOBAL_TOOL_INSTRUCTIONS = "\n\n".join((
+    DEFAULT_TOOL_INSTRUCTIONS,
+    motor_tool_instructions({"motor_defaults": {"speed": 85,
+                                                "duration_ms": 1000}}),
+    FACE_TOOL_INSTRUCTIONS,
+))
+
+
 class _PersistentRealtimeContext:
     """Reuse one Realtime WebSocket for the lifetime of a device session."""
 
@@ -199,13 +207,11 @@ class OmniClient:
 
     def effective_instructions(self, include_history: bool = False) -> str:
         tool_instructions = self.config.get("dashscope", {}).get(
-            "tool_instructions") or DEFAULT_TOOL_INSTRUCTIONS
+            "tool_instructions") or DEFAULT_GLOBAL_TOOL_INSTRUCTIONS
         parts = [
             self.instructions.strip(),
             LANGUAGE_PROMPTS[self.language],
             tool_instructions.strip(),
-            motor_tool_instructions(self.config),
-            FACE_TOOL_INSTRUCTIONS,
         ]
         user_memory = self.config.get("dashscope", {}).get("user_memory_prompt", "")
         if user_memory:
