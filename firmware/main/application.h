@@ -34,6 +34,7 @@
 #define MAIN_EVENT_STOP_LISTENING       (1 << 11)
 #define MAIN_EVENT_STATE_CHANGED        (1 << 12)
 #define MAIN_EVENT_END_CONVERSATION     (1 << 13)
+#define MAIN_EVENT_OTA_CONFIRM          (1 << 14)
 
 
 enum AecMode {
@@ -149,6 +150,7 @@ private:
     bool tts_playback_drained_ = false;
     bool standby_after_tts_ = false;
     bool tts_has_emotion_ = false;
+    std::atomic<bool> ota_confirmation_pending_{false};
     std::atomic<bool> accepting_tts_audio_{false};
     bool network_connected_ = false;
     bool automatic_interrupt_enabled_ = true;

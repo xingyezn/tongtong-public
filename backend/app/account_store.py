@@ -170,6 +170,13 @@ class AccountStore:
                 CREATE INDEX IF NOT EXISTS idx_firmware_releases_created
                     ON firmware_releases(created_at DESC, id DESC);
             """)
+            firmware_columns = {
+                row["name"] for row in self._db.execute(
+                    "PRAGMA table_info(firmware_releases)")
+            }
+            if "published" not in firmware_columns:
+                self._db.execute(
+                    "ALTER TABLE firmware_releases ADD COLUMN published INTEGER NOT NULL DEFAULT 0")
             user_columns = {
                 row["name"] for row in self._db.execute("PRAGMA table_info(users)")
             }
@@ -569,8 +576,8 @@ class AccountStore:
                 cursor = self._db.execute("""
                     INSERT INTO firmware_releases(
                         version,description,stored_name,original_name,sha256,
-                        size_bytes,created_by,created_at)
-                    VALUES(?,?,?,?,?,?,?,?)
+                        size_bytes,created_by,created_at,published)
+                    VALUES(?,?,?,?,?,?,?,?,0)
                 """, (version, description, str(stored_name),
                       str(original_name or ""), str(sha256), int(size_bytes),
                       int(created_by), time.time()))
@@ -611,7 +618,7 @@ class AccountStore:
             self._db.execute("""
                 UPDATE firmware_releases SET
                     version=?, description=?, stored_name=?, original_name=?,
-                    sha256=?, size_bytes=?, created_by=?, created_at=?
+                    sha256=?, size_bytes=?, created_by=?, created_at=?, published=0
                 WHERE id=?
             """, (version, description, str(stored_name),
                   str(original_name or ""), str(sha256), int(size_bytes),
@@ -651,6 +658,22 @@ class AccountStore:
             self._db.execute(
                 "UPDATE firmware_releases SET description=? WHERE id=?",
                 (description, int(release_id)),
+            )
+            row = self._db.execute(
+                "SELECT * FROM firmware_releases WHERE id=?", (int(release_id),)
+            ).fetchone()
+        return dict(row)
+
+    def update_firmware_release_published(self, release_id, published):
+        with self._lock, self._db:
+            row = self._db.execute(
+                "SELECT * FROM firmware_releases WHERE id=?", (int(release_id),)
+            ).fetchone()
+            if row is None:
+                raise AccountError("固件版本不存在")
+            self._db.execute(
+                "UPDATE firmware_releases SET published=? WHERE id=?",
+                (1 if published else 0, int(release_id)),
             )
             row = self._db.execute(
                 "SELECT * FROM firmware_releases WHERE id=?", (int(release_id),)

@@ -546,10 +546,55 @@ void Application::CheckNewVersion() {
         retry_delay = 10; // Reset retry delay
 
         if (ota_->HasNewVersion()) {
-            if (UpgradeFirmware(ota_->GetFirmwareUrl(), ota_->GetFirmwareVersion())) {
-                return; // This line will never be reached after reboot
+            std::string message = "发现新固件 " + ota_->GetFirmwareVersion() +
+                                  "，提示音播放期间或之后5秒内按待命键确认更新";
+            ESP_LOGI(TAG, "New firmware %s is available; accepting confirmation during prompt and for 5 seconds afterward",
+                     ota_->GetFirmwareVersion().c_str());
+            display->SetStatus("确认更新");
+            display->SetChatMessage("system", message.c_str());
+
+            // Start accepting the standby button before playing the prompt.
+            // The activation task waits for the audio to finish below, but
+            // the main event loop can consume the button while the prompt is
+            // still being played. Keep a clean confirmation bit in case a
+            // previous activation attempt left one behind.
+            xEventGroupClearBits(event_group_, MAIN_EVENT_OTA_CONFIRM);
+            ota_confirmation_pending_.store(true);
+            audio_service_.PlaySound(Lang::Sounds::OGG_OTA_CONFIRM);
+            vTaskDelay(pdMS_TO_TICKS(20));
+            bool confirmed = false;
+            while (!audio_service_.IsPlaybackComplete()) {
+                // Do not wait for the prompt to finish after the user has
+                // already confirmed. UpgradeFirmware() will stop the audio
+                // and enter the OTA flow immediately.
+                EventBits_t button_event = xEventGroupWaitBits(
+                    event_group_, MAIN_EVENT_OTA_CONFIRM, pdTRUE, pdFALSE, 0);
+                if (button_event & MAIN_EVENT_OTA_CONFIRM) {
+                    confirmed = true;
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(20));
             }
-            // If upgrade failed, continue to normal operation
+
+            // Keep the original five-second grace period after the prompt as
+            // well. A press during playback is therefore accepted, and a
+            // press shortly after playback is still accepted too.
+            if (!confirmed) {
+                EventBits_t confirmation = xEventGroupWaitBits(
+                    event_group_, MAIN_EVENT_OTA_CONFIRM, pdTRUE, pdFALSE,
+                    pdMS_TO_TICKS(5000));
+                confirmed = (confirmation & MAIN_EVENT_OTA_CONFIRM) != 0;
+            }
+            ota_confirmation_pending_.store(false);
+
+            if (confirmed) {
+                if (UpgradeFirmware(ota_->GetFirmwareUrl(), ota_->GetFirmwareVersion())) {
+                    return; // This line will never be reached after reboot
+                }
+                // If upgrade failed, continue to normal operation.
+            } else {
+                ESP_LOGI(TAG, "OTA update declined or confirmation timed out");
+            }
         }
 
         // No new version, mark the current version as valid
@@ -874,6 +919,13 @@ void Application::EndConversation() {
 
 void Application::HandleToggleChatEvent() {
     auto state = GetDeviceState();
+
+    if (ota_confirmation_pending_.load()) {
+        ESP_LOGI(TAG, "OTA update confirmed by standby button");
+        ota_confirmation_pending_.store(false);
+        xEventGroupSetBits(event_group_, MAIN_EVENT_OTA_CONFIRM);
+        return;
+    }
     
     if (state == kDeviceStateActivating) {
         SetDeviceState(kDeviceStateIdle);

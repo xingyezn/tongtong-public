@@ -8,6 +8,7 @@
 import hashlib
 import json
 import logging
+from pathlib import Path
 import time
 import uuid
 
@@ -22,6 +23,30 @@ class HttpApi:
         self.account_store = account_store
         # 设备 token 表: mac -> token
         self.device_tokens: dict = {}
+        self.firmware_tokens: dict = {}
+
+    def _firmware_public_base(self):
+        base = self.config.get("server", {}).get("public_ws_url", "")
+        base = base.replace("wss://", "https://").replace("ws://", "http://")
+        if base.endswith("/ws"):
+            base = base[:-3]
+        return base.rstrip("/")
+
+    def _latest_published_firmware(self):
+        if self.account_store is None:
+            return None
+        releases = [row for row in self.account_store.list_firmware_releases()
+                    if bool(row.get("published"))]
+        def version_key(row):
+            parts = []
+            for part in str(row.get("version", "")).split("."):
+                try:
+                    parts.append(int(part))
+                except ValueError:
+                    parts.append(-1)
+            return tuple(parts)
+        return max(releases, key=lambda row: (version_key(row), row["id"]),
+                   default=None)
 
     def _ws_config(self, device_id: str) -> dict:
         return {
@@ -77,6 +102,19 @@ class HttpApi:
                 "timezone_offset": 480,
             },
         }
+        release = self._latest_published_firmware()
+        if release is not None:
+            token = uuid.uuid4().hex
+            self.firmware_tokens[token] = {
+                "release_id": release["id"],
+                "expires_at": time.time() + 15 * 60,
+            }
+            resp["firmware"] = {
+                "version": release["version"],
+                "url": self._firmware_public_base() +
+                       "/ota/firmware-auto/" + token,
+                "force": 0,
+            }
         return web.json_response(resp)
 
     async def activate(self, request: web.Request):
@@ -98,7 +136,31 @@ class HttpApi:
         # Firmware derives the activation URL as ota_url + "/activate" (see
         # ota.cc::Activate), so also accept the suffixed path.
         app.router.add_post("/ota/activate", self.activate)
+        app.router.add_get("/ota/firmware-auto/{token}", self.firmware_auto_download)
         app.router.add_get("/health", self.health)
+
+    async def firmware_auto_download(self, request):
+        token = request.match_info["token"]
+        entry = self.firmware_tokens.get(token)
+        if entry is None or entry["expires_at"] < time.time():
+            self.firmware_tokens.pop(token, None)
+            raise web.HTTPNotFound(text="firmware download link expired")
+        release = self.account_store.get_firmware_release(entry["release_id"])
+        if release is None or not bool(release.get("published")):
+            raise web.HTTPNotFound(text="firmware release is not published")
+        path = Path(self.config.get("storage", {}).get("firmware_directory",
+                        "data/firmware"))
+        if not path.is_absolute():
+            path = Path(__file__).resolve().parents[1] / path
+        path = path / Path(release["stored_name"]).name
+        if not path.is_file():
+            raise web.HTTPNotFound(text="firmware file not found")
+        self.firmware_tokens.pop(token, None)
+        return web.FileResponse(path, headers={
+            "Content-Disposition": "attachment; filename=firmware.bin",
+            "X-Firmware-Version": release["version"],
+            "X-Firmware-SHA256": release["sha256"],
+        })
 
     async def health(self, request):
         return web.json_response({

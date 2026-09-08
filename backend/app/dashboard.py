@@ -1581,6 +1581,9 @@ function renderFirmware(){const devices=data.devices||[];document.getElementById
 function editFirmwareDescription(id){const text=document.getElementById('fw-desc-text-'+id),editor=document.getElementById('fw-desc-editor-'+id),input=document.getElementById('fw-desc-'+id);if(!text||!editor||!input)return;text.style.display='none';editor.style.display='block';input.focus();input.select()}
 function cancelFirmwareDescription(id){const text=document.getElementById('fw-desc-text-'+id),editor=document.getElementById('fw-desc-editor-'+id);if(text&&editor){editor.style.display='none';text.style.display='inline-block'}}
 async function updateFirmwareDescription(id){const input=document.getElementById('fw-desc-'+id);if(!input)return;try{await api('/api/admin/firmware/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({description:input.value})});toast('固件描述已保存');await load()}catch(e){toast(e.message,true)}}
+const baseRenderFirmware=renderFirmware;
+renderFirmware=function(){baseRenderFirmware();const table=document.getElementById('firmware-releases').closest('table');const head=table?.querySelector('thead tr');if(head&&!head.querySelector('.firmware-published-head')){const th=document.createElement('th');th.className='firmware-published-head';th.textContent='是否发布';head.insertBefore(th,head.children[6]||null)}const rows=[...document.getElementById('firmware-releases').children];rows.forEach(row=>{if(row.children.length<2||row.querySelector('.firmware-published-cell'))return;const id=Number(row.children[0].textContent);const release=(firmware.releases||[]).find(item=>Number(item.id)===id);const cell=row.insertCell(6);cell.className='firmware-published-cell';cell.innerHTML='<label><input type="checkbox" '+(release&&release.published?'checked ':'')+'onchange="toggleFirmwarePublished('+id+',this.checked)"> 发布</label>'})};
+async function toggleFirmwarePublished(id,published){try{await api('/api/admin/firmware/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({published})});toast(published?'固件已发布，OTA 将允许设备发现该版本':'固件已取消发布，OTA 不再选择该版本');await load()}catch(e){toast(e.message,true)}}
 arrangeAdminSections();
 loadFaceServiceSettings();
 </script></body></html>"""
@@ -2176,13 +2179,19 @@ class Dashboard:
             if not isinstance(payload, dict):
                 raise ValueError("请求体必须是 JSON 对象")
             release_id = int(request.match_info["release_id"])
-            release = self.account_store.update_firmware_release_description(
-                release_id, payload.get("description", ""))
+            if "published" in payload:
+                release = self.account_store.update_firmware_release_published(
+                    release_id, bool(payload.get("published")))
+            else:
+                release = self.account_store.update_firmware_release_description(
+                    release_id, payload.get("description", ""))
         except (ValueError, TypeError) as exc:
             return web.json_response({"error": str(exc)}, status=400)
         self.account_store.audit_admin_action(
             admin["id"], "firmware.update", "firmware", release["id"], {
-                "version": release["version"], "fields": ["description"]})
+                "version": release["version"],
+                "fields": ["published" if "published" in payload else "description"],
+                "published": bool(release.get("published"))})
         return web.json_response(self._firmware_json(release))
 
     async def api_admin_firmware_delete(self, request):

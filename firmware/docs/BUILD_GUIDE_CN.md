@@ -110,6 +110,30 @@ firmware\vendor\esp-sr-libdl-fix\libdl_lib.a
 
 `managed_components` 是依赖解析产生的目录，执行 `fullclean` 或重新解析组件后可能恢复默认内容；必须通过构建脚本重新应用修复。详见 [ESP_SR_ESPDL_CONFLICT_FIX.md](ESP_SR_ESPDL_CONFLICT_FIX.md)。
 
+### 4.1 生成固定语音资源
+
+固件的固定提示音使用 OGG/Opus 文件，并由 `firmware/main/CMakeLists.txt` 自动嵌入固件。新增中文提示音时，可在 Windows 上使用系统中文语音引擎生成 WAV，再用 FFmpeg 转为单声道 Opus OGG：
+
+```powershell
+$voiceText = "发现新版本，请按待命键确认更新。"
+$wavPath = Join-Path $env:TEMP "tongtong-fixed-prompt.wav"
+$oggPath = "firmware\main\assets\locales\zh-CN\ota_confirm.ogg"
+
+Add-Type -AssemblyName System.Speech
+$speaker = New-Object System.Speech.Synthesis.SpeechSynthesizer
+$speaker.SelectVoice("Microsoft Huihui Desktop")
+$speaker.Rate = -1
+$speaker.Volume = 100
+$speaker.SetOutputToWaveFile($wavPath)
+$speaker.Speak($voiceText)
+$speaker.Dispose()
+
+ffmpeg -y -i $wavPath -c:a libopus -b:a 32k $oggPath
+Remove-Item -LiteralPath $wavPath -Force
+```
+
+生成前确认电脑安装了 `Microsoft Huihui Desktop` 和 FFmpeg；如果语音引擎名称不同，应先用 `$speaker.GetInstalledVoices()` 查看实际名称。文件名会转换为头文件常量，例如 `ota_confirm.ogg` 对应 `Lang::Sounds::OGG_OTA_CONFIRM`。将 OGG 放入对应语言目录后重新执行构建脚本，CMake 会通过目录扫描自动嵌入；不要手工修改生成的 `firmware\main\assets\lang_config.h`。音频资源属于固件资源变更，验证时应使用完整烧录流程，不能只烧录应用区。
+
 ## 5. 推荐构建方式
 
 ### 5.1 日常增量构建
