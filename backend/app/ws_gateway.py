@@ -8,6 +8,7 @@ import copy
 import json
 import logging
 import time
+import json
 from typing import Optional
 
 from aiohttp import web, WSMsgType
@@ -15,6 +16,7 @@ from aiohttp import web, WSMsgType
 from .session import Session
 from .mcp_bridge import McpBridge
 from .mcp_bridge import normalize_model_tool_categories
+from .omni_client import normalize_global_tool_rules
 
 log = logging.getLogger("ws")
 
@@ -43,6 +45,13 @@ class WsGateway:
             config.setdefault("dashscope", {}).update(model_settings)
             config.setdefault("dashscope", {})["tool_instructions"] = (
                 self.account_store.get_global_setting("tool_instructions"))
+            raw_rules = self.account_store.get_global_setting("tool_rules_json")
+            try:
+                config.setdefault("dashscope", {})["tool_rules"] = normalize_global_tool_rules(
+                    json.loads(raw_rules),
+                    config.setdefault("dashscope", {}).get("tool_instructions"))
+            except (TypeError, ValueError):
+                pass
             config["model_tool_categories"] = normalize_model_tool_categories(
                 model_tool_categories)
             for key, minimum, maximum in (("motor_default_speed", 0, 100),

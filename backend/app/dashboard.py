@@ -1586,6 +1586,37 @@ renderFirmware=function(){baseRenderFirmware();const table=document.getElementBy
 async function toggleFirmwarePublished(id,published){try{await api('/api/admin/firmware/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({published})});toast(published?'固件已发布，OTA 将允许设备发现该版本':'固件已取消发布，OTA 不再选择该版本');await load()}catch(e){toast(e.message,true)}}
 arrangeAdminSections();
 loadFaceServiceSettings();
+// Global tool rules editor: replace the legacy textarea with per-rule switches.
+// The backend still accepts the legacy field for compatibility.
+(async function(){
+  const legacy=document.getElementById('global-tool-instructions');
+  if(!legacy)return;
+  const holder=document.createElement('div'); holder.id='global-tool-rules';
+  legacy.parentElement.insertBefore(holder,legacy); legacy.style.display='none';
+  let rules=[];
+  function renderEditableRules(){
+    const table=holder.querySelector('table'); if(!table)return;
+    const body=table.querySelector('tbody');
+    [...body.querySelectorAll('tr')].forEach((row,i)=>{
+      const cell=row.children[3], area=cell?.querySelector('textarea');
+      if(!area||cell.querySelector('.rule-label'))return;
+      const label=document.createElement('span'); label.className='rule-label';
+      label.textContent=area.value; label.title='双击编辑'; label.ondblclick=()=>{
+        label.style.display='none'; area.style.display='inline-block'; buttons.style.display='inline-block'; area.focus();
+      };
+      const buttons=document.createElement('span'); buttons.style.display='none';
+      const save=document.createElement('button'); save.textContent='保存'; save.onclick=()=>{if(area.value.trim()){label.textContent=area.value.trim();area.style.display='none';buttons.style.display='none';label.style.display='inline-block'}};
+      const cancel=document.createElement('button'); cancel.textContent='取消'; cancel.onclick=()=>{area.value=label.textContent;area.style.display='none';buttons.style.display='none';label.style.display='inline-block'};
+      buttons.append(' ',save,' ',cancel); area.style.display='none'; cell.insertBefore(label,area); cell.appendChild(buttons);
+    });
+    if(!holder.querySelector('.add-global-rule')){const add=document.createElement('button');add.className='add-global-rule';add.textContent='新增规则';add.onclick=()=>{rules.push({id:'custom-'+Date.now(),name:'新规则',category:'general',enabled:true,content:'请填写规则内容'});render();renderEditableRules()};holder.appendChild(add)}
+  }
+  function render(){holder.innerHTML='<table><thead><tr><th>启用</th><th>规则</th><th>类别</th><th>内容</th></tr></thead><tbody>'+rules.map((r,i)=>'<tr><td><input type="checkbox" data-rule-enabled="'+i+'" '+(r.enabled?'checked':'')+'></td><td>'+esc(r.name)+'</td><td>'+esc(r.category)+'</td><td><textarea data-rule-content="'+i+'" rows="3" style="width:100%;font:12px Consolas,monospace">'+esc(r.content)+'</textarea></td></tr>').join('')+'</tbody></table>'}
+  try{const settings=await api('/api/admin/settings');rules=settings.tool_rules||[];render();renderEditableRules();}
+  catch(e){toast(e.message,true)}
+  window.saveGlobalSettings=async function(){try{rules=rules.map((r,i)=>({...r,enabled:document.querySelector('[data-rule-enabled="'+i+'"]')?.checked!==false,content:document.querySelector('[data-rule-content="'+i+'"]')?.value||''}));const result=await api('/api/admin/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool_rules:rules})});rules=result.tool_rules||rules;render();toast('全局工具规则已保存并应用')}catch(e){toast(e.message,true)}};
+  setInterval(renderEditableRules, 500);
+})();
 </script></body></html>"""
 
 
@@ -1867,7 +1898,8 @@ class Dashboard:
 
     async def api_admin_settings_get(self, request):
         self._require_admin(request)
-        from .omni_client import DEFAULT_GLOBAL_TOOL_INSTRUCTIONS
+        from .omni_client import (DEFAULT_GLOBAL_TOOL_INSTRUCTIONS,
+                                  normalize_global_tool_rules)
         face_service = dict(self.config.get("face_service", {}))
         tool_instructions = self.account_store.get_global_setting(
             "tool_instructions") or ""
@@ -1887,6 +1919,12 @@ class Dashboard:
                 tool_instructions = tool_instructions.rstrip() + "\n\n" + "\n\n".join(additions)
                 self.account_store.set_global_setting(
                     "tool_instructions", tool_instructions)
+        raw_rules = self.account_store.get_global_setting("tool_rules_json")
+        try:
+            rules = normalize_global_tool_rules(json.loads(raw_rules), tool_instructions)
+        except (TypeError, ValueError):
+            rules = normalize_global_tool_rules(None, tool_instructions)
+        self.account_store.set_global_setting("tool_rules_json", json.dumps(rules, ensure_ascii=False))
         motor_defaults = {
             "speed": self._global_int_setting("motor_default_speed", 85, 0, 100),
             "duration_ms": self._global_int_setting(
@@ -1896,6 +1934,7 @@ class Dashboard:
         }
         return web.json_response({
             "tool_instructions": tool_instructions,
+            "tool_rules": rules,
             "face_service": face_service,
             "motor_defaults": motor_defaults,
         })
@@ -1922,12 +1961,21 @@ class Dashboard:
         admin = self._require_admin(request)
         try:
             data = await request.json()
-            from .omni_client import DEFAULT_GLOBAL_TOOL_INSTRUCTIONS
+            from .omni_client import (DEFAULT_GLOBAL_TOOL_INSTRUCTIONS,
+                                      normalize_global_tool_rules,
+                                      compose_global_tool_instructions)
             current_instructions = self.account_store.get_global_setting(
                 "tool_instructions") or DEFAULT_GLOBAL_TOOL_INSTRUCTIONS
             tool_instructions = (data.get("tool_instructions")
                                  if "tool_instructions" in data
                                  else current_instructions).strip()
+            if "tool_rules" in data:
+                rules = normalize_global_tool_rules(data.get("tool_rules"), tool_instructions)
+                tool_instructions = compose_global_tool_instructions(rules)
+                self.account_store.set_global_setting(
+                    "tool_rules_json", json.dumps(rules, ensure_ascii=False))
+            else:
+                rules = normalize_global_tool_rules(None, tool_instructions)
             if len(tool_instructions) > 12000:
                 raise ValueError("invalid tool instructions")
             self.account_store.set_global_setting(
@@ -1986,6 +2034,7 @@ class Dashboard:
             for session in self.sessions.values():
                 session.config.setdefault("dashscope", {})[
                     "tool_instructions"] = tool_instructions
+                session.config.setdefault("dashscope", {})["tool_rules"] = rules
                 session.config["motor_defaults"] = {
                     "speed": motor_speed, "duration_ms": motor_duration,
                     "swap_wheels": motor_swap_wheels}
@@ -1995,6 +2044,7 @@ class Dashboard:
             return web.json_response({"error": str(exc)}, status=400)
         return web.json_response({
             "tool_instructions": tool_instructions,
+            "tool_rules": rules,
             "face_service": dict(self.config.get("face_service", {})),
             "motor_defaults": {"speed": motor_speed,
                                "duration_ms": motor_duration,

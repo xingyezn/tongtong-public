@@ -100,12 +100,110 @@ def motor_tool_instructions(config):
     ).format(speed, duration_ms)
 
 
+EMOTION_INSTRUCTIONS = (
+    "表情输出规则：每次助手回复都必须选择一个与助手本轮回复语义匹配的表情，"
+    "并在回复末尾附加机器可解析的 JSON 字段，格式必须严格为 "
+    "{\\\"emotion\\\":\\\"happy\\\"}。"
+    '实际输出示例：{"emotion":"happy"}。'
+    "emotion 只能使用 neutral、happy、laughing、funny、sad、angry、"
+    "crying、loving、embarrassed、surprised、shocked、thinking、winking、"
+    "cool、relaxed、delicious、kissy、confident 之一。"
+    "表情必须根据助手本轮实际回答选择，不得依据用户语音转写中的情绪字段，"
+    "也不得复用上一轮表情；普通问候和积极回答使用 happy，疑问或思考使用 thinking，"
+    "明确的错误、遗憾或安慰场景才使用 sad。不要把 JSON 字段读给用户。"
+)
+
 DEFAULT_GLOBAL_TOOL_INSTRUCTIONS = "\n\n".join((
     DEFAULT_TOOL_INSTRUCTIONS,
     motor_tool_instructions({"motor_defaults": {"speed": 85,
                                                 "duration_ms": 600}}),
     FACE_TOOL_INSTRUCTIONS,
+    EMOTION_INSTRUCTIONS,
 ))
+
+GLOBAL_TOOL_RULE_CATEGORIES = {"general", "chassis", "camera", "gimbal_servo", "rgb_led"}
+
+
+def default_global_tool_rules():
+    return [
+        {"id": "visual", "name": "实时视觉规则", "category": "camera",
+         "enabled": True, "content": DEFAULT_TOOL_INSTRUCTIONS},
+        {"id": "chassis", "name": "底盘运动规则", "category": "chassis",
+         "enabled": True, "content": motor_tool_instructions({"motor_defaults": {"speed": 85, "duration_ms": 600}})},
+        {"id": "face", "name": "人脸管理规则", "category": "camera",
+         "enabled": True, "content": FACE_TOOL_INSTRUCTIONS},
+        {"id": "emotion", "name": "表情输出规则", "category": "general",
+         "enabled": True, "content": EMOTION_INSTRUCTIONS},
+    ]
+
+
+def compose_global_tool_instructions(rules, categories=None):
+    enabled_categories = normalize_model_tool_categories(categories)
+    result = []
+    for rule in rules or []:
+        if not isinstance(rule, dict) or not rule.get("enabled"):
+            continue
+        category = rule.get("category", "general")
+        if category == "chassis" and not enabled_categories["chassis"]:
+            continue
+        if category == "camera" and not enabled_categories["camera"]:
+            continue
+        if category == "gimbal_servo" and not enabled_categories["gimbal_servo"]:
+            continue
+        if category == "rgb_led":
+            continue
+        content = str(rule.get("content", "")).strip()
+        if content:
+            result.append(content)
+    return "\n\n".join(result)
+
+
+def normalize_global_tool_rules(value, legacy=""):
+    if (isinstance(value, list) and len(value) == 1 and
+            isinstance(value[0], dict) and value[0].get("id") == "legacy"):
+        legacy = value[0].get("content", legacy)
+        value = None
+    if isinstance(value, list):
+        normalized = []
+        for index, rule in enumerate(value):
+            if not isinstance(rule, dict):
+                continue
+            category = rule.get("category", "general")
+            if category not in GLOBAL_TOOL_RULE_CATEGORIES:
+                category = "general"
+            content = str(rule.get("content", "")).strip()
+            if not content:
+                continue
+            normalized.append({
+                "id": str(rule.get("id") or "rule-{}".format(index + 1)),
+                "name": str(rule.get("name") or "规则 {}".format(index + 1)),
+                "category": category,
+                "enabled": bool(rule.get("enabled", True)),
+                "content": content,
+            })
+        if normalized:
+            return normalized
+    if legacy and legacy.strip():
+        rules = []
+        for index, content in enumerate(legacy.split("\n\n")):
+            content = content.strip()
+            if not content:
+                continue
+            if "self.chassis." in content:
+                rule_id, name, category = "chassis", "底盘运动规则", "chassis"
+            elif "server.face." in content or "face" in content.lower():
+                rule_id, name, category = "face", "人脸管理规则", "camera"
+            elif "emotion" in content.lower() or "表情" in content:
+                rule_id, name, category = "emotion", "表情输出规则", "general"
+            else:
+                rule_id, name, category = "visual", "实时视觉规则", "camera"
+            if any(rule.get("id") == rule_id for rule in rules):
+                rule_id = "legacy-{}".format(index + 1)
+            rules.append({"id": rule_id, "name": name, "category": category,
+                          "enabled": True, "content": content})
+        if rules:
+            return rules
+    return default_global_tool_rules()
 
 
 def filter_tool_instructions_for_categories(instructions, categories):
@@ -238,8 +336,17 @@ class OmniClient:
         )
 
     def effective_instructions(self, include_history: bool = False) -> str:
-        tool_instructions = self.config.get("dashscope", {}).get(
-            "tool_instructions") or DEFAULT_GLOBAL_TOOL_INSTRUCTIONS
+        tool_rules = self.config.get("dashscope", {}).get("tool_rules")
+        if isinstance(tool_rules, list):
+            tool_instructions = compose_global_tool_instructions(
+                tool_rules, self.config.get("model_tool_categories", {}))
+        else:
+            tool_instructions = self.config.get("dashscope", {}).get(
+                "tool_instructions") or DEFAULT_GLOBAL_TOOL_INSTRUCTIONS
+            # Existing deployments may have a persisted global rule set created
+            # before emotion output was introduced.
+            if "emotion 只能使用" not in tool_instructions:
+                tool_instructions = tool_instructions.rstrip() + "\n\n" + EMOTION_INSTRUCTIONS
         tool_instructions = filter_tool_instructions_for_categories(
             tool_instructions, self.config.get("model_tool_categories", {}))
         parts = [
@@ -363,6 +470,18 @@ class OmniClient:
                 if found:
                     return found
         return None
+
+    @staticmethod
+    def _extract_response_emotion(event_type, value):
+        """Extract emotion only from assistant response events.
+
+        Realtime transcription events also contain an ``emotion`` field, but
+        that field describes the user's input and must not drive the device's
+        assistant expression.
+        """
+        if not isinstance(event_type, str) or not event_type.startswith("response."):
+            return None
+        return OmniClient._extract_emotion(value)
 
     @staticmethod
     def _split_inline_emotion(text):
@@ -507,6 +626,7 @@ class OmniClient:
                 user_transcript = ""
                 assistant_text_parts = []
                 assistant_transcript = ""
+                assistant_text_streamed = False
                 while True:
                     msg = await asyncio.wait_for(ws.receive(), timeout=60)
                     if msg.type == aiohttp.WSMsgType.TEXT:
@@ -514,7 +634,7 @@ class OmniClient:
                         t = obj.get("type", "")
                         if t != "response.audio.delta":
                             debug_record["response_events"].append(obj)
-                        emotion = self._extract_emotion(obj)
+                        emotion = self._extract_response_emotion(t, obj)
                         if emotion:
                             yield {"type": "emotion", "emotion": emotion}
                         if t == "response.audio.delta":
@@ -522,11 +642,19 @@ class OmniClient:
                                    "sample_rate": self.output_rate}
                         elif t in ("response.audio_transcript.delta", "response.text.delta"):
                             delta = obj.get("delta", "")
-                            assistant_text_parts.append(delta)
+                            if delta:
+                                assistant_text_parts.append(delta)
+                                # Forward transcript deltas immediately so
+                                # the device subtitle follows the audio
+                                # instead of arriving only after response.done.
+                                assistant_text_streamed = True
+                                yield {"type": "text", "text": delta}
                         elif t in ("response.audio_transcript.done", "response.text.done"):
                             assistant_transcript = obj.get("transcript", obj.get("text", ""))
                             if assistant_transcript and not assistant_text_parts:
                                 assistant_text_parts.append(assistant_transcript)
+                                assistant_text_streamed = True
+                                yield {"type": "text", "text": assistant_transcript}
                         elif t == "conversation.item.input_audio_transcription.completed":
                             user_transcript = obj.get("transcript", "").strip()
                             if user_transcript:
@@ -597,7 +725,7 @@ class OmniClient:
                                 assistant_text)
                             if inline_emotion:
                                 yield {"type": "emotion", "emotion": inline_emotion}
-                            if assistant_text:
+                            if assistant_text and not assistant_text_streamed:
                                 yield {"type": "text", "text": assistant_text}
                             debug_record["user_transcript"] = user_transcript
                             debug_record["assistant_text"] = assistant_text

@@ -25,6 +25,7 @@ INTERRUPTION_SETTING_KEYS = {
 }
 GLOBAL_SETTING_KEYS = {
     "tool_instructions",
+    "tool_rules_json",
     "motor_default_speed",
     "motor_default_duration_ms",
     "motor_swap_wheels",

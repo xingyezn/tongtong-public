@@ -27,9 +27,9 @@ MODEL_MOTOR_ACTIONS = {
 # The device still advertises every supported MCP tool, so the supervised
 # manual-test panel remains available while a category is hidden.
 MODEL_TOOL_CATEGORY_DEFAULTS = {
-    "chassis": True,
+    "chassis": False,
     "camera": True,
-    "gimbal_servo": True,
+    "gimbal_servo": False,
 }
 
 

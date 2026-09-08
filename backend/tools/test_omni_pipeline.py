@@ -34,6 +34,24 @@ from app.omni_client import OmniClient
 from app.session import Session
 
 
+def test_emotion_only_comes_from_assistant_response():
+    user_event = {
+        "type": "conversation.item.input_audio_transcription.completed",
+        "transcript": "你开心吗？",
+        "emotion": "sad",
+    }
+    assistant_event = {
+        "type": "response.audio_transcript.delta",
+        "delta": "开心呀！",
+        "emotion": "happy",
+    }
+
+    assert OmniClient._extract_response_emotion(
+        user_event["type"], user_event) is None
+    assert OmniClient._extract_response_emotion(
+        assistant_event["type"], assistant_event) == "happy"
+
+
 class FakeWebSocket:
     closed = False
 
