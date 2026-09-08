@@ -17,6 +17,7 @@
 #include "settings.h"
 #include "lvgl_theme.h"
 #include "lvgl_display.h"
+#include "system_info.h"
 
 #define TAG "MCP"
 
@@ -174,6 +175,9 @@ void McpServer::AddUserOnlyTools() {
                 std::string boundary = "----ESP32_SCREEN_SNAPSHOT_BOUNDARY";
                 
                 auto http = Board::GetInstance().GetNetwork()->CreateHttp(3);
+                // The upload endpoint uses the device id together with the
+                // per-WebSocket token to bind the image to this session.
+                http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
                 http->SetHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
                 if (!http->Open("POST", url)) {
                     throw std::runtime_error("Failed to open URL: " + url);

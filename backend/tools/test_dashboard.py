@@ -108,9 +108,10 @@ async def main():
             assert 'id="memory-modal"' in html and 'id="usage-summary"' in html
             assert 'id="test-led-color"' in html
             assert 'id="test-led-hex"' in html
+            assert 'id="test-brightness"' not in html
+            assert 'id="test-theme"' not in html
             assert "syncLedRgbFromColor" in html
             assert "syncLedRgbFromHex" in html
-            assert "RGB 指示灯没有独立亮度接口" in html
 
             r = await client.get("http://127.0.0.1:8099/api/status", headers=headers)
             data = await r.json()

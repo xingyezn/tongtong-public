@@ -247,3 +247,16 @@ firmware\release\known-good-20260907
 | 设备反复复位 | 保存串口完整日志和构建信息，保留 `firmware\build` 后再排查 PSRAM/组件版本 |
 
 相关配置和部署说明见 [docs/CONFIGURATION_WORKFLOW.md](../../docs/CONFIGURATION_WORKFLOW.md)。
+
+## 12. 烧录模式：完整烧录与应用区增量烧录
+
+`build_firmware.ps1 -Flash` 默认执行 `idf.py flash`，按照 `firmware\build\flash_args` 写入完整固件包：Bootloader、分区表、OTA 数据、应用区、模型和资源分区。首次烧录、分区表发生变更、模型或资源发生变更时，必须使用完整烧录。
+
+如果只修改应用代码，且已确认设备上的分区表、模型和资源不需要更新，可仅写入应用区：
+
+```powershell
+Set-Location firmware
+idf.py -p COM3 app-flash
+```
+
+也可根据当前构建生成的 `firmware\build\flash_app_args` 手动执行应用区烧录。应用区增量烧录不会覆盖模型、资源、分区表和配置数据，但也不会修复这些分区的版本不匹配问题。

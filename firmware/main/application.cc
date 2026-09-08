@@ -323,6 +323,14 @@ void Application::Run() {
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
             MaintainProtocolConnection();
+
+            // Re-show the wake-up hint periodically while idle.  A screenshot
+            // or another display update may overwrite the chat message without
+            // causing a state transition back to idle.
+            if (state_machine_.GetState() == kDeviceStateIdle &&
+                clock_ticks_ % 10 == 0) {
+                display->SetChatMessage("system", "对我说“你好童童”，唤醒我");
+            }
         
             // Print debug info every 10 seconds
             if (clock_ticks_ % 10 == 0) {

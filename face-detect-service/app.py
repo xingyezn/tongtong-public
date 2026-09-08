@@ -119,15 +119,27 @@ PAGE = r"""<!doctype html>
     <div class="table-wrap" style="margin-top:16px"><table><thead><tr><th>ID</th><th>图片</th><th>姓名</th><th>外部 ID</th><th>备注</th><th>更新时间</th><th>操作</th></tr></thead><tbody id="faces"><tr><td colspan="7" class="muted">暂无人脸资料</td></tr></tbody></table></div>
   </section>
   <section class="card">
-    <div class="topline"><h2>最近请求</h2><button onclick="loadHistory()">刷新</button></div>
-    <div class="table-wrap"><table><thead><tr><th>时间</th><th>来源</th><th>图片</th><th>结果</th><th>耗时</th><th>人脸详情</th></tr></thead><tbody id="history"><tr><td colspan="6" class="muted">暂无请求记录</td></tr></tbody></table></div>
+    <div class="topline"><h2>最近请求</h2><div><button onclick="loadHistory()">刷新</button> <button class="secondary" onclick="clearHistory()">清空记录</button></div></div>
+    <div class="table-wrap"><table><thead><tr><th>时间</th><th>来源</th><th>图片</th><th>结果</th><th>耗时</th><th>人脸详情</th><th>操作</th></tr></thead><tbody id="history"><tr><td colspan="7" class="muted">暂无请求记录</td></tr></tbody></table></div>
   </section>
 </main>
 <script>
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function loadHistory() {
   const res = await fetch('/api/recent'); const rows = await res.json();
-  document.getElementById('history').innerHTML = rows.length ? rows.map(r => `<tr><td>${esc(r.time)}</td><td>${esc(r.client_ip)}<br>${esc(r.method)} ${esc(r.path)}</td><td>${r.image_url ? `<a href="${esc(r.image_url)}" target="_blank"><img class="thumb" src="${esc(r.image_url)}" alt="请求图片"></a>` : '-'}<br>${esc(r.size || '-')}<br>${esc(r.content_type || '-')}</td><td class="${r.ok?'ok':'bad'}">${r.ok?'成功':'失败'}<br>${r.ok?esc(r.count+' 张人脸'):esc(r.error)}</td><td>${r.total_ms == null ? '-' : esc(r.total_ms+' ms')}</td><td class="faces">${r.faces ? esc(JSON.stringify(r.faces)) : '-'}</td></tr>`).join('') : '<tr><td colspan="6" class="muted">暂无请求记录</td></tr>';
+  document.getElementById('history').innerHTML = rows.length ? rows.map(r => `<tr><td>${esc(r.time)}</td><td>${esc(r.client_ip)}<br>${esc(r.method)} ${esc(r.path)}</td><td>${r.image_url ? `<a href="${esc(r.image_url)}" target="_blank"><img class="thumb" src="${esc(r.image_url)}" alt="请求图片"></a>` : '-'}<br>${esc(r.size || '-')}<br>${esc(r.content_type || '-')}</td><td class="${r.ok?'ok':'bad'}">${r.ok?'成功':'失败'}<br>${r.ok?esc(r.count+' 张人脸'):esc(r.error)}</td><td>${r.total_ms == null ? '-' : esc(r.total_ms+' ms')}</td><td class="faces">${r.faces ? esc(JSON.stringify(r.faces)) : '-'}</td><td><button class="secondary" onclick="deleteHistory(${Number(r.id)})">删除</button></td></tr>`).join('') : '<tr><td colspan="7" class="muted">暂无请求记录</td></tr>';
+}
+async function deleteHistory(id) {
+  if (!confirm('确认删除这条请求记录及其图片？')) return;
+  const res = await fetch('/api/recent/' + encodeURIComponent(id), {method:'DELETE'});
+  if (!res.ok) { alert('删除失败'); return; }
+  loadHistory();
+}
+async function clearHistory() {
+  if (!confirm('确认清空最近请求及其图片？')) return;
+  const res = await fetch('/api/recent', {method:'DELETE'});
+  if (!res.ok) { alert('清空失败'); return; }
+  loadHistory();
 }
 async function runTest() {
   const file = document.getElementById('image').files[0], btn = document.getElementById('test'), out = document.getElementById('result');
@@ -268,6 +280,24 @@ def recent():
                 row["image_url"] = "/api/recent/{}/image".format(item["id"])
             rows.append(row)
         return jsonify(rows)
+
+
+@app.route("/api/recent", methods=["DELETE"])
+def clear_recent():
+    with _history_lock:
+        deleted = len(_history)
+        _history.clear()
+    return jsonify({"success": True, "deleted": deleted})
+
+
+@app.route("/api/recent/<int:request_id>", methods=["DELETE"])
+def delete_recent(request_id):
+    with _history_lock:
+        item = next((x for x in _history if x.get("id") == request_id), None)
+        if item is None:
+            return jsonify({"error": "request record not found"}), 404
+        _history.remove(item)
+    return jsonify({"success": True, "id": request_id})
 
 
 @app.route("/api/recent/<int:request_id>/image", methods=["GET"])

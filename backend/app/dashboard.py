@@ -370,7 +370,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="hint" id="hardware-test-status">等待设备上线…</div>
     <div id="hardware-test-groups" class="test-grid"></div>
     <div id="hardware-test-result">尚未执行测试。</div>
-    <div id="camera-preview"><div class="muted" style="margin-bottom:7px">最近拍摄的照片（仅保存在后端内存，重启后自动清除）</div><img id="camera-preview-image" alt="设备最近拍摄的照片"></div>
+    <div id="camera-preview"><div class="muted" style="margin-bottom:7px">最近拍摄/截取的图片（仅保存在后端内存，重启后自动清除）</div><img id="camera-preview-image" alt="设备最近拍摄或截取的图片"></div>
     <div class="hint">所有按钮通过设备 MCP 通道执行；运动测试必须先让车轮悬空。设备未声明的摄像头、舵机或屏幕工具会显示为不可用，不会伪造测试结果。</div>
   </div>
 
@@ -910,7 +910,12 @@ let hardwareToolsDevice = "";
 let motorDefaults = { speed: 85, duration_ms: 600, swap_wheels: false };
 
 const HARDWARE_TEST_GROUPS = [
-  { title: "设备控制", items: [["self.reboot", "重启设备"]] },
+  { title: "设备控制", items: [
+    ["self.get_system_info", "获取系统信息"], ["self.reboot", "重启设备"],
+    ["self.upgrade_firmware", "升级固件"], ["self.screen.get_info", "读取屏幕信息"],
+    ["self.screen.snapshot", "截取屏幕"], ["self.screen.preview_image", "预览图片"],
+    ["self.assets.set_download_url", "设置资源下载地址"]
+  ] },
   { title: "底盘运动控制", items: [
     ["self.chassis.go_forward", "前进"], ["self.chassis.go_back", "后退"],
     ["self.chassis.turn_left", "左转"], ["self.chassis.turn_right", "右转"],
@@ -921,7 +926,6 @@ const HARDWARE_TEST_GROUPS = [
     ["self.gimbal.center", "云台回中"], ["self.gimbal.pan", "水平舵机"],
     ["self.gimbal.tilt", "俯仰舵机"], ["self.face_tracking.get_state", "跟随状态"]
   ]},
-  { title: "屏幕", items: [["self.screen.get_info", "读取屏幕信息"]] }
 ];
 
 function selectedHardwareDevice() {
@@ -943,6 +947,11 @@ function hardwareArgs(name) {
   }
   if (name === "self.camera.take_photo") {
     return { question: "检查摄像头是否能正常拍照" };
+  }
+  if (["self.upgrade_firmware", "self.screen.preview_image",
+       "self.assets.set_download_url"].includes(name)) {
+    const url = prompt("请输入 URL");
+    return url ? { url: url } : null;
   }
   return {};
 }
@@ -1025,7 +1034,7 @@ function renderHardwareTests() {
   const device = selectedHardwareDevice();
   const canRun = !!device;
   const previousValues = {};
-  ["test-speed", "test-duration", "test-brightness", "test-theme", "test-camera-question", "test-led-color", "test-led-hex", "test-led-red", "test-led-green", "test-led-blue"].forEach(id => {
+  ["test-speed", "test-duration", "test-camera-question", "test-led-color", "test-led-hex", "test-led-red", "test-led-green", "test-led-blue"].forEach(id => {
     const input = $(id);
     if (input) previousValues[id] = input.value;
   });
@@ -1038,7 +1047,8 @@ function renderHardwareTests() {
     const actions = group.items.map(([name, label]) => {
       const available = !!hardwareTools[name];
       const disabled = !canRun || !available;
-      const reason = !available ? " title=\"设备未声明此工具\"" : "";
+      const tip = available ? (hardwareTools[name].description || label) : "设备未声明此工具";
+      const reason = ' title="' + esc(tip) + '"';
       return '<button class="btn"' + reason + (disabled ? " disabled" : "") +
         ' onclick=\'runHardwareTest("' + name + '", this)\'>' + label +
         (available ? "" : "（不可用）") + '</button>';
@@ -1055,17 +1065,14 @@ function renderHardwareTests() {
       : group.items.some(item => item[0].indexOf("self.chassis.") === 0)
       ? '<div class="row" style="margin-bottom:8px"><label class="muted">速度 <input class="test-input" id="test-speed" type="number" min="0" max="100" value="85"></label>' +
         '<label class="muted">持续时间(ms) <input class="test-input" id="test-duration" type="number" min="1" max="10000" value="1000"></label></div>'
-      : group.items.some(item => item[0].indexOf("self.screen.") === 0)
-        ? '<div class="row" style="margin-bottom:8px"><label class="muted">亮度 <input class="test-input" id="test-brightness" type="number" min="0" max="100" value="50"></label>' +
-          '<label class="muted">主题 <select id="test-theme"><option value="light">浅色</option><option value="dark">深色</option></select></label></div>'
-        : '';
+      : '';
     const colorInputs = group.title === "RGB 指示灯"
       ? '<div class="row" style="margin-bottom:8px"><label class="muted">色盘 <input class="rgb-picker" id="test-led-color" type="color" value="#0000ff" oninput="syncLedRgbFromColor()"><span class="rgb-swatch" id="test-led-swatch"></span></label>' +
         '<label class="muted">HEX <input class="rgb-hex-input" id="test-led-hex" type="text" value="#0000FF" maxlength="7" spellcheck="false" oninput="syncLedRgbFromHex()" onchange="syncLedRgbFromHex()"></label>' +
         '<label class="muted">R <input class="test-input" id="test-led-red" type="number" min="0" max="255" value="0" oninput="syncLedColorFromRgb()"></label>' +
         '<label class="muted">G <input class="test-input" id="test-led-green" type="number" min="0" max="255" value="0" oninput="syncLedColorFromRgb()"></label>' +
         '<label class="muted">B <input class="test-input" id="test-led-blue" type="number" min="0" max="255" value="255" oninput="syncLedColorFromRgb()"></label></div>' +
-        '<div class="hint" style="margin:0 0 8px">色盘与 RGB 数值会同步；当前固件仅提供颜色、开关控制。亮度设置目前仅适用于“屏幕亮度”，RGB 指示灯没有独立亮度接口。</div>' : '';
+        '<div class="hint" style="margin:0 0 8px">色盘与 RGB 数值会同步；当前固件仅提供颜色、开关控制。</div>' : '';
     return '<div class="test-group"><h3>' + group.title + '</h3>' + groupInputs + colorInputs + '<div class="test-actions">' + actions + '</div>' + faceActions + '</div>';
   }).join("");
   box.innerHTML = html;
@@ -1105,11 +1112,13 @@ async function runHardwareTest(name, button) {
   const device = selectedHardwareDevice();
   if (!device) return;
   if (name === "self.reboot" && !confirm("确认重启设备？设备会暂时离线。")) return;
+  const args = hardwareArgs(name);
+  if (args === null) return;
   button.disabled = true;
   $("hardware-test-result").textContent = "执行中：" + name;
   try {
     const r = await fetch("/api/test/mcp", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ device_id: device.device_id, name: name, arguments: hardwareArgs(name), timeout_ms: 15000 }) });
+      body: JSON.stringify({ device_id: device.device_id, name: name, arguments: args, timeout_ms: 15000 }) });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || "调用失败");
     if (name === "self.camera.face_detect_local") {
@@ -1117,7 +1126,7 @@ async function runHardwareTest(name, button) {
     } else {
       $("hardware-test-result").textContent = JSON.stringify(data.result, null, 2);
     }
-    if (name === "self.camera.take_photo") showCameraPreview(device.device_id);
+    if (name === "self.camera.take_photo" || name === "self.screen.snapshot") showCameraPreview(device.device_id);
     showToast(name + " 测试完成", "ok");
   } catch (e) {
     $("hardware-test-result").textContent = "失败：" + e.message;
@@ -1469,7 +1478,7 @@ const opts='<option value="">未绑定</option>'+data.users.filter(u=>u.is_activ
 document.getElementById("devices").innerHTML=data.devices.map(d=>{const u=usage.get((d.owner_user_id||'')+'|'+d.device_id)||{};return `<tr><td><code>${esc(d.device_id)}</code></td><td>${esc(d.name||'—')}<br><small>${esc(d.identifier||'—')}</small></td><td><select id="owner-${esc(d.device_id)}">${opts}</select></td><td>${d.is_active?'<span class="tag">启用</span>':'<span class="tag off">已禁用</span>'}</td><td>${d.online?'<span class="tag">在线</span>':'离线'}</td><td>${Number(u.total_tokens||0).toLocaleString()} / ${Number(u.month_tokens||0).toLocaleString()}<br><small>${u.turns||0} 轮</small></td><td>${new Date(d.last_seen*1000).toLocaleString()}</td><td><button onclick="assignDevice('${esc(d.device_id)}')">保存所有者</button> <button onclick="toggleDevice('${esc(d.device_id)}',${!d.is_active})">${d.is_active?'禁用设备':'启用设备'}</button> <button onclick="switchEnvironment('${esc(d.device_id)}')" ${d.online&&d.is_active?'':'disabled'}>切换环境</button> <button onclick="unbindDevice('${esc(d.device_id)}')">解绑</button> <button class="danger" onclick="deleteDevice('${esc(d.device_id)}')">删除记录</button></td></tr>`}).join('');data.devices.forEach(d=>{const e=document.getElementById('owner-'+d.device_id);if(e)e.value=d.owner_user_id||''});
 auditPage=Number(data.audit_page||auditPage);document.getElementById("audit").innerHTML=data.audit.map(a=>`<tr><td>${new Date(a.created_at*1000).toLocaleString()}</td><td>${esc(a.admin_username||a.admin_user_id||'—')}</td><td>${esc(a.action)}</td><td>${esc(a.target_type)} #${esc(a.target_id)}</td><td><code>${esc(JSON.stringify(a.details))}</code></td></tr>`).join('')||'<tr><td colspan="5">暂无审计记录</td></tr>';const total=Number(data.audit_total||0),size=Number(data.audit_page_size||20),pages=Math.max(1,Math.ceil(total/size));document.getElementById('audit-page-info').textContent=`第 ${auditPage} / ${pages} 页，共 ${total} 条`;document.querySelector('#audit-page-info').previousElementSibling.disabled=auditPage<=1;document.querySelector('#audit-page-info').nextElementSibling.disabled=auditPage>=pages}
 function renderFirmware(){const devices=data.devices||[];document.getElementById('firmware-releases').innerHTML=(firmware.releases||[]).map(r=>{const opts='<option value="">选择在线设备</option>'+devices.filter(d=>d.online&&d.is_active).map(d=>`<option value="${esc(d.device_id)}">${esc(d.name||d.device_id)}</option>`).join('');const jobs=(firmware.deployments||[]).filter(j=>j.release_id===r.id);const j=jobs[jobs.length-1];const pct=j?Number(j.progress||0):0;const logs=j?(j.logs||[]).slice(-5).map(x=>new Date(x.time*1000).toLocaleTimeString()+' '+x.message).join('\\n'):'';return `<tr><td>${r.id}</td><td><b>${esc(r.version)}</b></td><td>${esc(r.description||'—')}</td><td>${(Number(r.size_bytes)/1024/1024).toFixed(2)} MiB</td><td style="max-width:150px;word-break:break-all;font-size:11px"><code>${esc(r.sha256)}</code></td><td>${new Date(r.created_at*1000).toLocaleString()}</td><td><select id="fw-device-${r.id}">${opts}</select></td><td><button onclick="deployFirmware(${r.id})">下发</button></td><td>${j?`<progress max="100" value="${pct}"></progress> ${pct}%<br><small>${esc(j.message)}</small><pre style="max-width:360px;white-space:pre-wrap;font-size:11px">${esc(logs)}</pre><button onclick="clearFirmwareLog('${j.id}')">清除日志</button>`:'—'}</td><td><a class="btn" href="/api/admin/firmware/${r.id}/download">下载</a> <button class="danger" onclick="deleteFirmware(${r.id})">删除</button></td></tr>`}).join('')||'<tr><td colspan="10">暂无固件版本</td></tr>'}
-async function uploadFirmware(){const file=document.getElementById('firmware-file').files[0];if(!file){toast('请选择 .bin 文件',true);return}const form=new FormData();form.append('version',document.getElementById('firmware-version').value);form.append('description',document.getElementById('firmware-description').value);form.append('file',file);try{await api('/api/admin/firmware',{method:'POST',body:form});toast('固件上传成功');document.getElementById('firmware-file').value='';await load()}catch(e){toast(e.message,true)}}
+async function uploadFirmware(){const file=document.getElementById('firmware-file').files[0];if(!file){toast('请选择 .bin 文件',true);return}const version=document.getElementById('firmware-version').value.trim();const exists=(firmware.releases||[]).some(r=>String(r.version).trim()===version);let force=false;if(exists&&!confirm('版本 '+version+' 已存在，是否强制上传并覆盖已有固件？'))return;if(exists)force=true;const form=new FormData();form.append('version',version);form.append('description',document.getElementById('firmware-description').value);form.append('force',force?'true':'false');form.append('file',file);try{await api('/api/admin/firmware',{method:'POST',body:form});toast(force?'固件已覆盖上传':'固件上传成功');document.getElementById('firmware-file').value='';await load()}catch(e){toast(e.message,true)}}
 async function deployFirmware(id){const device_id=document.getElementById('fw-device-'+id).value;if(!device_id){toast('请选择在线设备',true);return}if(!confirm('确认向该设备下发指定固件？设备将下载后重启。'))return;try{const d=await api('/api/admin/firmware/'+id+'/deploy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({device_id})});toast(d.message||'升级指令已下发')}catch(e){toast(e.message,true)}}
 async function deleteFirmware(id){if(!confirm('确认删除这个固件版本？'))return;try{await api('/api/admin/firmware/'+id,{method:'DELETE'});toast('固件版本已删除');await load()}catch(e){toast(e.message,true)}}
 async function clearFirmwareLog(id){try{await api('/api/admin/firmware/deployments/'+encodeURIComponent(id),{method:'DELETE'});toast('日志已清除');await load()}catch(e){toast(e.message,true)}}
@@ -1967,6 +1976,7 @@ class Dashboard:
             reader = await request.multipart()
             version = ""
             description = ""
+            force = False
             original_name = "firmware.bin"
             file_part = None
             while True:
@@ -1982,6 +1992,8 @@ class Dashboard:
                     version = value
                 elif part.name == "description":
                     description = value
+                elif part.name == "force":
+                    force = value.strip().lower() in ("1", "true", "yes", "on")
             if file_part is None:
                 raise ValueError("请选择固件 .bin 文件")
             if not version.strip() or len(version.strip()) > 64 or any(
@@ -1991,6 +2003,14 @@ class Dashboard:
                 raise ValueError("固件描述不能超过 2000 个字符")
             if not original_name.lower().endswith(".bin"):
                 raise ValueError("固件文件必须是 .bin")
+            version = version.strip()
+            existing = self.account_store.get_firmware_release_by_version(version)
+            if existing is not None and not force:
+                return web.json_response({
+                    "error": "该版本号已存在，请确认是否强制覆盖",
+                    "duplicate": True,
+                    "release": self._firmware_json(existing),
+                }, status=409)
             temp_path = self._firmware_dir / (".upload-{}".format(secrets.token_hex(12)))
             digest = hashlib.sha256()
             size = 0
@@ -2010,9 +2030,14 @@ class Dashboard:
             os.replace(str(temp_path), str(target_path))
             temp_path = None
             try:
-                release = self.account_store.create_firmware_release(
-                    version.strip(), description.strip(), stored_name, original_name,
-                    digest.hexdigest(), size, admin["id"])
+                if existing is not None:
+                    release = self.account_store.replace_firmware_release(
+                        existing["id"], version, description, stored_name,
+                        original_name, digest.hexdigest(), size, admin["id"])
+                else:
+                    release = self.account_store.create_firmware_release(
+                        version, description, stored_name, original_name,
+                        digest.hexdigest(), size, admin["id"])
             except Exception:
                 try:
                     target_path.unlink()
@@ -2020,11 +2045,18 @@ class Dashboard:
                     pass
                 target_path = None
                 raise
+            if existing is not None:
+                old_path = self._firmware_dir / Path(existing["stored_name"]).name
+                try:
+                    old_path.unlink()
+                except FileNotFoundError:
+                    pass
             target_path = None
             self.account_store.audit_admin_action(
-                admin["id"], "firmware.upload", "firmware", release["id"], {
+                admin["id"], "firmware.overwrite" if existing else "firmware.upload",
+                "firmware", release["id"], {
                     "version": release["version"], "size_bytes": size,
-                    "sha256": release["sha256"]})
+                    "sha256": release["sha256"], "overwrote": bool(existing)})
             return web.json_response(self._firmware_json(release), status=201)
         except (ValueError, TypeError) as exc:
             return web.json_response({"error": str(exc)}, status=400)
@@ -2860,9 +2892,14 @@ class Dashboard:
                             "self.servo.", "self.face_tracking.")
         allowed_names = {
             "self.reboot",
+            "self.get_system_info",
+            "self.upgrade_firmware",
             "self.camera.take_photo",
             "self.camera.face_detect_local",
             "self.screen.get_info",
+            "self.screen.snapshot",
+            "self.screen.preview_image",
+            "self.assets.set_download_url",
         }
         result = []
         for tool in tools:
@@ -2887,8 +2924,18 @@ class Dashboard:
         """Accept one JPEG from the device's current MCP camera session."""
         device_id = request.headers.get("Device-Id", "")
         auth = request.headers.get("Authorization", "")
-        token = auth[7:] if auth.startswith("Bearer ") else ""
+        token = auth[7:] if auth.startswith("Bearer ") else request.query.get("token", "")
         session = self._get_test_session(device_id)
+        if session is None and token:
+            # Older firmware did not send Device-Id for screen snapshots.
+            # The short-lived per-session token is sufficient to recover the
+            # owning session while those devices are still being upgraded.
+            for candidate in self.sessions.values():
+                expected_token = getattr(candidate, "camera_upload_token", "")
+                if expected_token and hmac.compare_digest(token, expected_token):
+                    session = candidate
+                    device_id = candidate.device_id
+                    break
         expected = getattr(session, "camera_upload_token", "") if session else ""
         if not token or not expected or not hmac.compare_digest(token, expected):
             raise web.HTTPUnauthorized(text="invalid camera upload token")
@@ -3004,6 +3051,23 @@ class Dashboard:
         testable_names = {tool["name"] for tool in self._testable_tools(session)}
         if name not in testable_names:
             return web.json_response({"error": "tool is not available for supervised testing"}, status=403)
+
+        if name == "self.screen.snapshot":
+            ws_url = session.config.get("server", {}).get("public_ws_url", "")
+            if ws_url.startswith("wss://"):
+                base_url = "https://" + ws_url[6:]
+            elif ws_url.startswith("ws://"):
+                base_url = "http://" + ws_url[5:]
+            else:
+                base_url = ws_url.rstrip("/")
+            if base_url.endswith("/ws"):
+                base_url = base_url[:-3]
+            base_url = base_url.rstrip("/")
+            arguments = {
+                "url": base_url + "/api/camera/upload?token=" +
+                       session.camera_upload_token,
+                "quality": int(arguments.get("quality", 80)),
+            }
 
         timeout_ms = data.get("timeout_ms", 8000)
         try:

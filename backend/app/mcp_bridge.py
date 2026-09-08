@@ -32,6 +32,7 @@ class McpBridge:
         self._send_json = send_json
         self._next_id = 1
         self.tools: list = []
+        self._requested_tool_cursors = set()
         self._pending_tools_call: Optional[dict] = None
         self._pending_calls: dict = {}  # id -> asyncio.Future
 
@@ -150,8 +151,24 @@ class McpBridge:
                     fut.set_result({})
         # 如果是 list 结果，缓存 tools
         if "result" in payload and "tools" in payload["result"]:
-            self.tools = payload["result"]["tools"]
+            known = {tool.get("name") for tool in self.tools
+                     if isinstance(tool, dict)}
+            for tool in payload["result"]["tools"]:
+                if not isinstance(tool, dict) or tool.get("name") in known:
+                    continue
+                self.tools.append(tool)
+                known.add(tool.get("name"))
             log.info("MCP tools list updated: %d tools", len(self.tools))
+            next_cursor = payload["result"].get("nextCursor")
+            if isinstance(next_cursor, str) and next_cursor and next_cursor not in self._requested_tool_cursors:
+                self._requested_tool_cursors.add(next_cursor)
+                asyncio.create_task(self._request_tool_page(next_cursor))
+
+    async def _request_tool_page(self, cursor: str):
+        request = self.make_tools_list(cursor)
+        sent = self._send_json(request)
+        if inspect.isawaitable(sent):
+            await sent
 
     # 供上层挂 future 的接口
     def register_pending(self, req_id, fut):

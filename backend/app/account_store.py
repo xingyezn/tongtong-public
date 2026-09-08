@@ -580,6 +580,46 @@ class AccountStore:
                 (cursor.lastrowid,)).fetchone()
         return dict(row)
 
+    def get_firmware_release_by_version(self, version):
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM firmware_releases WHERE version=? LIMIT 1",
+                (str(version or "").strip(),)).fetchone()
+        return dict(row) if row else None
+
+    def replace_firmware_release(self, release_id, version, description,
+                                 stored_name, original_name, sha256,
+                                 size_bytes, created_by):
+        version = str(version or "").strip()
+        description = str(description or "").strip()
+        if not version or len(version) > 64:
+            raise AccountError("固件版本号不能为空且不能超过 64 个字符")
+        if len(description) > 2000:
+            raise AccountError("固件描述不能超过 2000 个字符")
+        with self._lock, self._db:
+            row = self._db.execute(
+                "SELECT * FROM firmware_releases WHERE id=?",
+                (int(release_id),)).fetchone()
+            if row is None:
+                raise AccountError("固件版本不存在")
+            conflict = self._db.execute(
+                "SELECT 1 FROM firmware_releases WHERE version=? AND id<>? LIMIT 1",
+                (version, int(release_id))).fetchone()
+            if conflict is not None:
+                raise AccountError("另一个固件记录已使用该版本号")
+            self._db.execute("""
+                UPDATE firmware_releases SET
+                    version=?, description=?, stored_name=?, original_name=?,
+                    sha256=?, size_bytes=?, created_by=?, created_at=?
+                WHERE id=?
+            """, (version, description, str(stored_name),
+                  str(original_name or ""), str(sha256), int(size_bytes),
+                  int(created_by), time.time(), int(release_id)))
+            row = self._db.execute(
+                "SELECT * FROM firmware_releases WHERE id=?",
+                (int(release_id),)).fetchone()
+        return dict(row)
+
     def list_firmware_releases(self):
         with self._lock:
             rows = self._db.execute("""
