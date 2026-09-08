@@ -148,6 +148,7 @@ private:
     bool tts_resume_pending_ = false;
     bool tts_playback_drained_ = false;
     bool standby_after_tts_ = false;
+    bool tts_has_emotion_ = false;
     std::atomic<bool> accepting_tts_audio_{false};
     bool network_connected_ = false;
     bool automatic_interrupt_enabled_ = true;
@@ -184,6 +185,8 @@ private:
     void HandleTtsStopped();
     void ResumeListeningAfterPlayback();
     void CancelPendingTtsResume();
+    static const char* SelectSpeakingEmotion(const char* text);
+    static bool IsSupportedSpeakingEmotion(const char* emotion);
     
     // State change handler called by state machine
     void OnStateChanged(DeviceState old_state, DeviceState new_state);

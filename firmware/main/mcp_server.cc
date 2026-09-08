@@ -43,17 +43,15 @@ void McpServer::AddCommonTools() {
     // Custom tools must be added in the board's InitializeTools function.
 
     AddTool("self.get_device_status",
-        "Provides the real-time information of the device, including the current status of the audio speaker, screen, battery, network, etc.\n"
-        "Use this tool for: \n"
-        "1. Answering questions about current condition (e.g. what is the current volume of the audio speaker?)\n"
-        "2. As the first step to control the device (e.g. turn up / down the volume of the audio speaker, etc.)",
+        "获取设备当前可读取的实时状态，包括扬声器音量、屏幕亮度（如有）、电池状态（如有）、网络状态和芯片温度（如有）。"
+        "用户询问设备当前状态或音量时必须调用；修改音量前先调用此工具确认当前音量。",
         PropertyList(),
         [&board](const PropertyList& properties) -> ReturnValue {
             return board.GetDeviceStatusJson();
         });
 
     AddTool("self.audio_speaker.set_volume", 
-        "Set the volume of the audio speaker. If the current volume is unknown, you must call `self.get_device_status` tool first and then call this tool.",
+        "设置扬声器音量，范围 0-100。用户明确要求调节音量时直接调用；如果当前音量未知，先调用 `self.get_device_status`。",
         PropertyList({
             Property("volume", kPropertyTypeInteger, 0, 100)
         }), 
@@ -63,73 +61,15 @@ void McpServer::AddCommonTools() {
             return true;
         });
 
-    auto led = board.GetLed();
-    if (led && led->SupportsColorControl()) {
-        AddTool("self.led.get_state", "Get the on/off state of the color light (彩灯). The current RGB values are not included.", PropertyList(),
-            [led](const PropertyList&) -> ReturnValue {
-                return led->IsOn() ? "on" : "off";
-            });
-        AddTool("self.led.turn_on", "Turn on the color light (彩灯) using its last configured color.", PropertyList(),
-            [led](const PropertyList&) -> ReturnValue { led->TurnOn(); return true; });
-        AddTool("self.led.turn_off", "Turn off the color light (彩灯).", PropertyList(),
-            [led](const PropertyList&) -> ReturnValue { led->TurnOff(); return true; });
-        AddTool("self.led.set_color", "Configure the color light (彩灯) RGB color without changing its on/off state. Each channel is 0-255. Call self.led.turn_on afterwards to light it.",
-            PropertyList({Property("red", kPropertyTypeInteger, 0, 255),
-                          Property("green", kPropertyTypeInteger, 0, 255),
-                          Property("blue", kPropertyTypeInteger, 0, 255)}),
-            [led](const PropertyList& properties) -> ReturnValue {
-                led->SetColor(static_cast<uint8_t>(properties["red"].value<int>()),
-                              static_cast<uint8_t>(properties["green"].value<int>()),
-                              static_cast<uint8_t>(properties["blue"].value<int>()));
-                return true;
-            });
-    }
-    
-    auto backlight = board.GetBacklight();
-    if (backlight) {
-        AddTool("self.screen.set_brightness",
-            "Set the brightness of the screen.",
-            PropertyList({
-                Property("brightness", kPropertyTypeInteger, 0, 100)
-            }),
-            [backlight](const PropertyList& properties) -> ReturnValue {
-                uint8_t brightness = static_cast<uint8_t>(properties["brightness"].value<int>());
-                backlight->SetBrightness(brightness, true);
-                return true;
-            });
-    }
-
 #ifdef HAVE_LVGL
-    auto display = board.GetDisplay();
-    if (display && display->GetTheme() != nullptr) {
-        AddTool("self.screen.set_theme",
-            "Set the theme of the screen. The theme can be `light` or `dark`.",
-            PropertyList({
-                Property("theme", kPropertyTypeString)
-            }),
-            [display](const PropertyList& properties) -> ReturnValue {
-                auto theme_name = properties["theme"].value<std::string>();
-                auto& theme_manager = LvglThemeManager::GetInstance();
-                auto theme = theme_manager.GetTheme(theme_name);
-                if (theme != nullptr) {
-                    display->SetTheme(theme);
-                    return true;
-                }
-                return false;
-            });
-    }
-
 #ifdef CONFIG_ESP_VIDEO_ENABLE_USB_UVC_VIDEO_DEVICE
     auto camera = board.GetCamera();
     if (camera) {
         AddTool("self.camera.take_photo",
-            "Take a photo and explain it. Use this tool after the user asks you to see something.\n"
-            "For questions about who is in the image, how many people are present, or face identities, "
-            "the backend must use server.face.recognize_current instead.\n"
-            "Args:\n"
-            "  `question`: The question that you want to ask about the photo.\n"
-            "Return:\n"
-            "  A JSON object that provides the photo information.",
+            "拍摄当前摄像头画面并进行视觉解释。用户要求看当前画面且不是人脸识别问题时调用。"
+            "涉及‘我是谁’、‘都有谁’、‘有几个人’、是否有人脸、人脸位置或‘再看/重新确认’时，"
+            "每次必须先重新获取当前画面，并调用云端工具 `server.face.recognize_current`；"
+            "不得使用、推测或复用历史图片、历史识别结果或对话记忆。参数 `question` 为本次画面问题。",
             PropertyList({
                 Property("question", kPropertyTypeString)
             }),
@@ -155,14 +95,14 @@ void McpServer::AddCommonTools() {
 void McpServer::AddUserOnlyTools() {
     // System tools
     AddUserOnlyTool("self.get_system_info",
-        "Get the system information",
+        "获取设备系统信息。",
         PropertyList(),
         [this](const PropertyList& properties) -> ReturnValue {
             auto& board = Board::GetInstance();
             return board.GetSystemInfoJson();
         });
 
-    AddUserOnlyTool("self.reboot", "Reboot the system",
+    AddUserOnlyTool("self.reboot", "重启设备。",
         PropertyList(),
         [this](const PropertyList& properties) -> ReturnValue {
             auto& app = Application::GetInstance();
@@ -176,9 +116,9 @@ void McpServer::AddUserOnlyTools() {
         });
 
     // Firmware upgrade
-    AddUserOnlyTool("self.upgrade_firmware", "Upgrade firmware from a specific URL. This will download and install the firmware, then reboot the device.",
+    AddUserOnlyTool("self.upgrade_firmware", "从指定 URL 下载并安装固件，安装完成后重启设备。",
         PropertyList({
-            Property("url", kPropertyTypeString, "The URL of the firmware binary file to download and install")
+            Property("url", kPropertyTypeString, "固件二进制文件的下载地址")
         }),
         [this](const PropertyList& properties) -> ReturnValue {
             auto url = properties["url"].value<std::string>();
@@ -199,7 +139,7 @@ void McpServer::AddUserOnlyTools() {
 #ifdef HAVE_LVGL
     auto display = dynamic_cast<LvglDisplay*>(Board::GetInstance().GetDisplay());
     if (display) {
-        AddUserOnlyTool("self.screen.get_info", "Information about the screen, including width, height, etc.",
+        AddUserOnlyTool("self.screen.get_info", "获取屏幕宽度、高度和是否为单色屏等信息。",
             PropertyList(),
             [display](const PropertyList& properties) -> ReturnValue {
                 cJSON *json = cJSON_CreateObject();
@@ -214,7 +154,7 @@ void McpServer::AddUserOnlyTools() {
             });
 
 #if CONFIG_LV_USE_SNAPSHOT
-        AddUserOnlyTool("self.screen.snapshot", "Snapshot the screen and upload it to a specific URL",
+        AddUserOnlyTool("self.screen.snapshot", "截取当前屏幕并以 JPEG 图片上传到指定 URL。",
             PropertyList({
                 Property("url", kPropertyTypeString),
                 Property("quality", kPropertyTypeInteger, 80, 1, 100)
@@ -268,7 +208,7 @@ void McpServer::AddUserOnlyTools() {
                 return true;
             });
         
-        AddUserOnlyTool("self.screen.preview_image", "Preview an image on the screen",
+        AddUserOnlyTool("self.screen.preview_image", "从指定 URL 下载图片并显示在屏幕上。",
             PropertyList({
                 Property("url", kPropertyTypeString)
             }),
@@ -314,7 +254,7 @@ void McpServer::AddUserOnlyTools() {
     // Assets download url
     auto& assets = Assets::GetInstance();
     if (assets.partition_valid()) {
-        AddUserOnlyTool("self.assets.set_download_url", "Set the download url for the assets",
+        AddUserOnlyTool("self.assets.set_download_url", "设置设备资源文件的下载地址。",
             PropertyList({
                 Property("url", kPropertyTypeString)
             }),

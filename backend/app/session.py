@@ -42,7 +42,7 @@ TTS_MIN_STARTUP_BUFFER_MS = 240
 TTS_MAX_STARTUP_BUFFER_MS = 1500
 AI_DISPLAY_UPDATE_INTERVAL_S = 0.18
 DEFAULT_MOTOR_SPEED = 85
-DEFAULT_MOTOR_DURATION_MS = 1000
+DEFAULT_MOTOR_DURATION_MS = 600
 # Covers WebSocket transit and the device's decoder/DMA pipeline after the
 # model has finished generating its audio stream.
 TTS_PLAYBACK_TRANSPORT_MARGIN_S = 0.20
@@ -56,7 +56,7 @@ CONVERSATION_END_TOOL = {
         "name": CONVERSATION_END_TOOL_NAME,
         "description": (
             "仅当用户明确表示要结束当前对话、让助手退下或告别时调用。"
-            "用户只是在讨论如何结束对话、引用别人的话或意图不明确时不要调用。"
+            "用户说‘先这样’、‘好的’、‘知道了’等普通结束语，或只是在讨论如何结束对话、引用别人的话时不要调用。"
             "调用成功后仍要给用户一句简短自然的告别回复；系统会等该回复的"
             "音频播放完、文本保存完之后再进入待命状态。"
         ),
@@ -70,8 +70,19 @@ MOTOR_FALLBACK_COMMANDS = (
     ("self.chassis.turn_right", ("右转", "向右转", "往右转")),
     ("self.chassis.go_forward", ("前进", "向前走", "往前走", "向前进")),
     ("self.chassis.go_back", ("后退", "向后走", "往后走", "向后退")),
-    ("self.chassis.spin", ("原地旋转", "原地转", "旋转")),
 )
+
+
+def select_local_emotion(text):
+    """Mirror the firmware text fallback for chat history labeling."""
+    text = str(text or "")
+    if any(mark in text for mark in ("？", "?", "吗", "怎么", "为什么")):
+        return "thinking"
+    if any(mark in text for mark in ("抱歉", "错误", "失败", "无法")):
+        return "sad"
+    if any(mark in text for mark in ("注意", "小心", "警告")):
+        return "surprised"
+    return "happy"
 
 
 def detect_motor_fallback_tool(transcript):
@@ -98,24 +109,27 @@ def detect_motor_fallback_tool(transcript):
 
 FACE_TOOLS = [
     {"type": "function", "function": {"name": "server.face.register_current",
-     "description": "录入当前摄像头画面中的人脸。每次调用都会重新拍摄当前帧并上传，不能使用历史图片；必须先向用户确认姓名。",
+     "description": "仅在用户明确要求录入人脸时调用。调用前必须先向用户确认姓名；确认后重新拍摄当前画面并上传。当前画面必须恰好检测到 1 张人脸，否则停止录入并告知用户。不得使用历史图片。",
      "parameters": {"type": "object", "properties": {
-         "name": {"type": "string", "description": "要录入的姓名"},
-         "external_id": {"type": "string"}, "note": {"type": "string"}},
+         "name": {"type": "string", "description": "已向用户确认的姓名"},
+         "external_id": {"type": "string", "description": "可选的外部编号"},
+         "note": {"type": "string", "description": "可选备注"}},
          "required": ["name"]}}},
     {"type": "function", "function": {"name": "server.face.recognize_current",
-     "description": "优先使用此工具识别当前摄像头画面：判断是否有人脸、当前有几张脸，以及哪些是已登记的人。每次调用必须重新拍摄当前帧并请求云端服务，绝不能复用之前的图片、人数、身份或识别结果；用户说‘看看我是谁’、‘都有谁’、‘有几个人’、‘再看一下’或‘重新确认’时都必须重新调用。",
+     "description": "识别当前摄像头画面，判断是否有人脸、当前人数和已登记身份。每次调用都必须重新拍摄当前帧并请求云端服务；用户说‘看看我是谁’、‘都有谁’、‘有几个人’、‘再看一下’、‘重新确认’或类似追问时也必须重新调用。只能依据本次结果回答，绝不能复用、推测或引用历史图片、人数、身份或识别结果。",
      "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {"name": "server.face.delete",
-     "description": "删除已录入的人脸。只有用户明确提供人脸 id 时才能调用；不能查询或猜测其他用户的人脸数据。",
+     "description": "删除已录入的人脸。只有用户明确提供 face_id 时才能调用；调用后会重新拍摄当前画面并识别，只有当前画面确实识别出该数据库 face_id 才允许删除，否则拒绝删除。禁止查询或猜测 face_id，也不能仅凭历史记录直接删除。",
      "parameters": {"type": "object", "properties": {
-         "face_id": {"type": "integer", "description": "列表返回的人脸 id"}},
+         "face_id": {"type": "integer", "description": "用户明确提供的数据库人脸 ID；不能猜测"}},
          "required": ["face_id"]}}},
     {"type": "function", "function": {"name": "server.face.update",
-     "description": "修改已录入人脸的姓名、外部编号或备注。只有用户明确提供人脸 id 时才能调用；用户明确要求更新照片时才重新拍摄当前帧。",
+     "description": "修改已录入人脸的姓名、外部编号或备注。只有用户明确提供 face_id 时才能调用，不能查询或猜测 ID。普通资料修改不重新拍照；只有用户明确要求替换照片时才将 replace_image 设为 true，并重新拍摄当前画面。",
      "parameters": {"type": "object", "properties": {
-         "face_id": {"type": "integer"}, "name": {"type": "string"},
-         "external_id": {"type": "string"}, "note": {"type": "string"},
+         "face_id": {"type": "integer", "description": "用户明确提供的数据库人脸 ID"},
+         "name": {"type": "string", "description": "新的姓名"},
+         "external_id": {"type": "string", "description": "新的外部编号"},
+         "note": {"type": "string", "description": "新的备注"},
          "replace_image": {"type": "boolean", "description": "是否用当前新拍照片替换样本"}},
          "required": ["face_id"]}}},
 ]
@@ -244,18 +258,6 @@ class Session:
             return "self.chassis.turn_right", arguments
         if name == "self.chassis.turn_right":
             return "self.chassis.turn_left", arguments
-        if name == "self.chassis.spin":
-            # spin is clockwise (left forward/right backward); after the
-            # physical channels are crossed, turn_left produces that motion.
-            return "self.chassis.turn_left", arguments
-        if name == "self.chassis.drive":
-            arguments["left_speed"], arguments["right_speed"] = (
-                arguments.get("right_speed", 0),
-                arguments.get("left_speed", 0))
-        elif name == "self.chassis.test_direct_drive":
-            arguments["left_direction"], arguments["right_direction"] = (
-                arguments.get("right_direction", 0),
-                arguments.get("left_direction", 0))
         return name, arguments
 
     def _tts_startup_prebuffer_frames(self) -> int:
@@ -566,6 +568,8 @@ class Session:
         token_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         last_display_update = 0.0
         last_display_text = ""
+        response_emotion = None
+        response_emotion_source = None
 
         motor_defaults = self.config.get("motor_defaults", {})
         tools = (self._mcp.make_omni_tools(motor_defaults)
@@ -595,6 +599,13 @@ class Session:
                 if input_transcript:
                     log.info("user transcript: %s", input_transcript)
                     await self.send_json({"type": "stt", "text": input_transcript})
+            elif et == "emotion":
+                emotion = evt.get("emotion")
+                if emotion:
+                    response_emotion = emotion
+                    response_emotion_source = "model"
+                    log.info("omni emotion: %s", emotion)
+                    await self.send_json({"type": "llm", "emotion": emotion})
             elif et == "usage":
                 for key in token_usage:
                     try:
@@ -621,6 +632,9 @@ class Session:
             })
 
         assistant_text = "".join(text_parts).strip()
+        if assistant_text and not response_emotion:
+            response_emotion = select_local_emotion(assistant_text)
+            response_emotion_source = "local"
         if assistant_text and assistant_text != last_display_text:
             await self.send_json({
                 "type": "tts", "state": "sentence_start", "text": assistant_text,
@@ -632,9 +646,11 @@ class Session:
                 # Preserve compatibility with integrations that record only
                 # the three text fields until the provider exposes usage.
                 result = (self.turn_recorder(
-                    self.device_id, input_transcript, assistant_text, token_usage)
+                    self.device_id, input_transcript, assistant_text, token_usage,
+                    response_emotion, response_emotion_source)
                     if any(token_usage.values()) else self.turn_recorder(
-                        self.device_id, input_transcript, assistant_text))
+                        self.device_id, input_transcript, assistant_text,
+                        None, response_emotion, response_emotion_source))
                 if result:
                     self._schedule_conversation_summary(
                         result.get("ended_conversation_id")
@@ -840,8 +856,7 @@ class Session:
         if isinstance(name, str) and name.startswith("self.chassis."):
             self._motor_tool_called = True
             defaults = self.config.get("motor_defaults", {})
-            if "speed" not in arguments and name not in (
-                    "self.chassis.drive", "self.chassis.test_direct_drive"):
+            if "speed" not in arguments:
                 arguments["speed"] = int(defaults.get(
                     "speed", DEFAULT_MOTOR_SPEED))
             if "duration_ms" not in arguments:
@@ -931,8 +946,25 @@ class Session:
         if not isinstance(face_id, int) or isinstance(face_id, bool):
             return json.dumps({"error": "face_id must be an integer"}, ensure_ascii=False)
         if name == "server.face.delete":
+            image, capture = await self._capture_current_photo()
+            if image is None:
+                return json.dumps(capture, ensure_ascii=False)
+            recognition = await self.face_service.request(
+                http_session, "POST", "/api/recognize", image=image)
+            recognized = any(
+                isinstance(item, dict) and item.get("id") == face_id
+                for item in (recognition.get("faces") or []))
+            if not recognized:
+                return json.dumps({
+                    "deleted": False,
+                    "capture": "fresh",
+                    "verification": recognition,
+                    "error": "当前画面未识别出指定数据库人脸，已拒绝删除",
+                }, ensure_ascii=False)
             result = await self.face_service.request(
                 http_session, "DELETE", "/api/faces/{}".format(face_id))
+            result["capture"] = "fresh"
+            result["verified_face_id"] = face_id
             return json.dumps(result, ensure_ascii=False)
         if name == "server.face.update":
             fields = {key: arguments.get(key) for key in ("name", "external_id", "note")

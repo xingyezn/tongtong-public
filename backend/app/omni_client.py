@@ -10,6 +10,7 @@
 import asyncio
 import base64
 import json
+import re
 import logging
 import time
 from typing import Optional
@@ -69,26 +70,29 @@ DEFAULT_TOOL_INSTRUCTIONS = (
 )
 
 FACE_TOOL_INSTRUCTIONS = (
-    "人脸管理工具规则：server.face.register_current 用于录入当前摄像头画面，"
-    "server.face.recognize_current 是当前画面人脸问题的首选工具，用于判断是否有人脸、人数和已登记身份；"
-    "用户说‘看看我是谁’、‘都有谁’、‘有几个人’、‘看下当前画面’或询问人脸时必须调用它；"
-    "这两个工具每次都会重新拍摄，"
-    "严禁复用历史图片、历史识别结果或对话记忆。删除和修改只能使用用户明确提供的人脸 id，"
-    "不得调用或暴露人脸列表、其他用户的人脸信息；用户明确要求修改照片时才使用 replace_image。"
-    "这些工具是服务器端人脸接口的实际调用，不要只根据记忆直接回答。"
+    "人脸管理工具规则：server.face.register_current 仅用于用户明确要求的录入，"
+    "调用前必须确认姓名，并重新拍摄当前画面；画面必须恰好有 1 张人脸，否则停止录入。"
+    "server.face.recognize_current 用于判断当前画面是否有人脸、人数和已登记身份；"
+    "‘看看我是谁’、‘都有谁’、‘有几个人’、‘看下当前画面’及‘再看/重新确认’等每次都必须调用。"
+    "所有当前画面结果都必须来自本次新拍摄，严禁复用历史图片、历史识别结果或对话记忆。"
+    "server.face.delete 只有在用户明确提供 face_id 后才能调用；它会重新拍摄并验证当前画面确实识别出该数据库人脸，"
+    "验证失败不得删除。server.face.update 只有用户明确提供 face_id 时才能调用；修改文字资料不拍照，"
+    "仅当用户明确要求替换照片时才使用 replace_image。禁止查询或暴露人脸列表、其他用户的人脸信息，"
+    "也不得猜测 face_id。这些工具是服务器端人脸接口的实际调用，不要只根据记忆直接回答。"
 )
 
 def motor_tool_instructions(config):
     defaults = config.get("motor_defaults", {})
     speed = defaults.get("speed", 85)
-    duration_ms = defaults.get("duration_ms", 1000)
+    duration_ms = defaults.get("duration_ms", 600)
     return (
-        "电机执行规则：涉及电机动作时必须调用 MCP 工具，禁止只用文字回复或复用历史动作结果。"
+        "终端动作规则：涉及前进、后退、左转或右转等底盘运动时，必须调用对应 MCP 工具，让终端完成动作；"
+        "禁止只用文字回复或复用历史动作结果。不要把这些指令解释为需要用户直接控制电机。"
         "自然语言指令与工具的固定对应关系为：‘前进’调用 self.chassis.go_forward；"
         "‘后退’调用 self.chassis.go_back；‘左转’调用 self.chassis.turn_left；"
-        "‘右转’调用 self.chassis.turn_right；‘原地旋转’或‘旋转’调用 self.chassis.spin。"
-        "识别到这些指令后，直接调用对应工具，不要来回确认。默认速度为 {}，默认持续时间为 {}ms；"
-        "只有用户明确指定速度或持续时间时，才使用用户指定的值。每次动作都必须使用当前工具规则中的默认值，"
+        "‘右转’调用 self.chassis.turn_right。"
+        "识别到这些指令后，直接调用对应工具，不要来回确认。速度和持续时间由后端持久化配置统一注入，"
+        "当前默认速度为 {}、默认持续时间为 {}ms；模型不需要理解、生成或修改这些底层参数。"
         "动作完成后再简短告知结果。"
     ).format(speed, duration_ms)
 
@@ -96,7 +100,7 @@ def motor_tool_instructions(config):
 DEFAULT_GLOBAL_TOOL_INSTRUCTIONS = "\n\n".join((
     DEFAULT_TOOL_INSTRUCTIONS,
     motor_tool_instructions({"motor_defaults": {"speed": 85,
-                                                "duration_ms": 1000}}),
+                                                "duration_ms": 600}}),
     FACE_TOOL_INSTRUCTIONS,
 ))
 
@@ -312,6 +316,40 @@ class OmniClient:
         self._event_seq += 1
         return f"evt-{prefix}-{self._event_seq}"
 
+    @staticmethod
+    def _extract_emotion(value):
+        """Extract an optional provider emotion from a Realtime event."""
+        if isinstance(value, dict):
+            emotion = value.get("emotion")
+            if isinstance(emotion, str) and emotion.strip():
+                return emotion.strip()
+            for child in value.values():
+                found = OmniClient._extract_emotion(child)
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for child in value:
+                found = OmniClient._extract_emotion(child)
+                if found:
+                    return found
+        return None
+
+    @staticmethod
+    def _split_inline_emotion(text):
+        """Remove an emotion JSON fragment sometimes emitted in text."""
+        if not isinstance(text, str):
+            return text or "", None
+        pattern = re.compile(
+            r"\{\s*[\"']emotion[\"']\s*:\s*[\"']([^\"']+)[\"']\s*\}",
+            re.IGNORECASE,
+        )
+        match = pattern.search(text)
+        if not match:
+            return text, None
+        cleaned = (text[:match.start()] + text[match.end():]).strip()
+        cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+        return cleaned, match.group(1).strip()
+
     # ------------------------------------------------------------------
     # 单轮对话（手动模式：客户端控制语音起止）
     # 设备端已经用 VAD 判断了说话结束，这里把整段 PCM 发给模型，
@@ -428,18 +466,19 @@ class OmniClient:
                     if msg.type == aiohttp.WSMsgType.TEXT:
                         obj = json.loads(msg.data)
                         t = obj.get("type", "")
+                        emotion = self._extract_emotion(obj)
+                        if emotion:
+                            yield {"type": "emotion", "emotion": emotion}
                         if t == "response.audio.delta":
                             yield {"type": "audio", "audio_b64": obj.get("delta", ""),
                                    "sample_rate": self.output_rate}
                         elif t in ("response.audio_transcript.delta", "response.text.delta"):
                             delta = obj.get("delta", "")
                             assistant_text_parts.append(delta)
-                            yield {"type": "text", "text": delta}
                         elif t in ("response.audio_transcript.done", "response.text.done"):
                             assistant_transcript = obj.get("transcript", obj.get("text", ""))
                             if assistant_transcript and not assistant_text_parts:
                                 assistant_text_parts.append(assistant_transcript)
-                                yield {"type": "text", "text": assistant_transcript}
                         elif t == "conversation.item.input_audio_transcription.completed":
                             user_transcript = obj.get("transcript", "").strip()
                             if user_transcript:
@@ -487,9 +526,16 @@ class OmniClient:
                                     "response": {"modalities": ["text", "audio"]},
                                 })
                                 continue
+                            assistant_text = assistant_transcript or "".join(assistant_text_parts)
+                            assistant_text, inline_emotion = self._split_inline_emotion(
+                                assistant_text)
+                            if inline_emotion:
+                                yield {"type": "emotion", "emotion": inline_emotion}
+                            if assistant_text:
+                                yield {"type": "text", "text": assistant_text}
                             self._remember_turn(
                                 user_transcript,
-                                assistant_transcript or "".join(assistant_text_parts),
+                                assistant_text,
                             )
                             yield {"type": "done"}
                             break

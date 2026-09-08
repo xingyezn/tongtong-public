@@ -21,7 +21,7 @@ private:
     static constexpr int kPwmResolutionBits = 10;
     static constexpr int kPwmMaxDuty = (1 << kPwmResolutionBits) - 1;
     static constexpr int kDefaultSpeed = 85;
-    static constexpr int kDefaultDurationMs = 1000;
+    static constexpr int kDefaultDurationMs = 600;
     static constexpr int kMaxDurationMs = 10000;
 
     gpio_num_t left_in1_gpio_;
@@ -272,59 +272,29 @@ public:
         StopLocked();
 
         auto& mcp_server = McpServer::GetInstance();
-        mcp_server.AddTool("self.chassis.get_state", "Get the chassis motor state. Motors are stopped after every motion command.",
-            PropertyList(), [this](const PropertyList&) -> ReturnValue { return GetStateJson(); });
-
-        mcp_server.AddTool("self.chassis.go_forward", "前进：驱动左右两个电机向前行驶。除非用户明确指定，否则使用默认速度85、持续时间1000ms，直接执行无需确认。速度范围0-100，持续时间范围1-10000ms，到时自动停止。",
+        mcp_server.AddTool("self.chassis.go_forward", "控制终端完成前进动作，底层驱动由后端配置决定。必须直接调用，不要只文字回复或重复确认；速度和持续时间由后端持久化默认值注入，模型无需理解或传递底层参数，到时自动停止。",
             MotionProperties(), [this](const PropertyList& properties) -> ReturnValue {
                 int speed = properties["speed"].value<int>();
                 return DriveFor(speed, speed, properties["duration_ms"].value<int>());
             });
-        mcp_server.AddTool("self.chassis.go_back", "后退：驱动左右两个电机向后行驶。除非用户明确指定，否则使用默认速度85、持续时间1000ms，直接执行无需确认。速度范围0-100，持续时间范围1-10000ms，到时自动停止。",
+        mcp_server.AddTool("self.chassis.go_back", "控制终端完成后退动作，底层驱动由后端配置决定。必须直接调用，不要只文字回复或重复确认；速度和持续时间由后端持久化默认值注入，模型无需理解或传递底层参数，到时自动停止。",
             MotionProperties(), [this](const PropertyList& properties) -> ReturnValue {
                 int speed = properties["speed"].value<int>();
                 return DriveFor(-speed, -speed, properties["duration_ms"].value<int>());
             });
-        mcp_server.AddTool("self.chassis.turn_left", "左转：左轮后退、右轮前进，使底盘原地向左旋转。除非用户明确指定，否则使用默认速度85、持续时间1000ms，直接执行无需确认。速度范围0-100，持续时间范围1-10000ms，完成后自动停止。",
+        mcp_server.AddTool("self.chassis.turn_left", "控制终端完成左转，底层使左轮后退、右轮前进。必须直接调用，不要只文字回复或重复确认；速度和持续时间由后端持久化默认值注入，模型无需理解或传递底层参数，到时自动停止。",
             MotionProperties(), [this](const PropertyList& properties) -> ReturnValue {
                 int speed = properties["speed"].value<int>();
                 return DriveFor(-speed, speed, properties["duration_ms"].value<int>());
             });
-        mcp_server.AddTool("self.chassis.turn_right", "右转：左轮前进、右轮后退，使底盘原地向右旋转。除非用户明确指定，否则使用默认速度85、持续时间1000ms，直接执行无需确认。速度范围0-100，持续时间范围1-10000ms，完成后自动停止。",
+        mcp_server.AddTool("self.chassis.turn_right", "控制终端完成右转，底层使左轮前进、右轮后退。必须直接调用，不要只文字回复或重复确认；速度和持续时间由后端持久化默认值注入，模型无需理解或传递底层参数，到时自动停止。",
             MotionProperties(), [this](const PropertyList& properties) -> ReturnValue {
                 int speed = properties["speed"].value<int>();
                 return DriveFor(speed, -speed, properties["duration_ms"].value<int>());
-            });
-        mcp_server.AddTool("self.chassis.spin", "原地旋转：左轮前进、右轮后退，使底盘按顺时针方向原地旋转。除非用户明确指定，否则使用默认速度85、持续时间1000ms，直接执行无需确认。速度范围0-100，持续时间范围1-10000ms，完成后自动停止。",
-            MotionProperties(), [this](const PropertyList& properties) -> ReturnValue {
-                int speed = properties["speed"].value<int>();
-                return DriveFor(speed, -speed, properties["duration_ms"].value<int>());
-            });
-        mcp_server.AddTool("self.chassis.drive", "Drive each wheel independently for duration_ms 1-10000. left_speed and right_speed range from -100 to 100; positive is forward and negative is backward. The chassis stops automatically when the time expires.",
-            PropertyList({
-                Property("left_speed", kPropertyTypeInteger, 0, -100, 100),
-                Property("right_speed", kPropertyTypeInteger, 0, -100, 100),
-                Property("duration_ms", kPropertyTypeInteger, kDefaultDurationMs, 1, kMaxDurationMs),
-            }), [this](const PropertyList& properties) -> ReturnValue {
-                return DriveFor(properties["left_speed"].value<int>(), properties["right_speed"].value<int>(),
-                    properties["duration_ms"].value<int>());
             });
         mcp_server.AddTool("self.chassis.stop", "Immediately stop both chassis motors and disable the motor driver.",
             PropertyList(), [this](const PropertyList&) -> ReturnValue {
                 return StopNow();
-            });
-        mcp_server.AddTool("self.chassis.test_direct_drive",
-            "TEST ONLY: drive the DRV8833 with static HIGH/LOW direction levels, bypassing PWM. "
-            "left_direction and right_direction are -1 reverse, 0 stop, or 1 forward. "
-            "The driver stops automatically after duration_ms.",
-            PropertyList({
-                Property("left_direction", kPropertyTypeInteger, 0, -1, 1),
-                Property("right_direction", kPropertyTypeInteger, 0, -1, 1),
-                Property("duration_ms", kPropertyTypeInteger, 1000, 1, kMaxDurationMs),
-            }), [this](const PropertyList& properties) -> ReturnValue {
-                return DirectDriveFor(properties["left_direction"].value<int>(),
-                    properties["right_direction"].value<int>(),
-                    properties["duration_ms"].value<int>());
             });
     }
 };

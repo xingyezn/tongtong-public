@@ -10,11 +10,10 @@
 - 本地 ESP-SR 唤醒词检测。
 - Opus 音频编解码、语音上行和 TTS 音频播放。
 - VAD 语音段采集、实时打断、待命和唤醒状态切换。
-- 屏幕信息读取、亮度设置和主题设置。
-- RGB 指示灯开关、颜色设置和状态读取，默认颜色为 R=0、G=0、B=255。
+- 屏幕信息读取和待命提示。
 - UVC 摄像头当前帧采集，固定使用 480×320 分辨率和 JPEG 上传链路。
 - 摄像头 MCP：`self.camera.take_photo`；人脸数量和身份识别统一优先使用后端 `server.face.recognize_current`。本地 ESP-DL 人脸检测代码保留在源码中，便于后续开发，但当前不注册为 MCP 工具。
-- 电机驱动 MCP：前进、后退、左转、右转、原地旋转、停止，以及高低电平直驱测试。
+- 底盘运动 MCP：控制终端完成前进、后退、左转、右转和停止；电机仅作为底层执行部件。
 - 云台、舵机、跟随状态和 OTA 等已接入的板级 MCP 能力。
 
 ## 主要 MCP 方法
@@ -31,11 +30,9 @@
 - `self.chassis.go_back`
 - `self.chassis.turn_left`
 - `self.chassis.turn_right`
-- `self.chassis.spin`
 - `self.chassis.stop`
-- `self.chassis.test_direct_drive`
 
-当前面包板固件的电机控制引脚为 AIN1=GPIO8、AIN2=GPIO9、BIN1=GPIO10、BIN2=GPIO11、STBY=GPIO12。高低电平直驱只用于排查驱动板和供电问题。
+当前面包板固件的电机控制引脚为 AIN1=GPIO8、AIN2=GPIO9、BIN1=GPIO10、BIN2=GPIO11、STBY=GPIO12。
 
 ## 编译和烧录
 

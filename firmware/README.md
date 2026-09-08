@@ -10,11 +10,10 @@ This directory contains the current Tongtong ESP32 firmware. The device connects
 - Local ESP-SR wake-word detection.
 - Opus audio codec, voice uplink, and TTS playback.
 - VAD speech capture, interruption, standby, and wake states.
-- Screen information, brightness, and theme controls.
-- RGB indicator control and state reporting; default color is R=0, G=0, B=255.
+- Screen information and display features supported by the board.
 - UVC camera capture at a fixed 480x320 JPEG pipeline.
 - Camera MCP tool: `self.camera.take_photo`; face counting and identity recognition use the backend `server.face.recognize_current` tool. The local ESP-DL face detection code remains in the source tree for future development but is not registered as an MCP tool.
-- Motor MCP controls: forward, backward, turns, spin, stop, and direct GPIO test.
+- Motor MCP controls: forward, backward, left turn, right turn, and stop.
 - Connected gimbal, servo, tracking-state, OTA, and other board MCP capabilities.
 
 The normal conversational face registration and recognition flow is server-side. The backend captures a fresh frame through the camera MCP and forwards it to the Git-tracked `face-detect-service`.

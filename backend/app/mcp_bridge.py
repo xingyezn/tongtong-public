@@ -16,6 +16,13 @@ from typing import Optional
 
 log = logging.getLogger("mcp")
 
+MODEL_MOTOR_ACTIONS = {
+    "self.chassis.go_forward",
+    "self.chassis.go_back",
+    "self.chassis.turn_left",
+    "self.chassis.turn_right",
+}
+
 
 class McpBridge:
     """管理单个设备会话的 MCP 交互。"""
@@ -46,13 +53,13 @@ class McpBridge:
         }
 
     def make_tools_list(self, cursor: str = "") -> dict:
-        """tools/list 请求（发给设备）"""
+        """请求完整设备工具表，模型转换时仍会过滤用户专用工具。"""
         return {
             "type": "mcp",
             "payload": {
                 "jsonrpc": "2.0",
                 "method": "tools/list",
-                "params": {"cursor": cursor},
+                "params": {"cursor": cursor, "withUserTools": True},
                 "id": self._new_id(),
             },
         }
@@ -95,6 +102,18 @@ class McpBridge:
             })
             if not isinstance(parameters, dict):
                 continue
+            if name in MODEL_MOTOR_ACTIONS:
+                # 速度和持续时间由后端持久化配置注入，模型只需要选择动作。
+                properties = parameters.get("properties")
+                if isinstance(properties, dict):
+                    properties.pop("speed", None)
+                    properties.pop("duration_ms", None)
+                required = parameters.get("required")
+                if isinstance(required, list):
+                    parameters["required"] = [
+                        item for item in required
+                        if item not in ("speed", "duration_ms")
+                    ]
             if (motor_defaults and isinstance(name, str)
                     and name.startswith("self.chassis.")):
                 properties = parameters.setdefault("properties", {})

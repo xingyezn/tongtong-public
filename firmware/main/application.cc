@@ -21,6 +21,56 @@
 #define TAG "Application"
 #define TTS_ECHO_GUARD_US (500 * 1000)
 
+const char* Application::SelectSpeakingEmotion(const char* text) {
+    if (text == nullptr || text[0] == '\0') {
+        return "happy";
+    }
+    const std::string message(text);
+    if (message.find("？") != std::string::npos ||
+        message.find("?") != std::string::npos ||
+        message.find("吗") != std::string::npos ||
+        message.find("怎么") != std::string::npos ||
+        message.find("为什么") != std::string::npos) {
+        return "thinking";
+    }
+    if (message.find("抱歉") != std::string::npos ||
+        message.find("错误") != std::string::npos ||
+        message.find("失败") != std::string::npos ||
+        message.find("无法") != std::string::npos) {
+        return "sad";
+    }
+    if (message.find("注意") != std::string::npos ||
+        message.find("小心") != std::string::npos ||
+        message.find("警告") != std::string::npos) {
+        return "surprised";
+    }
+    if (message.find("成功") != std::string::npos ||
+        message.find("完成") != std::string::npos ||
+        message.find("谢谢") != std::string::npos ||
+        message.find("欢迎") != std::string::npos) {
+        return "happy";
+    }
+    return "happy";
+}
+
+bool Application::IsSupportedSpeakingEmotion(const char* emotion) {
+    if (emotion == nullptr) {
+        return false;
+    }
+    static constexpr const char* kSupportedEmotions[] = {
+        "neutral", "happy", "laughing", "funny", "sad", "angry",
+        "crying", "loving", "embarrassed", "surprised", "shocked",
+        "thinking", "winking", "cool", "relaxed", "delicious", "kissy",
+        "confident", "sleepy", "silly", "confused",
+    };
+    for (const char* supported : kSupportedEmotions) {
+        if (std::strcmp(emotion, supported) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 
 Application::Application() {
     event_group_ = xEventGroupCreate();
@@ -613,6 +663,9 @@ void Application::InitializeProtocol() {
                 if (cJSON_IsString(text)) {
                     ESP_LOGI(TAG, "<< %s", text->valuestring);
                     Schedule([this, display, message = std::string(text->valuestring)]() {
+                        if (!tts_has_emotion_) {
+                            display->SetEmotion(SelectSpeakingEmotion(message.c_str()));
+                        }
                         display->SetChatMessage("assistant", message.c_str());
                     });
                 }
@@ -629,6 +682,12 @@ void Application::InitializeProtocol() {
             auto emotion = cJSON_GetObjectItem(root, "emotion");
             if (cJSON_IsString(emotion)) {
                 Schedule([this, display, emotion_str = std::string(emotion->valuestring)]() {
+                    if (!IsSupportedSpeakingEmotion(emotion_str.c_str())) {
+                        ESP_LOGW(TAG, "Unsupported speaking emotion from server: %s",
+                            emotion_str.c_str());
+                        return;
+                    }
+                    tts_has_emotion_ = true;
                     display->SetEmotion(emotion_str.c_str());
                 });
             }
@@ -968,6 +1027,7 @@ void Application::HandleStateChangedEvent() {
         case kDeviceStateIdle:
             display->SetStatus(Lang::Strings::STANDBY);
             display->SetEmotion("neutral");
+            display->SetChatMessage("system", "对我说“你好童童”，唤醒我");
             audio_service_.EnableVoiceProcessing(false);
             audio_service_.EnableWakeWordDetection(true);
             break;
@@ -979,6 +1039,8 @@ void Application::HandleStateChangedEvent() {
         case kDeviceStateListening:
             display->SetStatus(Lang::Strings::LISTENING);
             display->SetEmotion("neutral");
+            display->SetChatMessage("system", "");
+            tts_has_emotion_ = false;
 
             // Make sure the audio processor is running
             if (!audio_service_.IsAudioProcessorRunning()) {

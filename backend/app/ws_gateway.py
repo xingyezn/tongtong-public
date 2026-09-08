@@ -35,7 +35,7 @@ class WsGateway:
     def _device_config(self, device_id: str) -> dict:
         config = copy.deepcopy(self.config)
         config["motor_defaults"] = {
-            "speed": 85, "duration_ms": 1000, "swap_wheels": False}
+            "speed": 85, "duration_ms": 600, "swap_wheels": False}
         if self.account_store:
             config.setdefault("dashscope", {}).update(
                 self.account_store.get_model_settings(device_id))
@@ -152,11 +152,13 @@ class WsGateway:
         device_config = self._device_config(device_id)
         turn_recorder = None
         if self.account_store:
-            turn_recorder = lambda did, user_text, assistant_text, usage=None: (
+            def turn_recorder(did, user_text, assistant_text, usage=None,
+                              emotion=None, emotion_source=None):
                 self.account_store.record_turn(
                     did, user_text, assistant_text,
                     device_config.get("dashscope", {}).get(
-                        "conversation_timeout_minutes", 10), usage))
+                        "conversation_timeout_minutes", 10), usage, emotion,
+                    emotion_source)
         session = Session(
             ws, device_config, self.omni, device_id,
             conversation_memory=self._conversation_memory(device_id),

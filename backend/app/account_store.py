@@ -122,6 +122,8 @@ class AccountStore:
                     conversation_id INTEGER NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
                     role TEXT NOT NULL CHECK(role IN ('user','assistant')),
                     content TEXT NOT NULL,
+                    emotion TEXT,
+                    emotion_source TEXT,
                     created_at REAL NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_chat_messages_conversation
@@ -207,6 +209,13 @@ class AccountStore:
             if "deleted_by_user_id" not in chat_columns:
                 self._db.execute(
                     "ALTER TABLE chat_sessions ADD COLUMN deleted_by_user_id INTEGER")
+            message_columns = {
+                row["name"] for row in self._db.execute("PRAGMA table_info(chat_messages)")
+            }
+            for name in ("emotion", "emotion_source"):
+                if name not in message_columns:
+                    self._db.execute(
+                        "ALTER TABLE chat_messages ADD COLUMN {} TEXT".format(name))
             self._repair_binding_codes_locked()
             self._db.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_binding_code
@@ -976,7 +985,8 @@ class AccountStore:
         return current
 
     def record_turn(self, device_id, user_text, assistant_text,
-                    timeout_minutes=10, usage=None):
+                    timeout_minutes=10, usage=None, emotion=None,
+                    emotion_source=None):
         device_id = self.normalize_device_id(device_id)
         user_text = (user_text or "").strip()
         assistant_text = (assistant_text or "").strip()
@@ -1019,11 +1029,16 @@ class AccountStore:
                 conversation_id = cursor.lastrowid
             else:
                 conversation_id = row["id"]
-            self._db.executemany("""
+            self._db.execute("""
                 INSERT INTO chat_messages(conversation_id,role,content,created_at)
                 VALUES(?,?,?,?)
-            """, ((conversation_id, "user", user_text, now),
-                  (conversation_id, "assistant", assistant_text, now)))
+            """, (conversation_id, "user", user_text, now))
+            self._db.execute("""
+                INSERT INTO chat_messages(
+                    conversation_id,role,content,emotion,emotion_source,created_at)
+                VALUES(?,?,?,?,?,?)
+            """, (conversation_id, "assistant", assistant_text, emotion,
+                  emotion_source, now))
             self._db.execute(
                 "UPDATE chat_sessions SET last_message_at=? WHERE id=?",
                 (now, conversation_id))
@@ -1142,7 +1157,7 @@ class AccountStore:
             if not session:
                 raise PermissionError("无权访问该会话")
             rows = self._db.execute("""
-                SELECT id,role,content,created_at FROM chat_messages
+                SELECT id,role,content,emotion,emotion_source,created_at FROM chat_messages
                 WHERE conversation_id=? ORDER BY id
             """, (int(conversation_id),)).fetchall()
         return {"conversation": dict(session),
@@ -1216,7 +1231,7 @@ class AccountStore:
             if not session:
                 return None
             messages = self._db.execute("""
-                SELECT id,role,content,created_at FROM chat_messages
+                SELECT id,role,content,emotion,emotion_source,created_at FROM chat_messages
                 WHERE conversation_id=? ORDER BY id
             """, (int(conversation_id),)).fetchall()
         return {"conversation": dict(session),

@@ -907,13 +907,13 @@ async function saveVad() {
 // ---- 模型/音色/人物设定 ----
 let hardwareTools = {};
 let hardwareToolsDevice = "";
-let motorDefaults = { speed: 85, duration_ms: 1000, swap_wheels: false };
+let motorDefaults = { speed: 85, duration_ms: 600, swap_wheels: false };
 
 const HARDWARE_TEST_GROUPS = [
-  { title: "电机驱动", items: [
+  { title: "设备控制", items: [["self.reboot", "重启设备"]] },
+  { title: "底盘运动控制", items: [
     ["self.chassis.go_forward", "前进"], ["self.chassis.go_back", "后退"],
     ["self.chassis.turn_left", "左转"], ["self.chassis.turn_right", "右转"],
-    ["self.chassis.spin", "原地转圈"], ["self.chassis.test_direct_drive", "高低电平前进测试"],
     ["self.chassis.stop", "停止"]
   ]},
   { title: "摄像头", items: [["self.camera.take_photo", "拍照测试"], ["self.camera.face_detect_local", "本地 ESP-DL 人脸检测"]] },
@@ -921,14 +921,7 @@ const HARDWARE_TEST_GROUPS = [
     ["self.gimbal.center", "云台回中"], ["self.gimbal.pan", "水平舵机"],
     ["self.gimbal.tilt", "俯仰舵机"], ["self.face_tracking.get_state", "跟随状态"]
   ]},
-  { title: "屏幕", items: [
-    ["self.screen.get_info", "读取屏幕信息"], ["self.screen.set_brightness", "亮度测试"],
-    ["self.screen.set_theme", "主题测试"]
-  ]},
-  { title: "RGB 指示灯", items: [
-    ["self.led.get_state", "读取灯状态"], ["self.led.turn_on", "开灯"],
-    ["self.led.turn_off", "关灯"], ["self.led.set_color", "设置颜色"]
-  ]}
+  { title: "屏幕", items: [["self.screen.get_info", "读取屏幕信息"]] }
 ];
 
 function selectedHardwareDevice() {
@@ -944,23 +937,12 @@ function showCameraPreview(deviceId) {
 }
 
 function hardwareArgs(name) {
-  if (name === "self.led.set_color") return ledRgbValues();
-  if (name === "self.chassis.test_direct_drive") {
-    return { left_direction: 1, right_direction: 1,
-             duration_ms: parseInt($("test-duration").value, 10) || motorDefaults.duration_ms };
-  }
   if (name.indexOf("self.chassis.") === 0 && name !== "self.chassis.stop") {
     return { speed: parseInt($("test-speed").value, 10) || motorDefaults.speed,
              duration_ms: parseInt($("test-duration").value, 10) || motorDefaults.duration_ms };
   }
   if (name === "self.camera.take_photo") {
     return { question: "检查摄像头是否能正常拍照" };
-  }
-  if (name === "self.screen.set_brightness") {
-    return { brightness: parseInt($("test-brightness").value, 10) || 50 };
-  }
-  if (name === "self.screen.set_theme") {
-    return { theme: $("test-theme").value };
   }
   return {};
 }
@@ -1062,7 +1044,7 @@ function renderHardwareTests() {
         (available ? "" : "（不可用）") + '</button>';
     }).join("");
     const faceActions = group.items.some(item => item[0] === "self.camera.take_photo") ? '<div class="hint" style="margin:8px 0">服务器端人脸测试（识别、录入或替换照片都会重新拍摄当前画面）</div><div class="test-actions"><button class="btn" onclick="runFaceTest(\'recognize_current\', this)">识别当前画面</button><button class="btn" onclick="runFaceTest(\'list\', this)">查询已录入人脸</button><button class="btn" onclick="runFaceTest(\'register_current\', this)">录入当前画面</button><button class="btn" onclick="runFaceTest(\'delete\', this)">删除人脸</button><button class="btn" onclick="runFaceTest(\'update\', this)">修改人脸</button></div>' : '';
-    const groupInputs = group.title === "电机驱动"
+    const groupInputs = group.title === "底盘运动控制"
       ? '<div class="row" style="margin-bottom:8px"><label class="muted">默认速度 <input class="test-input" id="user-motor-default-speed" type="number" min="0" max="100" value="' + motorDefaults.speed + '"></label>' +
         '<label class="muted">默认持续时间(ms) <input class="test-input" id="user-motor-default-duration" type="number" min="1" max="10000" value="' + motorDefaults.duration_ms + '"></label>' +
         '<label class="muted"><input id="user-motor-swap-wheels" type="checkbox"' + (motorDefaults.swap_wheels ? ' checked' : '') + '> 互换左右轮</label>' +
@@ -1122,6 +1104,7 @@ async function loadHardwareTests(force) {
 async function runHardwareTest(name, button) {
   const device = selectedHardwareDevice();
   if (!device) return;
+  if (name === "self.reboot" && !confirm("确认重启设备？设备会暂时离线。")) return;
   button.disabled = true;
   $("hardware-test-result").textContent = "执行中：" + name;
   try {
@@ -1343,7 +1326,11 @@ async function loadConversationMessages() {
     const data = await apiJson("/api/conversations?conversation_id=" + encodeURIComponent(activeConversationId));
     box.innerHTML = data.messages.map(message =>
       '<div class="chat-message ' + message.role + '"><div class="speaker">' +
-      (message.role === "user" ? "你" : "AI") + '</div>' + esc(message.content) + '</div>'
+      (message.role === "user" ? "你" : "AI") + '</div>' +
+      (message.role === "assistant" && message.emotion ?
+        '<div class="muted">表情：' + esc(message.emotion) +
+        '（' + (message.emotion_source === "model" ? "模型生成" : "本地生成") + '）</div>' : '') +
+      esc(message.content) + '</div>'
     ).join("") || '<div class="empty">还没有消息。</div>';
     box.scrollTop = box.scrollHeight;
   } catch (e) { box.innerHTML = '<div class="empty">加载消息失败。</div>'; }
@@ -1471,7 +1458,7 @@ header{padding:18px 4vw;background:#fff;border-bottom:1px solid var(--line);disp
 </main><div id="msg"></div>
 <script>
 let data={users:[],devices:[]},firmware={releases:[]},auditPage=1; const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-async function api(url,options={}){const r=await fetch(url,options);let d={};try{d=await r.json()}catch{}if(!r.ok)throw Error(d.error||("HTTP "+r.status));return d}
+async function api(url,options={}){const r=await fetch(url,options);if(r.status===401){window.location.href='/login';throw Error('登录已失效，正在跳转登录页')}let d={};try{d=await r.json()}catch{}if(!r.ok)throw Error(d.error||("HTTP "+r.status));return d}
 function toast(s,bad=false){const n=document.getElementById("msg");n.textContent=s;n.style.background=bad?"#a93649":"#17364d";n.style.display="block";setTimeout(()=>n.style.display="none",2800)}
 async function load(){try{const selected=document.getElementById("device-user-filter")?.value||"";const params=new URLSearchParams();if(selected)params.set("user_id",selected);params.set("audit_page",auditPage);params.set("audit_page_size",document.getElementById("audit-page-size")?.value||20);data=await api("/api/admin/overview?"+params.toString());firmware=await api("/api/admin/firmware");firmware.deployments=(await api("/api/admin/firmware/deployments")).deployments||[];render();renderFirmware();const settings=await api("/api/admin/settings");document.getElementById("global-tool-instructions").value=settings.tool_instructions||""}catch(e){toast(e.message,true)}}
 async function saveGlobalSettings(){try{await api("/api/admin/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tool_instructions:document.getElementById("global-tool-instructions").value})});toast("全局工具规则已保存并应用")}catch(e){toast(e.message,true)}}
@@ -1497,7 +1484,9 @@ async function switchEnvironment(id){const environment=prompt('目标环境：te
 async function loadFaceServiceSettings(){try{const s=await api("/api/admin/settings");const f=s.face_service||{};document.getElementById("face-service-url").value=f.base_url||"";document.getElementById("face-service-user").value=f.username||"";document.getElementById("face-service-password").value=f.password||""}catch(e){toast(e.message,true)}}
 async function saveFaceServiceSettings(){try{await api("/api/admin/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({face_service:{base_url:document.getElementById("face-service-url").value,username:document.getElementById("face-service-user").value,password:document.getElementById("face-service-password").value}})});toast("人脸服务配置已保存并应用")}catch(e){toast(e.message,true)}}
 function arrangeAdminSections(){const cards=[...document.querySelectorAll('main > section.card')];const face=cards.find(x=>x.querySelector('h2')?.textContent.includes('服务器端人脸识别服务'));const fw=cards.find(x=>x.querySelector('h2')?.textContent.includes('固件版本库'));if(face&&fw)fw.after(face)}
-function renderFirmware(){const devices=data.devices||[];document.getElementById('firmware-releases').innerHTML=(firmware.releases||[]).map(r=>{const opts='<option value="">选择在线设备</option>'+devices.filter(d=>d.online&&d.is_active).map(d=>`<option value="${esc(d.device_id)}">${esc(d.name||d.device_id)}</option>`).join('');const jobs=(firmware.deployments||[]).filter(j=>j.release_id===r.id);const j=jobs[jobs.length-1];const pct=j?Number(j.progress||0):0;const logs=j?(j.logs||[]).slice(-5).map(x=>new Date(x.time*1000).toLocaleTimeString()+' '+x.message).join('\\n'):'';return `<tr><td>${r.id}</td><td><b>${esc(r.version)}</b></td><td><input id="fw-desc-${r.id}" value="${esc(r.description||'')}" style="min-width:220px"><br><button onclick="updateFirmwareDescription(${r.id})">保存描述</button></td><td>${(Number(r.size_bytes)/1024/1024).toFixed(2)} MiB</td><td style="max-width:150px;word-break:break-all;font-size:11px"><code>${esc(r.sha256)}</code></td><td>${new Date(r.created_at*1000).toLocaleString()}</td><td><select id="fw-device-${r.id}">${opts}</select></td><td><button onclick="deployFirmware(${r.id})">下发</button></td><td>${j?`<progress max="100" value="${pct}"></progress> ${pct}%<br><small>${esc(j.message)}</small><pre style="max-width:360px;white-space:pre-wrap;font-size:11px">${esc(logs)}</pre><button onclick="clearFirmwareLog('${j.id}')">清除日志</button>`:'—'}</td><td><a class="btn" href="/api/admin/firmware/${r.id}/download">下载</a> <button class="danger" onclick="deleteFirmware(${r.id})">删除</button></td></tr>`}).join('')||'<tr><td colspan="10">暂无固件版本</td></tr>'}
+function renderFirmware(){const devices=data.devices||[];document.getElementById('firmware-releases').innerHTML=(firmware.releases||[]).map(r=>{const opts='<option value="">选择在线设备</option>'+devices.filter(d=>d.online&&d.is_active).map(d=>`<option value="${esc(d.device_id)}">${esc(d.name||d.device_id)}</option>`).join('');const jobs=(firmware.deployments||[]).filter(j=>j.release_id===r.id);const j=jobs[jobs.length-1];const pct=j?Number(j.progress||0):0;const logs=j?(j.logs||[]).slice(-5).map(x=>new Date(x.time*1000).toLocaleTimeString()+' '+x.message).join('\\n'):'';const description=esc(r.description||'—');return `<tr><td>${r.id}</td><td><b>${esc(r.version)}</b></td><td><span id="fw-desc-text-${r.id}" ondblclick="editFirmwareDescription(${r.id})" title="双击编辑固件描述" style="display:inline-block;min-width:220px;max-width:320px;white-space:pre-wrap;cursor:text">${description}</span><div id="fw-desc-editor-${r.id}" style="display:none"><input id="fw-desc-${r.id}" value="${esc(r.description||'')}" style="min-width:220px"><br><button onclick="updateFirmwareDescription(${r.id})">保存</button> <button onclick="cancelFirmwareDescription(${r.id})">取消</button></div></td><td>${(Number(r.size_bytes)/1024/1024).toFixed(2)} MiB</td><td style="max-width:150px;word-break:break-all;font-size:11px"><code>${esc(r.sha256)}</code></td><td>${new Date(r.created_at*1000).toLocaleString()}</td><td><select id="fw-device-${r.id}">${opts}</select></td><td><button onclick="deployFirmware(${r.id})">下发</button></td><td>${j?`<progress max="100" value="${pct}"></progress> ${pct}%<br><small>${esc(j.message)}</small><pre style="max-width:360px;white-space:pre-wrap;font-size:11px">${esc(logs)}</pre><button onclick="clearFirmwareLog('${j.id}')">清除日志</button>`:'—'}</td><td><a class="btn" href="/api/admin/firmware/${r.id}/download">下载</a> <button class="danger" onclick="deleteFirmware(${r.id})">删除</button></td></tr>`}).join('')||'<tr><td colspan="10">暂无固件版本</td></tr>'}
+function editFirmwareDescription(id){const text=document.getElementById('fw-desc-text-'+id),editor=document.getElementById('fw-desc-editor-'+id),input=document.getElementById('fw-desc-'+id);if(!text||!editor||!input)return;text.style.display='none';editor.style.display='block';input.focus();input.select()}
+function cancelFirmwareDescription(id){const text=document.getElementById('fw-desc-text-'+id),editor=document.getElementById('fw-desc-editor-'+id);if(text&&editor){editor.style.display='none';text.style.display='inline-block'}}
 async function updateFirmwareDescription(id){const input=document.getElementById('fw-desc-'+id);if(!input)return;try{await api('/api/admin/firmware/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({description:input.value})});toast('固件描述已保存');await load()}catch(e){toast(e.message,true)}}
 arrangeAdminSections();
 loadFaceServiceSettings();
@@ -1727,7 +1716,13 @@ class Dashboard:
         return web.Response(text=self._render_page(DASHBOARD_HTML), content_type="text/html", charset="utf-8")
 
     async def admin_page(self, request):
-        self._require_admin(request)
+        # 页面请求适合跳转到登录页；API 请求仍由 _require_admin 返回 401，
+        # 这样会话失效时浏览器不会直接显示 unauthorized 文本。
+        user = self._current_user(request)
+        if user is None:
+            raise web.HTTPFound("/login")
+        if not user.get("is_admin"):
+            raise web.HTTPForbidden(text="administrator access required")
         return web.Response(
             text=ADMIN_HTML, content_type="text/html", charset="utf-8",
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
@@ -1794,7 +1789,7 @@ class Dashboard:
         motor_defaults = {
             "speed": self._global_int_setting("motor_default_speed", 85, 0, 100),
             "duration_ms": self._global_int_setting(
-                "motor_default_duration_ms", 1000, 1, 10000),
+                "motor_default_duration_ms", 600, 1, 10000),
             "swap_wheels": self._global_bool_setting(
                 "motor_swap_wheels", False),
         }
@@ -1831,7 +1826,7 @@ class Dashboard:
             motor_speed = self._global_int_setting(
                 "motor_default_speed", 85, 0, 100)
             motor_duration = self._global_int_setting(
-                "motor_default_duration_ms", 1000, 1, 10000)
+                "motor_default_duration_ms", 600, 1, 10000)
             motor_swap_wheels = self._global_bool_setting(
                 "motor_swap_wheels", False)
             if "motor_defaults" in data:
@@ -1904,7 +1899,7 @@ class Dashboard:
                 "speed": self._global_int_setting(
                     "motor_default_speed", 85, 0, 100),
                 "duration_ms": self._global_int_setting(
-                    "motor_default_duration_ms", 1000, 1, 10000),
+                    "motor_default_duration_ms", 600, 1, 10000),
                 "swap_wheels": self._global_bool_setting(
                     "motor_swap_wheels", False),
             }
@@ -1917,7 +1912,7 @@ class Dashboard:
             if not isinstance(data, dict):
                 raise ValueError("invalid motor settings")
             speed = int(data.get("speed", 85))
-            duration_ms = int(data.get("duration_ms", 1000))
+            duration_ms = int(data.get("duration_ms", 600))
             swap_wheels = data.get("swap_wheels", False)
             if isinstance(swap_wheels, str):
                 swap_wheels = swap_wheels.strip().lower() in (
@@ -2469,7 +2464,7 @@ class Dashboard:
         session.config["motor_defaults"] = {
             "speed": self._global_int_setting("motor_default_speed", 85, 0, 100),
             "duration_ms": self._global_int_setting(
-                "motor_default_duration_ms", 1000, 1, 10000),
+                "motor_default_duration_ms", 600, 1, 10000),
             "swap_wheels": self._global_bool_setting(
                 "motor_swap_wheels", False),
         }
@@ -2862,13 +2857,12 @@ class Dashboard:
         # Destructive/configuration tools (firmware upgrade, screen snapshot
         # upload, asset download, etc.) are intentionally not exposed here.
         allowed_prefixes = ("self.chassis.", "self.gimbal.",
-                            "self.servo.", "self.face_tracking.", "self.led.")
+                            "self.servo.", "self.face_tracking.")
         allowed_names = {
+            "self.reboot",
             "self.camera.take_photo",
             "self.camera.face_detect_local",
             "self.screen.get_info",
-            "self.screen.set_brightness",
-            "self.screen.set_theme",
         }
         result = []
         for tool in tools:
