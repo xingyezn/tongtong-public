@@ -204,6 +204,11 @@ class Session:
         # the camera upload a photo without firmware storing a dashboard
         # cookie or a long-lived backend secret.
         self.camera_upload_token = secrets.token_urlsafe(24)
+        # Camera uploads happen on a separate HTTP request while an MCP tool
+        # call is in flight. These fields bridge that upload back to the
+        # exact conversation turn that requested it.
+        self._camera_capture_context = None
+        self._pending_turn_photo_ids = []
         self.connected_at = time.time()
 
         self.bin_version = BIN_V3          # 默认 v3（可由 hello/配置覆盖）
@@ -544,6 +549,7 @@ class Session:
     async def _run_omni_turn(self, pcm: bytes):
         self._suppress_current_audio = False
         self._standby_after_response = False
+        self._pending_turn_photo_ids = []
         # 无百炼 Key 时走回环模式，验证完整链路（说话→上行→下行→播放）
         if not self.omni.api_key:
             await self._echo_mode(pcm)
@@ -652,12 +658,20 @@ class Session:
             try:
                 # Preserve compatibility with integrations that record only
                 # the three text fields until the provider exposes usage.
-                result = (self.turn_recorder(
-                    self.device_id, input_transcript, assistant_text, token_usage,
-                    response_emotion, response_emotion_source)
-                    if any(token_usage.values()) else self.turn_recorder(
+                photo_ids = list(self._pending_turn_photo_ids)
+                self._pending_turn_photo_ids = []
+                if photo_ids:
+                    result = self.turn_recorder(
                         self.device_id, input_transcript, assistant_text,
-                        None, response_emotion, response_emotion_source))
+                        token_usage if any(token_usage.values()) else None,
+                        response_emotion, response_emotion_source, photo_ids)
+                else:
+                    result = (self.turn_recorder(
+                        self.device_id, input_transcript, assistant_text, token_usage,
+                        response_emotion, response_emotion_source)
+                        if any(token_usage.values()) else self.turn_recorder(
+                            self.device_id, input_transcript, assistant_text,
+                            None, response_emotion, response_emotion_source))
                 if result:
                     self._schedule_conversation_summary(
                         result.get("ended_conversation_id")
@@ -857,7 +871,8 @@ class Session:
                 log.warning("blocked model access to face list: device=%s", self.device_id)
                 return json.dumps({"error": "face list is not available to the model"},
                                   ensure_ascii=False)
-            return await self._handle_face_tool(name, arguments)
+            return await self._handle_face_tool(
+                name, arguments, capture_source="conversation")
         if not name or not self._mcp:
             return None
 
@@ -892,6 +907,11 @@ class Session:
         fut = loop.create_future()
         self._mcp.register_pending(req_id, fut)
 
+        capture_context = None
+        if name == "self.camera.take_photo":
+            capture_context = self._begin_camera_capture(
+                arguments.get("question", ""), "conversation")
+
         await self.send_json(req)
         log.info("MCP tools/call -> device: %s(%s)", name, arguments)
 
@@ -904,6 +924,9 @@ class Session:
         except Exception as e:
             log.warning("设备 tools/call 异常: %s", e)
             return json.dumps({"error": str(e)})
+        finally:
+            if self._camera_capture_context is capture_context:
+                self._camera_capture_context = None
 
         log.info("设备 tools/call 回执: %s", json.dumps(result)[:300])
         # result 形如 {"content":[{"type":"text","text":"true"}],"isError":false}
@@ -913,16 +936,45 @@ class Session:
             return json.dumps({"result": texts})
         return json.dumps({"result": result})
 
-    async def _capture_current_photo(self):
+    def _begin_camera_capture(self, question, source):
+        context = {
+            "question": (question or "").strip()[:1000],
+            "source": source,
+            "created_at": time.time(),
+        }
+        self._camera_capture_context = context
+        return context
+
+    def claim_camera_upload_context(self, submitted_question=""):
+        """Claim the in-flight capture context from the HTTP upload handler."""
+        context = self._camera_capture_context
+        if context is None:
+            return None
+        self._camera_capture_context = None
+        result = dict(context)
+        if submitted_question:
+            result["question"] = submitted_question.strip()[:1000]
+        return result
+
+    def register_turn_photo(self, photo_id):
+        try:
+            photo_id = int(photo_id)
+        except (TypeError, ValueError):
+            return
+        if photo_id > 0 and photo_id not in self._pending_turn_photo_ids:
+            self._pending_turn_photo_ids.append(photo_id)
+
+    async def _capture_current_photo(self, capture_source="manual", question=None):
         """Trigger a fresh device capture and return the uploaded JPEG."""
         if not self._mcp:
             return None, {"error": "device MCP unavailable"}
         tool_names = {t.get("name") for t in self._mcp.tools}
         if "self.camera.take_photo" not in tool_names:
             return None, {"error": "device camera capture tool unavailable"}
+        question = question or "仅上传当前帧供服务器人脸操作，不需要进行视觉回答。"
+        capture_context = self._begin_camera_capture(question, capture_source)
         req = self._mcp.make_tools_call(
-            "self.camera.take_photo",
-            {"question": "仅上传当前帧供服务器人脸操作，不需要进行视觉回答。"})
+            "self.camera.take_photo", {"question": question})
         previous_nonce = (self.camera_photos.get(self.device_id) or {}).get("nonce")
         req_id = req["payload"]["id"]
         fut = asyncio.get_event_loop().create_future()
@@ -934,19 +986,21 @@ class Session:
             return None, {"error": "device camera capture timeout"}
         finally:
             self._mcp._pending_calls.pop(req_id, None)
+            if self._camera_capture_context is capture_context:
+                self._camera_capture_context = None
         photo = self.camera_photos.get(self.device_id)
         if (not photo or not photo.get("data") or
                 photo.get("nonce") == previous_nonce):
             return None, {"error": "fresh camera frame was not uploaded"}
         return photo["data"], {"capture": "fresh", "device_result": result}
 
-    async def _handle_face_tool(self, name, arguments):
+    async def _handle_face_tool(self, name, arguments, capture_source="manual"):
         http_session = await self.omni.ensure_session()
         if name == "server.face.list":
             result = await self.face_service.request(http_session, "GET", "/api/faces")
             return json.dumps(result, ensure_ascii=False)
         if name == "server.face.register_current":
-            image, capture = await self._capture_current_photo()
+            image, capture = await self._capture_current_photo(capture_source)
             if image is None:
                 return json.dumps(capture, ensure_ascii=False)
             fields = {key: arguments.get(key) for key in ("name", "external_id", "note")}
@@ -955,7 +1009,7 @@ class Session:
             result["capture"] = "fresh"
             return json.dumps(result, ensure_ascii=False)
         if name == "server.face.recognize_current":
-            image, capture = await self._capture_current_photo()
+            image, capture = await self._capture_current_photo(capture_source)
             if image is None:
                 return json.dumps(capture, ensure_ascii=False)
             result = await self.face_service.request(
@@ -966,7 +1020,7 @@ class Session:
         if not isinstance(face_id, int) or isinstance(face_id, bool):
             return json.dumps({"error": "face_id must be an integer"}, ensure_ascii=False)
         if name == "server.face.delete":
-            image, capture = await self._capture_current_photo()
+            image, capture = await self._capture_current_photo(capture_source)
             if image is None:
                 return json.dumps(capture, ensure_ascii=False)
             recognition = await self.face_service.request(
@@ -991,7 +1045,7 @@ class Session:
                       if key in arguments}
             image = None
             if arguments.get("replace_image"):
-                image, capture = await self._capture_current_photo()
+                image, capture = await self._capture_current_photo(capture_source)
                 if image is None:
                     return json.dumps(capture, ensure_ascii=False)
             result = await self.face_service.request(

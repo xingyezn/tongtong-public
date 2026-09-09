@@ -13,7 +13,7 @@ The backend is an `aiohttp` service that connects Tongtong ESP32 devices to the 
 - Per-device model, language, voice, prompt, VAD, memory, and conversation-timeout settings.
 - Eight-digit, time-limited device binding codes and per-user device ownership.
 - User accounts, administrator accounts, audit records, conversation history, usage/token statistics, and permanent memory.
-- Camera upload and latest-frame preview for supervised tests.
+- Camera upload and latest-frame preview for supervised tests. JPEGs captured during a conversation are persisted with the matching message and shown in the user dashboard with the capture prompt, time, and that turn's AI description.
 - Conversational server-side face tools: register the current frame, recognize the current frame, delete by an ID explicitly provided by the user, and update metadata or replace a sample image.
 - The model is not given the face-list tool. Face lists remain available only to the authenticated administrator/manual test page.
 
@@ -21,7 +21,7 @@ The backend is an `aiohttp` service that connects Tongtong ESP32 devices to the 
 
 `face_service.py` calls the Git-tracked sibling service at `../face-detect-service/` (normally `http://127.0.0.1:8090`). The backend authenticates with the face service login session, then calls `/api/faces` or `/api/recognize`.
 
-Current-frame operations always invoke the firmware's `self.camera.take_photo` first. The JPEG is kept temporarily in backend memory and is never placed in the model prompt. The face service records recognition requests in its recent-request history, including result, count, timing, and a temporary image reference.
+Current-frame operations always invoke the firmware's `self.camera.take_photo` first. The latest-frame preview remains temporary in backend memory. Conversation-triggered photos are stored in the account SQLite database, attached to their matching messages, and served only through an authenticated ownership-checked endpoint. Images are never placed in the model prompt. The face service records recognition requests in its recent-request history, including result, count, timing, and a temporary image reference.
 
 Configure the face service under `face_service` in the backend configuration, or from the administrator page. Do not commit real API keys, account passwords, tokens, or deployment configuration.
 

@@ -290,6 +290,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .chat-message.user { align-self:flex-end; background:#dff1ff; border-bottom-right-radius:4px; }
   .chat-message.assistant { align-self:flex-start; background:#fff; border:1px solid #dceaf2; border-bottom-left-radius:4px; }
   .chat-message .speaker { font-size:10px; color:var(--muted); font-weight:800; margin-bottom:3px; }
+  .chat-photo-evidence { margin:7px 0 9px; padding:8px; border:1px solid #cfe0ea; border-radius:10px; background:#f7fbfd; white-space:normal; }
+  .chat-photo-evidence a { display:block; }
+  .chat-photo-evidence img { display:block; width:min(100%,420px); max-height:320px; object-fit:contain; border-radius:7px; background:#eaf2f6; }
+  .chat-photo-evidence figcaption { margin-top:7px; color:#526b7d; font-size:11px; line-height:1.5; }
+  .chat-photo-evidence .photo-description { margin-top:5px; padding-top:5px; border-top:1px solid #dceaf2; color:#304c60; white-space:pre-wrap; }
   .memory-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:9px; margin-top:10px; }
   .memory-item { border:1px solid #dceaf2; border-radius:10px; padding:10px; background:#f8fcfe; }
   .usage-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:9px; }
@@ -1399,6 +1404,7 @@ async function loadConversations() {
         item.dataset.conversationId = conversation.id;
         item.innerHTML = '<div>' + esc(conversation.title || "新会话") + '</div><div class="muted">' +
           new Date(conversation.last_message_at * 1000).toLocaleString() + ' · ' + conversation.message_count + ' 条消息' +
+          (conversation.photo_count ? ' · ' + conversation.photo_count + ' 张照片' : '') +
           (conversation.ended_at ? '' : ' · 进行中') + '</div>';
         item.onclick = () => { activeConversationId = conversation.id; loadConversationMessages(); loadConversations(); };
         if (conversation.ended_at) {
@@ -1427,14 +1433,23 @@ async function loadConversationMessages() {
   if (!activeConversationId) return;
   try {
     const data = await apiJson("/api/conversations?conversation_id=" + encodeURIComponent(activeConversationId));
-    box.innerHTML = data.messages.map(message =>
-      '<div class="chat-message ' + message.role + '"><div class="speaker">' +
-      (message.role === "user" ? "你" : "AI") + '</div>' +
-      (message.role === "assistant" && message.emotion ?
-        '<div class="muted">表情：' + esc(message.emotion) +
-        '（' + (message.emotion_source === "model" ? "模型生成" : "本地生成") + '）</div>' : '') +
-      esc(message.content) + '</div>'
-    ).join("") || '<div class="empty">还没有消息。</div>';
+    box.innerHTML = data.messages.map(message => {
+      const photos = (message.photos || []).map(photo =>
+        '<figure class="chat-photo-evidence"><a href="' + esc(photo.image_url) +
+        '" target="_blank" rel="noopener"><img loading="lazy" src="' +
+        esc(photo.image_url) + '" alt="本轮摄像头拍摄画面"></a><figcaption>' +
+        '拍摄时间：' + new Date(photo.created_at * 1000).toLocaleString() +
+        (photo.question ? '<br>拍摄指令：' + esc(photo.question) : '') +
+        (photo.description ? '<div class="photo-description"><b>AI 对该画面的描述 / 回复：</b><br>' +
+          esc(photo.description) + '</div>' : '') + '</figcaption></figure>'
+      ).join('');
+      return '<div class="chat-message ' + message.role + '"><div class="speaker">' +
+        (message.role === "user" ? "你" : "AI") + '</div>' +
+        (message.role === "assistant" && message.emotion ?
+          '<div class="muted">表情：' + esc(message.emotion) +
+          '（' + (message.emotion_source === "model" ? "模型生成" : "本地生成") + '）</div>' : '') +
+        photos + esc(message.content) + '</div>';
+    }).join("") || '<div class="empty">还没有消息。</div>';
     box.scrollTop = box.scrollHeight;
   } catch (e) { box.innerHTML = '<div class="empty">加载消息失败。</div>'; }
 }
@@ -1846,6 +1861,8 @@ class Dashboard:
         app.router.add_post("/api/conversations/end", self.api_conversation_end)
         app.router.add_post("/api/conversations/delete", self.api_conversation_delete)
         app.router.add_post("/api/conversations/delete-bulk", self.api_conversations_delete_bulk)
+        app.router.add_get("/api/conversation-photos/{photo_id}",
+                           self.api_conversation_photo)
         app.router.add_get("/api/memories", self.api_memories)
         app.router.add_post("/api/memories", self.api_memory_create)
         app.router.add_post("/api/memories/update", self.api_memory_update)
@@ -3515,12 +3532,22 @@ class Dashboard:
             return web.json_response({"error": "multipart JPEG upload required"}, status=400)
 
         image = bytearray()
+        submitted_question = bytearray()
         try:
             reader = await request.multipart()
             while True:
                 part = await reader.next()
                 if part is None:
                     break
+                if part.name == "question":
+                    while True:
+                        chunk = await part.read_chunk()
+                        if not chunk:
+                            break
+                        if len(submitted_question) < 4096:
+                            submitted_question.extend(
+                                chunk[:4096 - len(submitted_question)])
+                    continue
                 if part.name != "file":
                     await part.release()
                     continue
@@ -3540,18 +3567,59 @@ class Dashboard:
                         device_id, len(image), bytes(image[:4]).hex(), bytes(image[-4:]).hex())
             return web.json_response({"error": "camera did not send a JPEG"}, status=400)
 
+        question = submitted_question.decode("utf-8", errors="replace").strip()[:1000]
         photo = {
             "data": bytes(image),
             "created_at": time.time(),
             "nonce": secrets.token_urlsafe(8),
         }
         self._camera_photos[device_id] = photo
-        log.info("camera photo stored in memory: device=%s bytes=%d", device_id, len(image))
+        context = None
+        claim_context = getattr(session, "claim_camera_upload_context", None)
+        if callable(claim_context):
+            context = claim_context(question)
+        if (context and context.get("source") == "conversation" and
+                self.account_store is not None):
+            try:
+                stored = self.account_store.record_chat_photo(
+                    device_id, image, context.get("question", question))
+                if stored:
+                    register_photo = getattr(session, "register_turn_photo", None)
+                    if callable(register_photo):
+                        register_photo(stored["id"])
+                    photo["record_id"] = stored["id"]
+            except Exception:
+                # The live camera result remains usable even if persistence
+                # fails; do not make the device retry and duplicate a capture.
+                log.exception("failed to persist conversational camera photo: device=%s",
+                              device_id)
+        log.info("camera photo received: device=%s bytes=%d persisted=%s",
+                 device_id, len(image), bool(photo.get("record_id")))
         return web.json_response({
             "success": True,
             "result": "Photo captured and available on the dashboard.",
+            "persisted": bool(photo.get("record_id")),
             "image_url": "/api/camera/latest?device_id={}&v={}".format(device_id, photo["nonce"]),
         })
+
+    async def api_conversation_photo(self, request):
+        """Serve one persisted photo only to its conversation owner or an admin."""
+        user = self._require_user(request)
+        try:
+            photo = self.account_store.get_chat_photo(
+                user["id"], request.match_info.get("photo_id"))
+        except PermissionError as exc:
+            return web.json_response({"error": str(exc)}, status=403)
+        except (TypeError, ValueError):
+            return web.json_response({"error": "invalid photo id"}, status=400)
+        return web.Response(
+            body=photo["image"], content_type=photo["mime_type"],
+            headers={
+                "Cache-Control": "private, no-store, max-age=0",
+                "X-Content-Type-Options": "nosniff",
+                "Content-Disposition": "inline; filename=conversation-photo-{}.jpg".format(
+                    photo["id"]),
+            })
 
     async def api_camera_latest(self, request):
         """Serve a dashboard-authenticated, in-memory latest camera photo."""

@@ -52,6 +52,19 @@ class FakeSession:
     def __init__(self, config):
         self.config = config
         self.sent = []
+        self.camera_capture_context = None
+        self.turn_photo_ids = []
+
+    def claim_camera_upload_context(self, submitted_question=""):
+        context = self.camera_capture_context
+        self.camera_capture_context = None
+        if context and submitted_question:
+            context = dict(context)
+            context["question"] = submitted_question
+        return context
+
+    def register_turn_photo(self, photo_id):
+        self.turn_photo_ids.append(photo_id)
 
     async def send_json(self, message):
         self.sent.append(message)
@@ -96,9 +109,13 @@ async def main():
                           "living-room", "客厅童童")
         store.bind_device(bob["id"], second["device_id"], second["binding_code"],
                           "private", "Bob device")
-        store.record_turn(first["device_id"], "你好", "你好，我是童童。",
+        initial_photo_bytes = b"\xff\xd8dashboard-chat-photo\xff\xd9"
+        initial_photo = store.record_chat_photo(
+            first["device_id"], initial_photo_bytes, "请描述当前画面")
+        store.record_turn(first["device_id"], "你好", "画面里有一张桌子。",
                           usage={"input_tokens": 12, "output_tokens": 34,
-                                 "total_tokens": 46})
+                                 "total_tokens": 46},
+                          photo_ids=[initial_photo["id"]])
 
         config = {
             "server": {"public_ws_url": "ws://x/ws"},
@@ -189,7 +206,10 @@ async def main():
                               first["device_id"])
             r = await client.get(categories_url, headers=headers)
             categories = await r.json()
-            assert r.status == 200 and all(categories["model_tool_categories"].values())
+            assert r.status == 200 and categories["model_tool_categories"] == {
+                "chassis": False, "camera": True,
+                "gimbal_servo": False,
+            }
             r = await client.post("http://127.0.0.1:8099/api/model-tool-categories",
                                   headers=headers, json={
                                       "device_id": first["device_id"],
@@ -208,7 +228,7 @@ async def main():
                 "http://127.0.0.1:8099/api/conversations?device_id=" + first["device_id"],
                 headers=headers)
             turns = (await r.json())["turns"]
-            assert r.status == 200 and turns[0]["assistant_text"] == "你好，我是童童。"
+            assert r.status == 200 and turns[0]["assistant_text"] == "画面里有一张桌子。"
             r = await client.get(
                 "http://127.0.0.1:8099/api/conversations?device_id=" + first["device_id"],
                 headers=headers)
@@ -219,6 +239,12 @@ async def main():
                 str(conversations[0]["id"]), headers=headers)
             messages = (await r.json())["messages"]
             assert [message["role"] for message in messages] == ["user", "assistant"]
+            assert messages[1]["photos"][0]["question"] == "请描述当前画面"
+            assert messages[1]["photos"][0]["description"] == "画面里有一张桌子。"
+            r = await client.get(
+                "http://127.0.0.1:8099" + messages[1]["photos"][0]["image_url"],
+                headers=headers)
+            assert r.status == 200 and await r.read() == initial_photo_bytes
 
             store.end_conversation(first["device_id"])
             r = await client.post(
@@ -272,11 +298,24 @@ async def main():
 
             photo_bytes = b"\xff\xd8dashboard-camera-test\xff\xd9"
             form = FormData()
+            form.add_field("question", "测试画面里有什么？")
             form.add_field("file", photo_bytes, filename="camera.jpg", content_type="image/jpeg")
+            session.camera_capture_context = {
+                "source": "conversation", "question": "测试画面里有什么？",
+            }
             r = await client.post("http://127.0.0.1:8099/api/camera/upload", data=form,
                                   headers={"Device-Id": first["device_id"],
                                            "Authorization": "Bearer camera-upload-token"})
-            assert r.status == 200
+            upload = await r.json()
+            assert r.status == 200 and upload["persisted"]
+            captured_turn = store.record_turn(
+                first["device_id"], "拍到了什么？", "测试画面里有一张测试卡。",
+                photo_ids=session.turn_photo_ids)
+            captured_messages = store.get_chat_messages(
+                alice["id"], captured_turn["conversation_id"])["messages"]
+            captured_photo = captured_messages[-1]["photos"][0]
+            assert captured_photo["question"] == "测试画面里有什么？"
+            assert captured_photo["description"] == "测试画面里有一张测试卡。"
 
             for _ in range(4):
                 r = await client.post("http://127.0.0.1:8099/api/devices/bind",

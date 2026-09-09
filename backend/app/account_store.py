@@ -130,6 +130,25 @@ class AccountStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_chat_messages_conversation
                     ON chat_messages(conversation_id, id);
+                CREATE TABLE IF NOT EXISTS chat_photos (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    device_id TEXT NOT NULL,
+                    conversation_id INTEGER REFERENCES chat_sessions(id) ON DELETE CASCADE,
+                    message_id INTEGER REFERENCES chat_messages(id) ON DELETE SET NULL,
+                    question TEXT NOT NULL DEFAULT '',
+                    description TEXT NOT NULL DEFAULT '',
+                    image BLOB NOT NULL,
+                    mime_type TEXT NOT NULL DEFAULT 'image/jpeg',
+                    size_bytes INTEGER NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    attached_at REAL
+                );
+                CREATE INDEX IF NOT EXISTS idx_chat_photos_conversation
+                    ON chat_photos(conversation_id, message_id, id);
+                CREATE INDEX IF NOT EXISTS idx_chat_photos_pending
+                    ON chat_photos(device_id, conversation_id, created_at);
                 CREATE TABLE IF NOT EXISTS user_memories (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1060,7 +1079,7 @@ class AccountStore:
 
     def record_turn(self, device_id, user_text, assistant_text,
                     timeout_minutes=10, usage=None, emotion=None,
-                    emotion_source=None):
+                    emotion_source=None, photo_ids=None):
         device_id = self.normalize_device_id(device_id)
         user_text = (user_text or "").strip()
         assistant_text = (assistant_text or "").strip()
@@ -1103,21 +1122,115 @@ class AccountStore:
                 conversation_id = cursor.lastrowid
             else:
                 conversation_id = row["id"]
-            self._db.execute("""
+            user_message = self._db.execute("""
                 INSERT INTO chat_messages(conversation_id,role,content,created_at)
                 VALUES(?,?,?,?)
             """, (conversation_id, "user", user_text, now))
-            self._db.execute("""
+            assistant_message = self._db.execute("""
                 INSERT INTO chat_messages(
                     conversation_id,role,content,emotion,emotion_source,created_at)
                 VALUES(?,?,?,?,?,?)
             """, (conversation_id, "assistant", assistant_text, emotion,
                   emotion_source, now))
+            normalized_photo_ids = []
+            for photo_id in photo_ids or []:
+                try:
+                    value = int(photo_id)
+                except (TypeError, ValueError):
+                    continue
+                if value > 0 and value not in normalized_photo_ids:
+                    normalized_photo_ids.append(value)
+            if normalized_photo_ids:
+                placeholders = ",".join("?" for _ in normalized_photo_ids)
+                self._db.execute("""
+                    UPDATE chat_photos
+                    SET conversation_id=?,message_id=?,description=?,attached_at=?
+                    WHERE user_id=? AND device_id=? AND conversation_id IS NULL
+                      AND id IN ({})
+                """.format(placeholders), (
+                    conversation_id, assistant_message.lastrowid,
+                    assistant_text, now, owner_id, device_id,
+                    *normalized_photo_ids))
             self._db.execute(
                 "UPDATE chat_sessions SET last_message_at=? WHERE id=?",
                 (now, conversation_id))
         return {"conversation_id": conversation_id,
+                "user_message_id": user_message.lastrowid,
+                "assistant_message_id": assistant_message.lastrowid,
                 "ended_conversation_id": None}
+
+    def record_chat_photo(self, device_id, image, question=""):
+        """Persist a protected JPEG while it waits for the current turn to finish."""
+        device_id = self.normalize_device_id(device_id)
+        owner_id = self.device_owner_id(device_id)
+        if owner_id is None:
+            return None
+        image = bytes(image or b"")
+        if not image:
+            raise AccountError("照片内容不能为空")
+        question = (question or "").strip()[:1000]
+        now = time.time()
+        digest = hashlib.sha256(image).hexdigest()
+        with self._lock, self._db:
+            cursor = self._db.execute("""
+                INSERT INTO chat_photos(
+                    user_id,device_id,question,image,mime_type,size_bytes,sha256,created_at)
+                VALUES(?,?,?,?,?,?,?,?)
+            """, (owner_id, device_id, question, sqlite3.Binary(image),
+                  "image/jpeg", len(image), digest, now))
+        return {"id": cursor.lastrowid, "device_id": device_id,
+                "question": question, "mime_type": "image/jpeg",
+                "size_bytes": len(image), "sha256": digest,
+                "created_at": now}
+
+    @staticmethod
+    def _chat_photo_metadata(row):
+        result = {
+            "id": row["id"],
+            "question": row["question"],
+            "description": row["description"],
+            "mime_type": row["mime_type"],
+            "size_bytes": row["size_bytes"],
+            "sha256": row["sha256"],
+            "created_at": row["created_at"],
+        }
+        result["image_url"] = "/api/conversation-photos/{}".format(row["id"])
+        return result
+
+    def get_chat_photo(self, user_id, photo_id):
+        """Return one attached photo after checking chat ownership."""
+        with self._lock:
+            row = self._db.execute("""
+                SELECT p.*,s.user_id AS conversation_user_id,s.deleted_at
+                FROM chat_photos p
+                JOIN chat_sessions s ON s.id=p.conversation_id
+                WHERE p.id=?
+            """, (int(photo_id),)).fetchone()
+            is_admin = self.is_admin(user_id)
+            if (not row or (not is_admin and
+                    (row["deleted_at"] is not None or
+                     row["conversation_user_id"] != user_id))):
+                raise PermissionError("无权访问该照片")
+            return {"id": row["id"], "image": bytes(row["image"]),
+                    "mime_type": row["mime_type"],
+                    "size_bytes": row["size_bytes"],
+                    "sha256": row["sha256"]}
+
+    def _attach_photo_metadata_locked(self, messages, conversation_id):
+        by_message = {item["id"]: item for item in messages}
+        for item in messages:
+            item["photos"] = []
+        rows = self._db.execute("""
+            SELECT id,message_id,question,description,mime_type,size_bytes,
+                   sha256,created_at
+            FROM chat_photos
+            WHERE conversation_id=? AND message_id IS NOT NULL
+            ORDER BY id
+        """, (int(conversation_id),)).fetchall()
+        for row in rows:
+            message = by_message.get(row["message_id"])
+            if message is not None:
+                message["photos"].append(self._chat_photo_metadata(row))
 
     @staticmethod
     def _usage_period_starts(now=None):
@@ -1209,7 +1322,9 @@ class AccountStore:
         with self._lock:
             rows = self._db.execute("""
                 SELECT s.id,s.device_id,s.title,s.started_at,s.last_message_at,s.ended_at,
-                       COUNT(m.id) AS message_count
+                       COUNT(m.id) AS message_count,
+                       (SELECT COUNT(*) FROM chat_photos p
+                        WHERE p.conversation_id=s.id) AS photo_count
                 FROM chat_sessions s LEFT JOIN chat_messages m ON m.conversation_id=s.id
                 WHERE s.user_id=? AND s.device_id=? AND s.deleted_at IS NULL
                 GROUP BY s.id
@@ -1234,8 +1349,10 @@ class AccountStore:
                 SELECT id,role,content,emotion,emotion_source,created_at FROM chat_messages
                 WHERE conversation_id=? ORDER BY id
             """, (int(conversation_id),)).fetchall()
+            messages = [dict(row) for row in rows]
+            self._attach_photo_metadata_locked(messages, conversation_id)
         return {"conversation": dict(session),
-                "messages": [dict(row) for row in rows]}
+                "messages": messages}
 
     def conversation_for_memory(self, conversation_id):
         with self._lock:
@@ -1353,8 +1470,10 @@ class AccountStore:
                 SELECT id,role,content,emotion,emotion_source,created_at FROM chat_messages
                 WHERE conversation_id=? ORDER BY id
             """, (int(conversation_id),)).fetchall()
+            messages = [dict(row) for row in messages]
+            self._attach_photo_metadata_locked(messages, conversation_id)
         return {"conversation": dict(session),
-                "messages": [dict(row) for row in messages]}
+                "messages": messages}
 
     def list_memories(self, user_id, enabled_only=False):
         clause = " AND um.enabled=1" if enabled_only else ""
