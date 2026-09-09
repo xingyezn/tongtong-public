@@ -115,7 +115,9 @@ async def main():
                 headers=admin_headers,
                 json={"device_id": device["device_id"], "environment": "production",
                       "ota_url": "http://public.example/ota"})
-            assert response.status == 400
+            # Production HTTP is allowed with a warning; HTTPS remains the
+            # recommended deployment configuration.
+            assert response.status == 202
 
             response = await client.post(
                 "http://127.0.0.1:8097/api/admin/users/create",
@@ -158,7 +160,8 @@ async def main():
             assert usage_overview["usage_by_user_device"][0]["total_tokens"] == 21
 
             response = await client.get(
-                "http://127.0.0.1:8097/api/admin/overview", headers=admin_headers)
+                "http://127.0.0.1:8097/api/admin/overview?audit_page_size=5",
+                headers=admin_headers)
             overview = await response.json()
             assert len(overview["audit"]) == 5
 

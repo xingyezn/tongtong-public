@@ -13,6 +13,7 @@ from flask import Flask, jsonify, request, render_template_string, session, redi
 from recognition import FaceRecognitionStore
 
 PORT = int(os.getenv("FACE_DETECT_PORT", "8090"))
+HOST = os.getenv("FACE_DETECT_HOST", "127.0.0.1")
 MAX_BYTES = int(os.getenv("FACE_DETECT_MAX_BYTES", "10")) * 1024 * 1024
 FACE_DB = os.getenv("FACE_RECOGNITION_DB", "/opt/face-detect-service/data/faces.db")
 FACE_YUNET_MODEL = os.getenv("FACE_YUNET_MODEL", "/opt/face-detect-service/model/recognition/face_detection_yunet_2023mar.onnx")
@@ -87,14 +88,12 @@ PAGE = r"""<!doctype html>
 <main>
   <div class="topline"><div><h1>人脸识别服务</h1><div class="muted">YuNet + SFace · 最近 10 次识别请求</div></div><div><span id="health" class="muted">检查服务状态中…</span>　<a href="/logout">退出登录</a></div></div>
   <section class="card">
-    <div class="topline"><h2>服务器监控</h2><span id="metrics-time" class="muted">加载中…</span></div>
+    <div class="topline"><h2>检测统计</h2><span id="metrics-time" class="muted">加载中…</span></div>
     <div class="metrics">
-      <div class="metric"><div class="metric-label">CPU 使用率</div><div id="m-cpu" class="metric-value">-</div><div id="m-load" class="metric-sub">负载 -</div></div>
-      <div class="metric"><div class="metric-label">内存使用</div><div id="m-memory" class="metric-value">-</div><div id="m-memory-sub" class="metric-sub">-</div></div>
-      <div class="metric"><div class="metric-label">磁盘使用</div><div id="m-disk" class="metric-value">-</div><div id="m-disk-sub" class="metric-sub">-</div></div>
       <div class="metric"><div class="metric-label">检测请求总数</div><div id="m-requests" class="metric-value">-</div><div id="m-requests-sub" class="metric-sub">-</div></div>
       <div class="metric"><div class="metric-label">近 1 分钟请求</div><div id="m-rate" class="metric-value">-</div><div id="m-rate-sub" class="metric-sub">平均耗时 -</div></div>
     </div>
+    <div hidden><span id="m-cpu"></span><span id="m-load"></span><span id="m-memory"></span><span id="m-memory-sub"></span><span id="m-disk"></span><span id="m-disk-sub"></span></div>
   </section>
   <section class="card">
     <h2>手动测试</h2>
@@ -111,11 +110,10 @@ PAGE = r"""<!doctype html>
       <label>姓名<input id="face-name" required maxlength="100" placeholder="例如：张三"></label>
       <label>外部 ID<input id="face-external-id" maxlength="100" placeholder="例如：user-001"></label>
       <label>备注<input id="face-note" maxlength="500" placeholder="可选"></label>
-      <label>样本图片（新增必填）<input id="face-image" type="file" accept="image/jpeg,image/png,image/webp"></label>
+      <label>样本图片（新增必填，必须包含 1 张人脸）<input id="face-image" type="file" accept="image/jpeg,image/png,image/webp" required></label>
       <div class="face-actions"><button id="face-submit" type="submit">新增人脸</button><button class="secondary" type="button" onclick="resetFaceForm()">清空</button></div>
     </form>
     <div id="recognize-result" style="margin-top:14px"></div>
-    <div class="form" style="margin-top:16px"><input id="recognize-image" type="file" accept="image/jpeg,image/png,image/webp"><button class="secondary" onclick="recognizeFromPage()">上传图片识别</button></div>
     <div class="table-wrap" style="margin-top:16px"><table><thead><tr><th>ID</th><th>图片</th><th>姓名</th><th>外部 ID</th><th>备注</th><th>更新时间</th><th>操作</th></tr></thead><tbody id="faces"><tr><td colspan="7" class="muted">暂无人脸资料</td></tr></tbody></table></div>
   </section>
   <section class="card">
@@ -126,8 +124,16 @@ PAGE = r"""<!doctype html>
 <script>
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function loadHistory() {
-  const res = await fetch('/api/recent'); const rows = await res.json();
-  document.getElementById('history').innerHTML = rows.length ? rows.map(r => `<tr><td>${esc(r.time)}</td><td>${esc(r.client_ip)}<br>${esc(r.method)} ${esc(r.path)}</td><td>${r.image_url ? `<a href="${esc(r.image_url)}" target="_blank"><img class="thumb" src="${esc(r.image_url)}" alt="请求图片"></a>` : '-'}<br>${esc(r.size || '-')}<br>${esc(r.content_type || '-')}</td><td class="${r.ok?'ok':'bad'}">${r.ok?'成功':'失败'}<br>${r.ok?esc(r.count+' 张人脸'):esc(r.error)}</td><td>${r.total_ms == null ? '-' : esc(r.total_ms+' ms')}</td><td class="faces">${r.faces ? esc(JSON.stringify(r.faces)) : '-'}</td><td><button class="secondary" onclick="deleteHistory(${Number(r.id)})">删除</button></td></tr>`).join('') : '<tr><td colspan="7" class="muted">暂无请求记录</td></tr>';
+  const res = await fetch('/api/recent', {cache:'no-store'});
+  const rows = await res.json();
+  document.getElementById('history').innerHTML = rows.length ? rows.map(r =>
+    '<tr><td>' + esc(r.time) + '</td><td>' + esc(r.client_ip) + '<br>' + esc(r.method) + ' ' + esc(r.path) +
+    '</td><td>' + (r.image_url ? '<a href="' + esc(r.image_url) + '" target="_blank"><img class="thumb" src="' + esc(r.image_url) + '" alt="请求图片"></a>' : '-') +
+    '<br>' + esc(r.size || '-') + '<br>' + esc(r.content_type || '-') + '</td><td class="' + (r.ok ? 'ok' : 'bad') + '">' +
+    (r.ok ? '成功<br>' + esc(r.count + ' 张人脸') : '失败<br>' + esc(r.error)) + '</td><td>' +
+    (r.total_ms == null ? '-' : esc(r.total_ms + ' ms')) + '</td><td class="faces">' +
+    (r.faces ? esc(JSON.stringify(r.faces)) : '-') + '</td><td><button class="secondary" onclick="deleteHistory(' + Number(r.id) + ')">删除</button></td></tr>'
+  ).join('') : '<tr><td colspan="7" class="muted">暂无请求记录</td></tr>';
 }
 async function deleteHistory(id) {
   if (!confirm('确认删除这条请求记录及其图片？')) return;
@@ -163,7 +169,7 @@ async function recognizeFromPage() { const file=document.getElementById('recogni
 const fmtBytes = n => { if (n == null) return '-'; const u=['B','KB','MB','GB','TB']; let i=0; while(n>=1024 && i<u.length-1){n/=1024;i++;} return n.toFixed(i?1:0)+' '+u[i]; };
 async function loadMetrics() {
   try {
-    const m = await (await fetch('/api/metrics')).json();
+    const m = await (await fetch('/api/metrics', {cache:'no-store'})).json();
     document.getElementById('m-cpu').textContent = m.cpu_percent == null ? '采样中…' : m.cpu_percent+'%';
     document.getElementById('m-load').textContent = '负载 '+(m.load_1m == null ? '-' : m.load_1m)+' · '+m.cpu_cores+' 核';
     document.getElementById('m-memory').textContent = m.memory.percent+'%';
@@ -177,8 +183,39 @@ async function loadMetrics() {
     document.getElementById('metrics-time').textContent = '更新于 '+m.time;
   } catch(e) { document.getElementById('metrics-time').textContent='监控暂不可用'; }
 }
-async function loadHealth() { try { const r=await fetch('/health'); const j=await r.json(); document.getElementById('health').textContent='● 服务正常 · '+j.model; document.getElementById('health').style.color='#067647'; } catch(e) { document.getElementById('health').textContent='● 服务不可用'; document.getElementById('health').style.color='#b42318'; } }
-loadHealth(); loadHistory(); loadMetrics(); loadFaces(); setInterval(loadHistory, 5000); setInterval(loadMetrics, 3000); setInterval(loadFaces, 10000);
+async function loadHealth() { try { const r=await fetch('/health', {cache:'no-store'}); if(!r.ok) throw Error('health '+r.status); const j=await r.json(); document.getElementById('health').textContent='● 服务正常 · '+j.model; document.getElementById('health').style.color='#067647'; } catch(e) { document.getElementById('health').textContent='● 服务不可用'; document.getElementById('health').style.color='#b42318'; } }
+// Edit face records in place so the operator keeps the current table context.
+function editFace(id) {
+  const row = document.querySelector('#faces button[onclick="editFace(' + id + ')"]')?.closest('tr');
+  const face = (window.faceRows || []).find(item => item.id === id);
+  if (!row || !face || row.dataset.editing === '1') return;
+  row.dataset.editing = '1';
+  row.innerHTML = '<td>' + esc(face.id) + '</td>'
+    + '<td><input class="inline-face-image" type="file" accept="image/jpeg,image/png,image/webp"></td>'
+    + '<td><input class="inline-face-name" value="' + esc(face.name) + '" maxlength="100"></td>'
+    + '<td><input class="inline-face-external" value="' + esc(face.external_id || '') + '" maxlength="100" placeholder="同名时必填"></td>'
+    + '<td><input class="inline-face-note" value="' + esc(face.note || '') + '" maxlength="500"></td>'
+    + '<td>' + esc(face.updated_at) + '</td>'
+    + '<td><button class="secondary" onclick="saveInlineFace(' + id + ',this)">保存</button> '
+    + '<button class="secondary" onclick="loadFaces()">取消</button></td>';
+}
+async function saveInlineFace(id, button) {
+  const row = button.closest('tr');
+  const name = row.querySelector('.inline-face-name').value.trim();
+  const externalId = row.querySelector('.inline-face-external').value.trim();
+  const note = row.querySelector('.inline-face-note').value.trim();
+  const image = row.querySelector('.inline-face-image').files[0];
+  if (!name) { alert('姓名不能为空'); return; }
+  const sameName = (window.faceRows || []).some(item => item.id !== id && item.name === name);
+  if (sameName && !externalId) { alert('已有同名人脸资料，请填写外部 ID 后再保存'); return; }
+  const body = new FormData(); body.append('name', name); body.append('external_id', externalId); body.append('note', note);
+  if (image) body.append('image', image);
+  const response = await fetch('/api/faces/' + id, {method:'PATCH', body:body});
+  const data = await response.json();
+  if (!response.ok) { alert(data.error || '保存失败'); return; }
+  loadFaces();
+}
+loadHealth(); loadHistory(); loadMetrics(); loadFaces(); setInterval(loadHealth, 10000); setInterval(loadHistory, 5000); setInterval(loadMetrics, 3000); setInterval(loadFaces, 10000);
 </script>
 </body></html>"""
 
@@ -550,4 +587,4 @@ def detect():
 
 if __name__ == "__main__":
     from waitress import serve
-    serve(app, host="0.0.0.0", port=PORT, threads=4)
+    serve(app, host=HOST, port=PORT, threads=4)

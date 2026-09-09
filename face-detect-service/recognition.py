@@ -71,9 +71,23 @@ class FaceRecognitionStore:
             row = self._db.execute("SELECT image, image_type FROM faces WHERE id=?", (face_id,)).fetchone()
             return (bytes(row["image"]), row["image_type"]) if row and row["image"] else None
 
+    def _validate_identity(self, name, external_id, exclude_id=None):
+        if external_id:
+            return
+        with self._lock:
+            if exclude_id is None:
+                row = self._db.execute("SELECT 1 FROM faces WHERE name=? LIMIT 1", (name,)).fetchone()
+            else:
+                row = self._db.execute(
+                    "SELECT 1 FROM faces WHERE name=? AND id<>? LIMIT 1",
+                    (name, exclude_id)).fetchone()
+        if row:
+            raise ValueError("已有同名人脸资料，请填写外部 ID 后再保存")
+
     def create(self, name, external_id, note, image, image_data, image_type):
         if not self.ready:
             raise RuntimeError("recognition model not ready: " + self.error)
+        self._validate_identity(name, external_id)
         embedding, _ = self._embedding(image)
         now = time.strftime("%Y-%m-%d %H:%M:%S")
         with self._lock:
@@ -87,6 +101,7 @@ class FaceRecognitionStore:
             old = self._db.execute("SELECT * FROM faces WHERE id=?", (face_id,)).fetchone()
         if not old:
             return None
+        self._validate_identity(name, external_id, face_id)
         embedding = None
         if image is not None:
             if not self.ready:

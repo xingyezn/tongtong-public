@@ -1284,6 +1284,51 @@ class AccountStore:
         return {"id": conversation_id, "device_id": row["device_id"],
                 "deleted_at": now}
 
+    def soft_delete_conversations(self, user_id, conversation_ids):
+        """Hide multiple ended conversations owned by the current user."""
+        ids = []
+        for value in conversation_ids or []:
+            try:
+                item = int(value)
+            except (TypeError, ValueError):
+                continue
+            if item not in ids:
+                ids.append(item)
+        ids = ids[:100]
+        now = time.time()
+        deleted = []
+        with self._lock, self._db:
+            for conversation_id in ids:
+                row = self._db.execute(
+                    """SELECT id FROM chat_sessions
+                       WHERE id=? AND user_id=? AND ended_at IS NOT NULL
+                       AND deleted_at IS NULL""",
+                    (conversation_id, user_id)).fetchone()
+                if row:
+                    self._db.execute(
+                        """UPDATE chat_sessions
+                           SET deleted_at=?,deleted_by_user_id=? WHERE id=?""",
+                        (now, user_id, conversation_id))
+                    deleted.append(conversation_id)
+        return deleted
+
+    def soft_delete_all_conversations(self, user_id, device_id):
+        """Hide every ended conversation for one device owned by the user."""
+        device_id = self.normalize_device_id(device_id)
+        if not self.user_can_access_device(user_id, device_id):
+            raise PermissionError("无权访问该设备")
+        target_user_id = self.device_owner_id(device_id)
+        if target_user_id is None:
+            return 0
+        now = time.time()
+        with self._lock, self._db:
+            cur = self._db.execute(
+                """UPDATE chat_sessions SET deleted_at=?,deleted_by_user_id=?
+                   WHERE user_id=? AND device_id=? AND ended_at IS NOT NULL
+                   AND deleted_at IS NULL""",
+                (now, user_id, target_user_id, device_id))
+        return cur.rowcount
+
     def list_deleted_chat_sessions(self, limit=100):
         """Internal administrative/audit view; never exposed to user APIs."""
         limit = max(1, min(1000, int(limit)))

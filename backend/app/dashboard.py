@@ -13,13 +13,15 @@ import json
 import logging
 import math
 import os
+import re
 import secrets
 import threading
 import time
 from collections import deque
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
+import aiohttp
 from aiohttp import web
 
 from .mcp_bridge import normalize_model_tool_categories
@@ -36,6 +38,8 @@ MODEL_LANGUAGE_CODES = {
 }
 BINDING_ATTEMPT_WINDOW_SECONDS = 10 * 60
 BINDING_ATTEMPT_LIMIT = 5
+LOGIN_ATTEMPT_WINDOW_SECONDS = 10 * 60
+LOGIN_ATTEMPT_LIMIT = 5
 
 
 # ---------------------------------------------------------------------------
@@ -715,14 +719,24 @@ async function unbindDevice() {
 }
 
 async function refresh() {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
   try {
-    const r = await fetch("/api/status");
+    const r = await fetch("/api/status", {cache:"no-store", signal:controller.signal});
     const d = await r.json();
+    if (!r.ok) throw new Error("HTTP " + r.status);
     render(d);
   } catch (e) {
     $("health").innerHTML = '<span class="dot bad"></span>无法连接';
+  } finally {
+    clearTimeout(timeout);
   }
 }
+
+// Run once after the complete document has loaded as well as on the regular
+// interval. This prevents a non-critical initializer from hiding the first
+// health check.
+window.addEventListener("load", refresh);
 
 function render(d) {
   // health
@@ -1382,6 +1396,7 @@ async function loadConversations() {
       data.conversations.forEach(conversation => {
         const item = document.createElement("div");
         item.className = "conversation-item" + (String(conversation.id) === String(activeConversationId) ? " active" : "");
+        item.dataset.conversationId = conversation.id;
         item.innerHTML = '<div>' + esc(conversation.title || "新会话") + '</div><div class="muted">' +
           new Date(conversation.last_message_at * 1000).toLocaleString() + ' · ' + conversation.message_count + ' 条消息' +
           (conversation.ended_at ? '' : ' · 进行中') + '</div>';
@@ -1513,6 +1528,44 @@ async function loadUsageStats(){ try { const data=await apiJson("/api/usage"); c
   $("usage-device-hint").textContent=(data.by_device||[]).map(d=>d.name+'：累计 '+fmtTokens((d.usage.all||{}).total_tokens)+' token / '+((d.usage.all||{}).turns||0)+' 轮').join('；') || '尚无已统计的对话。';
 }catch(_){ $("usage-summary").innerHTML='<div class="empty">用量加载失败。</div>'; } }
 
+// Batch conversation deletion controls. Checkboxes are added after the
+// existing conversation renderer updates the list.
+(function(){
+  const list=document.getElementById("conversation-list");
+  if(!list) return;
+  const toolbar=list.parentElement.parentElement.querySelector(".row");
+  if(toolbar){
+    const selected=document.createElement("button"); selected.className="btn warn"; selected.textContent="删除选中";
+    selected.onclick=()=>deleteSelectedConversations();
+    const all=document.createElement("button"); all.className="btn warn"; all.textContent="删除全部";
+    all.onclick=()=>deleteAllConversations();
+    toolbar.append(selected,all);
+  }
+  const decorate=()=>list.querySelectorAll(".conversation-item").forEach(item=>{
+    if(item.querySelector(".conversation-select")) return;
+    const checkbox=document.createElement("input"); checkbox.type="checkbox"; checkbox.className="conversation-select";
+    checkbox.title="选择这条会话"; checkbox.onclick=event=>event.stopPropagation();
+    if(item.textContent.includes("进行中")) checkbox.disabled=true;
+    item.prepend(checkbox);
+  });
+  new MutationObserver(decorate).observe(list,{childList:true}); decorate();
+  window.deleteSelectedConversations=async function(){
+    const ids=[...list.querySelectorAll(".conversation-select:checked")].map(x=>x.closest(".conversation-item")?.dataset.conversationId).filter(Boolean);
+    if(!ids.length){showToast("请先选择已结束的会话","err");return;}
+    if(!confirm("确认删除选中的 "+ids.length+" 条会话记录？"))return;
+    try{await apiJson("/api/conversations/delete-bulk",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({conversation_ids:ids})});
+      activeConversationId=null; await loadConversations(); await loadMemories(); showToast("选中的会话记录已删除","ok");}
+    catch(e){showToast("批量删除失败："+e.message,"err");}
+  };
+  window.deleteAllConversations=async function(){
+    if(!activeDeviceId){showToast("请先选择设备","err");return;}
+    if(!confirm("确认删除当前设备的全部已结束会话记录？删除后不可恢复。"))return;
+    try{const result=await apiJson("/api/conversations/delete-bulk",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({all:true,device_id:activeDeviceId})});
+      activeConversationId=null; await loadConversations(); await loadMemories(); showToast("已删除 "+result.deleted_count+" 条会话记录","ok");}
+    catch(e){showToast("删除失败："+e.message,"err");}
+  };
+})();
+
 // ---- auto refresh ----
 $("autorefresh").addEventListener("change", e => { autoRefresh = e.target.checked; });
 setInterval(() => { if (autoRefresh) refresh(); }, 3000);
@@ -1542,7 +1595,7 @@ header{padding:18px 4vw;background:#fff;border-bottom:1px solid var(--line);disp
 <section class="card"><h2>服务器端人脸识别服务</h2><p>用于对话中的人脸录入、识别、删除和修改。修改后立即对新会话生效。</p><div class="row"><input id="face-service-url" style="min-width:340px" placeholder="服务地址"><input id="face-service-user" placeholder="登录用户名"><input id="face-service-password" type="password" placeholder="登录密码"></div><div class="row"><button class="primary" onclick="saveFaceServiceSettings()">保存人脸服务配置</button></div></section>
 <section class="card"><h2>固件版本库（最多 20 个版本）</h2><p>上传后可选择在线设备下发指定版本。设备接受指令不代表已经完成下载和重启，请结合进度和日志确认结果。</p><div class="row"><input id="firmware-version" placeholder="版本号，例如 1.0.1"><input id="firmware-description" style="min-width:320px" placeholder="版本描述"><input id="firmware-file" type="file" accept=".bin"><button class="primary" onclick="uploadFirmware()">上传固件</button></div><table><thead><tr><th>ID</th><th>版本</th><th>描述</th><th>大小</th><th style="width:150px">SHA-256</th><th>上传时间</th><th>选择设备</th><th>下发</th><th>进度/日志</th><th>操作</th></tr></thead><tbody id="firmware-releases"></tbody></table></section>
 <section class="card"><h2>全局工具规则</h2><p>此规则适用于所有用户和所有设备，普通用户不可修改。</p><textarea id="global-tool-instructions" rows="6" style="width:100%;font:13px/1.5 Consolas,monospace;padding:9px"></textarea><div class="row"><button class="primary" onclick="saveGlobalSettings()">保存全局工具规则</button></div></section>
-<section class="card"><h2>管理员操作审计</h2><table><thead><tr><th>时间</th><th>管理员</th><th>操作</th><th>对象</th><th>详情</th></tr></thead><tbody id="audit"></tbody></table><div class="row" style="align-items:center;margin:14px 0 0"><button onclick="changeAuditPage(-1)">上一页</button><span id="audit-page-info" class="muted"></span><button onclick="changeAuditPage(1)">下一页</button><label>每页 <select id="audit-page-size" onchange="auditPage=1;load()"><option value="10">10</option><option value="20" selected>20</option><option value="50">50</option></select> 条</label></div></section>
+<section class="card"><h2>管理员操作审计</h2><table><thead><tr><th>时间</th><th>管理员</th><th>操作</th><th>对象</th><th>详情</th></tr></thead><tbody id="audit"></tbody></table><div class="row" style="align-items:center;margin:14px 0 0"><button onclick="changeAuditPage(-1)">上一页</button><span id="audit-page-info" class="muted"></span><button onclick="changeAuditPage(1)">下一页</button><label>每页 <select id="audit-page-size" onchange="auditPage=1;load()"><option value="10" selected>10</option><option value="20">20</option><option value="50">50</option></select> 条</label></div></section>
 </main><div id="environment-modal" class="env-modal" onclick="if(event.target===this)closeEnvironmentDialog()"><div class="env-modal-card"><h3>切换设备环境</h3><div class="row"><label>环境列表<select id="environment-preset" onchange="applyEnvironmentPreset()"><option value="production">生产环境（8080）</option><option value="haoran-test">浩然测试环境（8081）</option><option value="haoxin-test">浩鑫测试环境（8082）</option><option value="custom">自定义</option></select></label></div><div class="row"><label>OTA 地址<input id="environment-ota-url" placeholder="例如 http://120.48.107.230:8081/ota"></label></div><div class="hint">选择“自定义”后可直接修改 OTA 地址。切换后设备会保存新地址并重启。</div><div class="row" style="justify-content:flex-end;margin:14px 0 0"><button onclick="closeEnvironmentDialog()">取消</button><button class="primary" onclick="confirmEnvironmentDialog()">确认切换</button></div></div></div><div id="msg"></div>
 <script>
 let data={users:[],devices:[]},firmware={releases:[]},auditPage=1; const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -1641,6 +1694,10 @@ class Dashboard:
         self.session_ttl = int(dash_cfg.get("session_ttl", 86400))
         self.registration_enabled = bool(dash_cfg.get("registration_enabled", True))
         self._binding_failures = {}
+        # Keep login throttling process-local; the backend is currently a
+        # single process and this avoids adding credentials or raw passwords
+        # to the database.
+        self._login_failures = {}
         # Latest JPEG per device. Photos are intentionally ephemeral: they
         # are lost on restart and never written to disk.
         shared_photos = (getattr(gateway, "camera_photos", None)
@@ -1654,6 +1711,8 @@ class Dashboard:
         self._firmware_dir.mkdir(parents=True, exist_ok=True)
         self._firmware_tokens = {}
         self._firmware_deployments = {}
+        self._face_proxy_session = None
+        self._face_proxy_login_lock = asyncio.Lock()
 
     def _render_page(self, template):
         """Add a prominent warning to the non-production dashboard only."""
@@ -1667,6 +1726,107 @@ class Dashboard:
             )
         return template.replace("<!--ENV_WARNING-->", warning)
 
+    async def close(self):
+        if self._face_proxy_session is not None:
+            await self._face_proxy_session.close()
+            self._face_proxy_session = None
+
+    def _face_proxy_base(self):
+        return (self.config.get("face_service", {}).get(
+            "base_url", "http://127.0.0.1:8090").rstrip("/"))
+
+    async def _face_proxy_login(self):
+        if self._face_proxy_session is None:
+            self._face_proxy_session = aiohttp.ClientSession(
+                cookie_jar=aiohttp.CookieJar(unsafe=True))
+        settings = self.config.get("face_service", {})
+        async with self._face_proxy_login_lock:
+            async with self._face_proxy_session.post(
+                    self._face_proxy_base() + "/login",
+                    data={"username": settings.get("username", ""),
+                          "password": settings.get("password", "")},
+                    allow_redirects=True, timeout=15) as response:
+                if response.status >= 400:
+                    raise web.HTTPBadGateway(text="face service login failed")
+
+    @staticmethod
+    def _rewrite_face_page(body):
+        text = body.decode("utf-8", errors="replace")
+        # The face service has its own logout link, but authentication is now
+        # owned by the main backend proxy. Do not expose a second logout flow.
+        text = re.sub(
+            r'<a\b[^>]*href=[\'\"]/logout[\'\"][^>]*>.*?</a>',
+            "", text, count=1, flags=re.S)
+        # The standalone page uses root-relative URLs. Prefix them so all
+        # browser traffic stays on the authenticated main backend origin.
+        text = text.replace('"/api/', '"/admin/face/api/')
+        text = text.replace("'/api/", "'/admin/face/api/")
+        text = text.replace('"/health', '"/admin/face/health')
+        text = text.replace("'/health", "'/admin/face/health")
+        text = text.replace('"/logout', '"/admin/face/logout')
+        text = text.replace("'/logout", "'/admin/face/logout")
+        back_link = (
+            '<div style="position:sticky;top:0;z-index:5;padding:10px 18px;'
+            'background:#fff;border-bottom:1px solid #e4e8f0">'
+            '<a href="/admin" style="display:inline-block;padding:8px 14px;'
+            'border-radius:7px;background:#475467;color:#fff;text-decoration:none">'
+            '返回管理员页面</a></div>')
+        text = text.replace("<body>", "<body>" + back_link, 1)
+        session_guard = (
+            '<script>(function(){const originalFetch=window.fetch.bind(window);'
+            'window.fetch=async function(){const response=await originalFetch.apply(null,arguments);'
+            'if(response.status===401){window.location.href="/login?next=/admin/face/";}'
+            'return response;};})();</script>')
+        text = text.replace("</body>", session_guard + "</body>", 1)
+        return text.encode("utf-8")
+
+    async def face_service_proxy(self, request):
+        if self._current_user(request) is None:
+            target = request.path
+            if request.query_string:
+                target += "?" + request.query_string
+            raise web.HTTPFound("/login?next=" + quote(target, safe=""))
+        self._require_admin(request)
+        suffix = request.match_info.get("path", "")
+        path = "/" + suffix if suffix else "/"
+        if path == "/logout":
+            raise web.HTTPFound("/admin/face/")
+        if self._face_proxy_session is None:
+            await self._face_proxy_login()
+        query = ("?" + request.query_string) if request.query_string else ""
+        url = self._face_proxy_base() + path + query
+        body = await request.read() if request.method not in ("GET", "HEAD") else None
+        headers = {}
+        content_type = request.headers.get("Content-Type")
+        if content_type:
+            headers["Content-Type"] = content_type
+        for attempt in range(2):
+            try:
+                async with self._face_proxy_session.request(
+                        request.method, url, data=body, headers=headers,
+                        allow_redirects=False, timeout=60) as response:
+                    raw = await response.read()
+                    if response.status == 401 and attempt == 0:
+                        await self._face_proxy_login()
+                        continue
+                    if response.content_type in (
+                            "text/html", "application/json",
+                            "application/javascript", "text/javascript"):
+                        raw = self._rewrite_face_page(raw)
+                    excluded = {"Content-Length", "Transfer-Encoding",
+                                "Content-Encoding", "Set-Cookie"}
+                    response_headers = {
+                        key: value for key, value in response.headers.items()
+                        if key not in excluded}
+                    if path == "/":
+                        response_headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+                    return web.Response(status=response.status, body=raw,
+                                        headers=response_headers)
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                log.warning("face service proxy failed: %s", exc)
+                raise web.HTTPBadGateway(text="face service unavailable") from exc
+        raise web.HTTPUnauthorized(text="face service authentication required")
+
     def add_routes(self, app: web.Application):
         app.router.add_get("/", self.index)
         app.router.add_get("/login", self.login_page)
@@ -1675,6 +1835,8 @@ class Dashboard:
         app.router.add_post("/register", self.register)
         app.router.add_get("/logout", self.logout)
         app.router.add_get("/admin", self.admin_page)
+        app.router.add_route("*", "/admin/face", self.face_service_proxy)
+        app.router.add_route("*", "/admin/face/{path:.*}", self.face_service_proxy)
         app.router.add_get("/api/me", self.api_me)
         app.router.add_get("/api/devices", self.api_devices)
         app.router.add_post("/api/devices/bind", self.api_device_bind)
@@ -1683,6 +1845,7 @@ class Dashboard:
         app.router.add_get("/api/conversations", self.api_conversations)
         app.router.add_post("/api/conversations/end", self.api_conversation_end)
         app.router.add_post("/api/conversations/delete", self.api_conversation_delete)
+        app.router.add_post("/api/conversations/delete-bulk", self.api_conversations_delete_bulk)
         app.router.add_get("/api/memories", self.api_memories)
         app.router.add_post("/api/memories", self.api_memory_create)
         app.router.add_post("/api/memories/update", self.api_memory_update)
@@ -1749,11 +1912,71 @@ class Dashboard:
     def _redirect_login(self):
         raise web.HTTPFound("/login")
 
+    @staticmethod
+    def _safe_next_target(target):
+        target = str(target or "/")
+        if not target.startswith("/") or target.startswith("//"):
+            return "/"
+        return target
+
+    @classmethod
+    def _safe_login_next(cls, request):
+        return cls._safe_next_target(request.query.get("next", "/"))
+
     def _require_user(self, request):
+        self._check_request_origin(request)
         user = self._current_user(request)
         if user is None:
             raise web.HTTPUnauthorized(text="unauthorized")
         return user
+
+    def _check_request_origin(self, request):
+        """Reject cross-site state-changing dashboard requests.
+
+        The dashboard uses cookie authentication.  Modern browsers send
+        Origin for fetch/form writes; Referer is accepted as a compatibility
+        fallback. Requests without either header are retained for the device
+        and command-line clients that do not send browser metadata.
+        """
+        if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
+            return
+        expected = "{}://{}".format(request.scheme, request.host)
+        origin = request.headers.get("Origin", "").rstrip("/")
+        referer = request.headers.get("Referer", "")
+        if origin:
+            if origin != expected:
+                raise web.HTTPForbidden(text="cross-site request rejected")
+            return
+        if referer:
+            parsed = urlparse(referer)
+            actual = "{}://{}".format(parsed.scheme, parsed.netloc)
+            if actual != expected:
+                raise web.HTTPForbidden(text="cross-site request rejected")
+
+    def _login_retry_after(self, request, username):
+        now = time.monotonic()
+        keys = ("ip:{}".format(request.remote or "unknown"),
+                "user:{}".format((username or "").strip().casefold()))
+        retry_after = 0
+        for key in keys:
+            attempts = self._login_failures.setdefault(key, deque())
+            while attempts and now - attempts[0] >= LOGIN_ATTEMPT_WINDOW_SECONDS:
+                attempts.popleft()
+            if len(attempts) >= LOGIN_ATTEMPT_LIMIT:
+                retry_after = max(
+                    retry_after,
+                    int(LOGIN_ATTEMPT_WINDOW_SECONDS - (now - attempts[0])) + 1,
+                )
+        return retry_after, keys
+
+    def _record_login_failure(self, keys):
+        now = time.monotonic()
+        for key in keys:
+            self._login_failures.setdefault(key, deque()).append(now)
+
+    def _clear_login_failures(self, keys):
+        for key in keys:
+            self._login_failures.pop(key, None)
 
     def _require_owned_device(self, request, device_id):
         user = self._require_user(request)
@@ -1785,22 +2008,51 @@ class Dashboard:
     async def login_page(self, request):
         if self._check_cookie(request):
             raise web.HTTPFound("/")
-        return web.Response(text=self._render_page(LOGIN_HTML), content_type="text/html", charset="utf-8")
+        next_target = quote(self._safe_login_next(request), safe="/?=&")
+        login_html = LOGIN_HTML.replace(
+            '<form method="post" action="/login">',
+            '<form method="post" action="/login"><input type="hidden" name="next" value="{}">'.format(next_target),
+            1)
+        return web.Response(
+            text=self._render_page(login_html), content_type="text/html", charset="utf-8",
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
 
     async def login(self, request):
         data = await request.post()
         username = data.get("username", "")
         password = data.get("password", "")
+        next_value = data.get("next", "")
+        if not next_value:
+            referer = request.headers.get("Referer", "")
+            next_value = parse_qs(urlparse(referer).query).get("next", [""])[0]
+        next_target = quote(self._safe_next_target(next_value or "/"), safe="/?=&")
+        login_html = LOGIN_HTML.replace(
+            '<form method="post" action="/login">',
+            '<form method="post" action="/login"><input type="hidden" name="next" value="{}">'.format(next_target),
+            1)
+        retry_after, attempt_keys = self._login_retry_after(request, username)
+        if retry_after:
+            log.warning("dashboard login throttled (ip=%s)", request.remote)
+            return web.Response(
+                text=self._render_page(login_html.replace(
+                    "<!--ERROR-->",
+                    '<div class="error">登录尝试过于频繁，请稍后再试</div>'
+                )),
+                content_type="text/html", charset="utf-8", status=429,
+                headers={"Retry-After": str(retry_after)},
+            )
         user = self.account_store.authenticate(username, password) if self.account_store else None
         if user is None:
+            self._record_login_failure(attempt_keys)
             log.warning("dashboard 登录失败 (username=%s ip=%s)", username, request.remote)
-            return web.Response(text=self._render_page(LOGIN_HTML.replace(
+            return web.Response(text=self._render_page(login_html.replace(
                 "<!--ERROR-->",
                 '<div class="error">用户名或密码错误</div>'
             )), content_type="text/html", charset="utf-8")
+        self._clear_login_failures(attempt_keys)
         log.info("dashboard 登录成功 (user=%s ip=%s)", user["username"], request.remote)
         token = self.account_store.create_session(user["id"], self.session_ttl)
-        resp = web.HTTPFound("/")
+        resp = web.HTTPFound(self._safe_next_target(data.get("next", "/")))
         resp.set_cookie(AUTH_COOKIE, token, max_age=self.session_ttl,
                         httponly=True, samesite="Lax", secure=request.secure)
         raise resp
@@ -1844,18 +2096,119 @@ class Dashboard:
     async def index(self, request):
         if not self._check_cookie(request):
             raise web.HTTPFound("/login")
-        return web.Response(text=self._render_page(DASHBOARD_HTML), content_type="text/html", charset="utf-8")
+        return web.Response(
+            text=self._render_page(DASHBOARD_HTML), content_type="text/html", charset="utf-8",
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
 
     async def admin_page(self, request):
         # 页面请求适合跳转到登录页；API 请求仍由 _require_admin 返回 401，
         # 这样会话失效时浏览器不会直接显示 unauthorized 文本。
         user = self._current_user(request)
         if user is None:
-            raise web.HTTPFound("/login")
+            raise web.HTTPFound("/login?next=/admin")
         if not user.get("is_admin"):
             raise web.HTTPForbidden(text="administrator access required")
+        face_top_link = '<a class="btn" href="/admin/face/">人脸识别管理</a>'
+        page = re.sub(
+            r'<section class="card">(?:(?!</section>).)*'
+            r'id="face-service-url".*?</section>',
+            "", ADMIN_HTML, count=1, flags=re.S)
+        # The removed legacy settings card also had an initialization call.
+        page = page.replace("loadFaceServiceSettings();", "")
+        page = re.sub(
+            r'async function loadFaceServiceSettings\(\).*?'
+            r'function arrangeAdminSections',
+            "function arrangeAdminSections", page, count=1, flags=re.S)
+        page = page.replace(
+            '<a class="btn" href="/">',
+            face_top_link + '<a class="btn" href="/">', 1)
+        # Keep the admin page defaults explicit even if an older cached HTML
+        # fragment is encountered, and make the association status visible.
+        page = page.replace(
+            '<option value="20" selected>20</option>',
+            '<option value="20">20</option>', 1)
+        page = page.replace(
+            '<option value="10">10</option><option value="20">20</option>',
+            '<option value="10" selected>10</option><option value="20">20</option>', 1)
+        page = page.replace(
+            "d.online?'<span class=\"tag\">在线</span>':'离线'",
+            "d.online?'<span class=\"tag online\">在线</span>':'<span class=\"tag offline\">离线</span>'",
+            1)
+        page = page.replace(
+            'audit_page_size",document.getElementById("audit-page-size")?.value||20',
+            'audit_page_size",document.getElementById("audit-page-size")?.value||10',
+            1)
+        page = page.replace('audit_page_size||20', 'audit_page_size||10')
+        page = page.replace(
+            '<div class="stat">在线设备<b id="online-count">0</b></div></section>',
+            '<div class="stat">在线设备<b id="online-count">0</b></div>'
+            '</div></section>', 1)
+        server_monitor = (
+            '<section class="card admin-server-monitor"><div class="admin-monitor-top">'
+            '<h2>服务器监控</h2><span id="admin-metrics-time" class="muted">加载中…</span></div>'
+            '<div class="admin-metrics">'
+            '<div><small>CPU 使用率</small><b id="admin-m-cpu">-</b><span id="admin-m-load">负载 -</span></div>'
+            '<div><small>内存使用</small><b id="admin-m-memory">-</b><span id="admin-m-memory-sub">-</span></div>'
+            '<div><small>磁盘使用</small><b id="admin-m-disk">-</b><span id="admin-m-disk-sub">-</span></div>'
+            '</div></section>')
+        page = re.sub(
+            r'<section class="stats">.*?</section>',
+            '<section class="stats admin-overview-stats">'
+            '<div class="stat-group"><div class="stat">用户<b id="user-count">0</b></div>'
+            '<div class="stat">管理员<b id="admin-count">0</b></div></div>'
+            '<div class="stat-group"><div class="stat">设备<b id="device-count">0</b></div>'
+            '<div class="stat">在线设备<b id="online-count">0</b></div></div></section>',
+            page, count=1, flags=re.S)
+        page = page.replace('<section class="stats admin-overview-stats">', server_monitor +
+                            '<section class="stats admin-overview-stats">', 1)
+        # Put the three server metrics and the four overview counters into one
+        # aligned top row. The replacement is applied to the rendered HTML so
+        # older template fragments cannot leave the two groups separated.
+        top_overview = (
+            '<section class="card admin-top-overview"><div class="admin-top-grid">'
+            '<div class="admin-metric"><small>CPU 使用率</small><b id="admin-m-cpu">-</b><span id="admin-m-load">负载 -</span></div>'
+            '<div class="admin-metric"><small>内存使用</small><b id="admin-m-memory">-</b><span id="admin-m-memory-sub">-</span></div>'
+            '<div class="admin-metric"><small>磁盘使用</small><b id="admin-m-disk">-</b><span id="admin-m-disk-sub">-</span></div>'
+            '<div class="stat-group"><div class="stat">用户<b id="user-count">0</b></div><div class="stat">管理员<b id="admin-count">0</b></div></div>'
+            '<div class="stat-group"><div class="stat">设备<b id="device-count">0</b></div><div class="stat">在线设备<b id="online-count">0</b></div></div>'
+            '</div><span id="admin-metrics-time" class="muted">加载中…</span></section>')
+        page = re.sub(r'<section class="card admin-server-monitor">.*?</section>'
+                      r'<section class="stats admin-overview-stats">.*?</section>',
+                      top_overview, page, count=1, flags=re.S)
+        # Production OTA URLs should preferably use HTTPS, but keep switching
+        # available for installations that still expose the service over HTTP.
+        production_warning = (
+            "<style>.admin-top-overview{grid-column:1/-1;}"
+            ".admin-top-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;align-items:stretch;}"
+            ".admin-metric,.admin-top-grid .stat{background:#f8fafc;border:1px solid #e4e8f0;border-radius:9px;padding:13px;}"
+            ".admin-metric small,.admin-metric span{display:block;color:#667085;font-size:12px;}"
+            ".admin-metric b{display:block;font-size:22px;margin:5px 0;}"
+            ".admin-top-grid .stat-group{display:grid;gap:12px;}"
+            "@media(max-width:900px){.admin-top-grid{grid-template-columns:repeat(3,minmax(0,1fr));}}"
+            "@media(max-width:600px){.admin-top-grid{grid-template-columns:1fr 1fr;}}"
+            "#devices td:nth-child(5) .tag.online{background:#e8f8ef;color:#16804f;}"
+            "#devices td:nth-child(5) .tag.offline{background:#fff0f2;color:#c04d61;}</style>"
+            "<script>(function(){const bytes=n=>{if(n==null)return'-';const u=['B','KB','MB','GB','TB'];let i=0;"
+            "while(n>=1024&&i<u.length-1){n/=1024;i++;}return n.toFixed(i?1:0)+' '+u[i];};"
+            "async function loadAdminMetrics(){try{const r=await fetch('/admin/face/api/metrics');if(!r.ok)throw Error();"
+            "const m=await r.json();document.getElementById('admin-m-cpu').textContent=m.cpu_percent==null?'采样中…':m.cpu_percent+'%';"
+            "document.getElementById('admin-m-load').textContent='负载 '+(m.load_1m==null?'-':m.load_1m)+' · '+m.cpu_cores+' 核';"
+            "document.getElementById('admin-m-memory').textContent=m.memory.percent+'%';"
+            "document.getElementById('admin-m-memory-sub').textContent=bytes(m.memory.used)+' / '+bytes(m.memory.total);"
+            "document.getElementById('admin-m-disk').textContent=m.disk.percent+'%';"
+            "document.getElementById('admin-m-disk-sub').textContent=bytes(m.disk.used)+' / '+bytes(m.disk.total);"
+            "document.getElementById('admin-metrics-time').textContent='更新于 '+m.time;"
+            "}catch(e){document.getElementById('admin-metrics-time').textContent='监控暂不可用';}}"
+            "loadAdminMetrics();setInterval(loadAdminMetrics,3000);})();</script>"
+            "<script>(function(){const original=window.confirmEnvironmentDialog;"
+            "window.confirmEnvironmentDialog=function(){const key=document.getElementById('environment-preset')?.value;"
+            "const url=(document.getElementById('environment-ota-url')?.value||'').trim();"
+            "if(key==='production'&&!/^https:\\/\\//i.test(url)&&"
+            "!confirm('提醒：生产环境建议使用 HTTPS，当前地址不是 HTTPS。仍要继续切换吗？'))return;"
+            "return original.apply(this,arguments);};})();</script>")
+        page = page.replace("</script></body>", "</script>" + production_warning + "</body>", 1)
         return web.Response(
-            text=ADMIN_HTML, content_type="text/html", charset="utf-8",
+            text=page, content_type="text/html", charset="utf-8",
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
 
     async def api_admin_overview(self, request):
@@ -1872,7 +2225,7 @@ class Dashboard:
             device["online"] = bool(
                 session is not None and
                 not getattr(getattr(session, "ws", None), "closed", False))
-        audit_page_size = request.query.get("audit_page_size", 20)
+        audit_page_size = request.query.get("audit_page_size", 10)
         audit_page = request.query.get("audit_page", 1)
         audit, audit_total = self.account_store.list_admin_audit(
             audit_page_size, audit_page)
@@ -1900,7 +2253,12 @@ class Dashboard:
         self._require_admin(request)
         from .omni_client import (DEFAULT_GLOBAL_TOOL_INSTRUCTIONS,
                                   normalize_global_tool_rules)
-        face_service = dict(self.config.get("face_service", {}))
+        # Face-service credentials are server-internal and must never be sent
+        # to the browser. The management page uses the main backend session.
+        face_service = {
+            "base_url": self.config.get("face_service", {}).get(
+                "base_url", "http://127.0.0.1:8090"),
+        }
         tool_instructions = self.account_store.get_global_setting(
             "tool_instructions") or ""
         if not tool_instructions.strip():
@@ -2426,6 +2784,10 @@ class Dashboard:
         path = self._firmware_dir / Path(release["stored_name"]).name
         if not path.is_file():
             raise web.HTTPNotFound(text="firmware file not found")
+        # Consume manual OTA links before sending any bytes. This prevents a
+        # second client from replaying the same download URL while the first
+        # transfer is still in progress.
+        self._firmware_tokens.pop(token, None)
         response = web.StreamResponse(status=200, headers={
             "Content-Type": "application/octet-stream",
             "Content-Disposition": "attachment; filename=firmware.bin",
@@ -2585,7 +2947,7 @@ class Dashboard:
         if not parsed.hostname or parsed.path.rstrip("/") != "/ota":
             raise ValueError("OTA 地址必须是以 /ota 结尾的完整地址")
         if environment == "production" and parsed.scheme != "https":
-            raise ValueError("生产环境 OTA 地址必须使用 HTTPS")
+            log.warning("生产环境 OTA 地址未使用 HTTPS: %s", ota_url)
         if environment == "test":
             if parsed.scheme not in ("http", "https"):
                 raise ValueError("测试环境 OTA 地址必须使用 HTTP 或 HTTPS")
@@ -2809,6 +3171,25 @@ class Dashboard:
             return web.json_response({"error": str(exc)}, status=400)
         self._refresh_user_sessions(user["id"])
         return web.json_response({"deleted": deleted})
+
+    async def api_conversations_delete_bulk(self, request):
+        user = self._require_user(request)
+        data = await request.json()
+        if data.get("all"):
+            try:
+                count = self.account_store.soft_delete_all_conversations(
+                    user["id"], data.get("device_id", ""))
+            except (PermissionError, ValueError, TypeError) as exc:
+                return web.json_response({"error": str(exc)}, status=403)
+            self._refresh_user_sessions(user["id"])
+            return web.json_response({"deleted_count": count})
+        conversation_ids = data.get("conversation_ids", [])
+        if not isinstance(conversation_ids, list):
+            return web.json_response({"error": "conversation_ids must be a list"}, status=400)
+        deleted = self.account_store.soft_delete_conversations(
+            user["id"], conversation_ids)
+        self._refresh_user_sessions(user["id"])
+        return web.json_response({"deleted": deleted, "count": len(deleted)})
 
     async def api_memories(self, request):
         user = self._require_user(request)

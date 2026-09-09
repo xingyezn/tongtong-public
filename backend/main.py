@@ -25,6 +25,25 @@ from app.ws_gateway import WsGateway
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+@web.middleware
+async def security_headers_middleware(request, handler):
+    response = await handler(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    response.headers.setdefault(
+        "Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    # The current dashboard embeds inline JS/CSS. Keep this compatible policy
+    # now; it still restricts all external resources and frame embedding.
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; img-src 'self' data: blob:; "
+        "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
+        "connect-src 'self' ws: wss:; frame-ancestors 'none'; "
+        "base-uri 'self'; form-action 'self'")
+    return response
+
+
 def load_config(path: str = None) -> dict:
     path = path or os.path.join(BASE_DIR, "config.yaml")
     with open(path, "r", encoding="utf-8") as f:
@@ -110,7 +129,7 @@ async def main(config_path=None):
                         memory_service=memory_service)
     http_api = HttpApi(config, account_store=account_store)
 
-    app = web.Application()
+    app = web.Application(middlewares=[security_headers_middleware])
     app.router.add_route("GET", "/ws", gateway.handle)
     http_api.add_routes(app)  # /ota /activate /health
 
@@ -139,6 +158,7 @@ async def main(config_path=None):
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
+        await dashboard.close()
         await omni.close()
         await memory_service.close()
         await runner.cleanup()
