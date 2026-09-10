@@ -21,6 +21,7 @@ from app.memory_service import MemoryService
 from app.omni_client import OmniClient
 from app.opus_codec import OpusCodec, opus_available
 from app.ws_gateway import WsGateway
+from app.music_service import MusicService
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -128,10 +129,12 @@ async def main(config_path=None):
     gateway = WsGateway(config, omni, sessions, account_store=account_store,
                         memory_service=memory_service)
     http_api = HttpApi(config, account_store=account_store)
+    music_service = MusicService(config)
 
     app = web.Application(middlewares=[security_headers_middleware])
     app.router.add_route("GET", "/ws", gateway.handle)
     http_api.add_routes(app)  # /ota /activate /health
+    music_service.add_routes(app)
 
     dashboard = Dashboard(config, sessions, http_api, log_handler, gateway.device_history,
                           save_config=lambda value: save_config(value, config_path),

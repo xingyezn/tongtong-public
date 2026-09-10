@@ -23,6 +23,7 @@ from .omni_client import OmniClient
 from .face_service import FaceService
 from .mcp_bridge import is_model_tool_visible
 from .weather_time_service import SERVER_TOOLS, SERVER_TOOL_PREFIXES, WeatherTimeService, encode_result
+from .music_service import MUSIC_TOOLS, MUSIC_TOOL_PREFIXES, MusicService
 
 log = logging.getLogger("session")
 
@@ -201,6 +202,7 @@ class Session:
         self.camera_photos = camera_photos if camera_photos is not None else {}
         self.face_service = FaceService(config)
         self.weather_time_service = WeatherTimeService(config)
+        self.music_service = MusicService(config)
         self.session_id = uuid.uuid4().hex
         # This token only lives for the current WebSocket connection. It lets
         # the camera upload a photo without firmware storing a dashboard
@@ -598,6 +600,8 @@ class Session:
             tools.extend(FACE_TOOLS)
         if is_model_tool_visible("server.weather.get", model_tool_categories):
             tools.extend(SERVER_TOOLS)
+        if is_model_tool_visible("server.music.search", model_tool_categories):
+            tools.extend(MUSIC_TOOLS)
         tools.append(CONVERSATION_END_TOOL)
         async for evt in self.omni.chat_stream(
                 pcm, tools=tools, tool_handler=self._handle_tool_call):
@@ -876,14 +880,17 @@ class Session:
                 return json.dumps({"error": "face list is not available to the model"},
                                   ensure_ascii=False)
             return await self._handle_face_tool(name, arguments)
-        if isinstance(name, str) and name.startswith(SERVER_TOOL_PREFIXES):
+        if isinstance(name, str) and name.startswith(SERVER_TOOL_PREFIXES + MUSIC_TOOL_PREFIXES):
             if not is_model_tool_visible(name, self.config.get("model_tool_categories", {})):
                 log.warning("model called disabled backend tool %s; ignored", name)
                 return json.dumps({"error": "backend MCP tools are disabled for the model"},
                                   ensure_ascii=False)
-            http_session = await self.omni.ensure_session()
-            result = await self.weather_time_service.call(
-                http_session, name, arguments)
+            if name.startswith(MUSIC_TOOL_PREFIXES):
+                result = await self.music_service.call(name, arguments)
+            else:
+                http_session = await self.omni.ensure_session()
+                result = await self.weather_time_service.call(
+                    http_session, name, arguments)
             log.info("server tool call: %s(%s)", name, arguments)
             return encode_result(result)
         if not name or not self._mcp:

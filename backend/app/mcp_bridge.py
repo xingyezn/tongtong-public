@@ -39,7 +39,7 @@ def model_tool_category(name):
     if not isinstance(name, str):
         return None
     lowered = name.lower()
-    if lowered.startswith(("server.weather.", "server.time.")):
+    if lowered.startswith(("server.weather.", "server.time.", "server.music.")):
         return "backend"
     if lowered.startswith("self.chassis."):
         return "chassis"

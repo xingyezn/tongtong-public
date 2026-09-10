@@ -27,6 +27,7 @@ from aiohttp import web
 
 from .mcp_bridge import normalize_model_tool_categories
 from .weather_time_service import SERVER_TOOLS
+from .music_service import MUSIC_TOOLS
 
 log = logging.getLogger("dash")
 
@@ -983,6 +984,8 @@ function showCameraPreview(deviceId) {
 }
 
 function hardwareArgs(name) {
+  const musicArgs = musicTestArgs(name);
+  if (musicArgs !== null) return musicArgs;
   if (name === "server.weather.get") {
     const location = prompt("请输入城市或地区，例如上海");
     return location && location.trim() ? { location: location.trim() } : null;
@@ -1000,6 +1003,18 @@ function hardwareArgs(name) {
     return url ? { url: url } : null;
   }
   return {};
+}
+
+function musicTestArgs(name) {
+  if (name === "server.music.search") {
+    const query = prompt("请输入歌曲名、艺人名或关键词");
+    return query && query.trim() ? { query: query.trim(), limit: 10 } : null;
+  }
+  if (name === "server.music.play") {
+    const trackId = prompt("请输入歌曲 ID，可先使用搜索工具");
+    return trackId && trackId.trim() ? { track_id: trackId.trim(), duration_seconds: 30 } : null;
+  }
+  return null;
 }
 
 function clampRgb(value) {
@@ -1198,6 +1213,12 @@ function setUserModelToolCategories(categories) {
   $("user-model-tool-gimbal-servo").checked = c.gimbal_servo !== false;
   $("user-model-tool-backend").checked = c.backend !== false;
 }
+
+HARDWARE_TEST_GROUPS.push({ title: "备用音乐源", items: [
+  ["server.music.list", "列出备用音乐"],
+  ["server.music.search", "搜索备用音乐"],
+  ["server.music.play", "准备播放音乐"]
+] });
 
 function userModelToolCategories() {
   return {
@@ -3565,7 +3586,7 @@ class Dashboard:
                 "description": tool.get("description", ""),
                 "input_schema": tool.get("inputSchema", {"type": "object", "properties": {}}),
             })
-        for tool in SERVER_TOOLS:
+        for tool in SERVER_TOOLS + MUSIC_TOOLS:
             function = tool.get("function", {})
             result.append({
                 "name": function.get("name", ""),
@@ -3712,7 +3733,7 @@ class Dashboard:
         if name not in testable_names:
             return web.json_response({"error": "tool is not available for supervised testing"}, status=403)
 
-        if name.startswith(("server.weather.", "server.time.")):
+        if name.startswith(("server.weather.", "server.time.", "server.music.")):
             result = await session._handle_tool_call({
                 "name": name,
                 "arguments": arguments,

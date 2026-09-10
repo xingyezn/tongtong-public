@@ -11,6 +11,12 @@ weather:
   default_timezone: "Asia/Shanghai"
   timeout_seconds: 12
 
+music:
+  catalog_path: "data/music/catalog.json"
+  audio_directory: "data/music/audio"
+  opus_directory: "data/music/opus"
+  max_preview_seconds: 30
+
 server:
   host: "0.0.0.0"
   port: 8082
