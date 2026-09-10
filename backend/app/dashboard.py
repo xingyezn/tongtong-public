@@ -104,6 +104,10 @@ class BroadcastLogHandler(logging.Handler):
             return "access"
         if name == "session" and message.startswith("device ") and " memory:" in message:
             return "memory_stats"
+        if name == "session" and message.startswith("server tool call:"):
+            return "mcp"
+        if name == "session" and message.startswith("music status:"):
+            return "mcp"
         if name in ("ws", "session"):
             return "device"
         if name == "mcp" or name.startswith("mcp."):
@@ -1014,6 +1018,9 @@ function musicTestArgs(name) {
     const trackId = prompt("请输入歌曲 ID，可先使用搜索工具");
     return trackId && trackId.trim() ? { track_id: trackId.trim(), duration_seconds: 30 } : null;
   }
+  if (name === "server.music.random") {
+    return { duration_seconds: 30 };
+  }
   return null;
 }
 
@@ -1219,6 +1226,24 @@ HARDWARE_TEST_GROUPS.push({ title: "备用音乐源", items: [
   ["server.music.search", "搜索备用音乐"],
   ["server.music.play", "准备播放音乐"]
 ] });
+
+// Keep all server-side MCP actions in one supervised-test package.  The music
+// group is declared separately below for backward compatibility with older
+// dashboard bundles, then merged here before rendering.
+const backendMcpTestGroup = HARDWARE_TEST_GROUPS.find(group =>
+  group.items.some(item => item[0] === "server.weather.get"));
+const musicTestGroupIndex = HARDWARE_TEST_GROUPS.findIndex(group =>
+  group.items.some(item => item[0] === "server.music.play"));
+if (backendMcpTestGroup && musicTestGroupIndex >= 0 &&
+    HARDWARE_TEST_GROUPS[musicTestGroupIndex] !== backendMcpTestGroup) {
+  const musicTestGroup = HARDWARE_TEST_GROUPS[musicTestGroupIndex];
+  backendMcpTestGroup.items.push(...musicTestGroup.items);
+  HARDWARE_TEST_GROUPS.splice(musicTestGroupIndex, 1);
+}
+if (backendMcpTestGroup && !backendMcpTestGroup.items.some(
+    item => item[0] === "server.music.random")) {
+  backendMcpTestGroup.items.push(["server.music.random", "随机播放备用音乐"]);
+}
 
 function userModelToolCategories() {
   return {
@@ -3427,6 +3452,7 @@ class Dashboard:
                 "idle": not online,
                 "listening": getattr(s, "listening", False) if online else False,
                 "speaking": getattr(s, "speaking", False) if online else False,
+                "music": getattr(s, "music_state", {"state": "idle"}) if online else {"state": "idle"},
                 "omni_busy": getattr(s, "omni_busy", False) if online else False,
                 "connected_at": s.connected_at if online else last_seen,
                 "connected_for": now - (s.connected_at if online else last_seen),

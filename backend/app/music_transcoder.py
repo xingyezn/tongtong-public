@@ -60,7 +60,8 @@ class MusicTranscoder:
             return output
         return await asyncio.to_thread(self.transcode, source, output)
 
-    async def iter_raw_opus(self, source, frame_ms=60):
+    async def iter_raw_opus(self, source, frame_ms=60, start_seconds=0,
+                            duration_seconds=None):
         """Yield raw Opus packets compatible with the existing TTS path.
 
         The file endpoint is useful for browser/debug playback and returns an
@@ -74,11 +75,20 @@ class MusicTranscoder:
         if not source.is_file():
             raise FileNotFoundError(str(source))
         frame_bytes = 24000 * 2 * frame_ms // 1000
+        command = [
+            self.ffmpeg, "-hide_banner", "-loglevel", "error",
+        ]
+        if start_seconds:
+            command.extend(["-ss", str(max(0, float(start_seconds)))])
+        command.extend([
+            "-i", str(source), "-t", str(max(1, min(
+                self.max_seconds,
+                float(duration_seconds) if duration_seconds is not None
+                else self.max_seconds))), "-vn", "-ac", "1", "-ar", "24000",
+            "-f", "s16le", "pipe:1"])
         process = await asyncio.create_subprocess_exec(
-            self.ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(source),
-            "-t", str(self.max_seconds), "-vn", "-ac", "1", "-ar", "24000",
-            "-f", "s16le", "pipe:1", stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE)
+            *command,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         codec = OpusCodec(24000, bitrate=64000)
         try:
             while True:

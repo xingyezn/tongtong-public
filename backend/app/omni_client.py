@@ -18,6 +18,7 @@ from typing import Optional
 import aiohttp
 
 from .mcp_bridge import normalize_model_tool_categories
+from .music_service import MUSIC_TOOL_INSTRUCTIONS
 
 log = logging.getLogger("omni")
 model_debug_log = logging.getLogger("model_debug")
@@ -234,6 +235,9 @@ def filter_tool_instructions_for_categories(instructions, categories):
         # so their visual rules belong to the camera category as well.
         blocked_markers.extend(("server.face.", "实时视觉规则", "人脸工具规则",
                                 "人脸管理工具规则"))
+    if not enabled["backend"]:
+        blocked_markers.extend(("server.weather.", "server.time.", "server.music.",
+                                "Backend music tools:"))
     if not blocked_markers:
         return instructions
     paragraphs = str(instructions or "").split("\n\n")
@@ -362,6 +366,8 @@ class OmniClient:
         if ("server.weather.get" not in tool_instructions or
                 "server.time.now" not in tool_instructions):
             tool_instructions = tool_instructions.rstrip() + "\n\n" + WEATHER_TIME_TOOL_INSTRUCTIONS
+        if "server.music.play" not in tool_instructions:
+            tool_instructions = tool_instructions.rstrip() + "\n\n" + MUSIC_TOOL_INSTRUCTIONS
         tool_instructions = filter_tool_instructions_for_categories(
             tool_instructions, self.config.get("model_tool_categories", {}))
         parts = [

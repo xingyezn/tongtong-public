@@ -110,6 +110,32 @@ Application::Application() {
         .skip_unhandled_events = true
     };
     esp_timer_create(&tts_resume_timer_args, &tts_resume_timer_handle_);
+
+    esp_timer_create_args_t music_finished_timer_args = {
+        .callback = [](void* arg) {
+            Application* app = static_cast<Application*>(arg);
+            app->Schedule([app]() {
+                // The stream has ended on the wire, but the decoder/DMA
+                // queues may still contain the final frames.  Poll until the
+                // local playback queue is empty before reporting finished.
+                if (app->music_playing_ || app->music_paused_) {
+                    return;
+                }
+                if (!app->audio_service_.IsIdle()) {
+                    if (app->music_finished_timer_handle_ != nullptr) {
+                        esp_timer_start_once(app->music_finished_timer_handle_, 100 * 1000);
+                    }
+                    return;
+                }
+                app->SendMusicStatus("finished");
+            });
+        },
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "music_finished",
+        .skip_unhandled_events = true
+    };
+    esp_timer_create(&music_finished_timer_args, &music_finished_timer_handle_);
 }
 
 Application::~Application() {
@@ -120,6 +146,10 @@ Application::~Application() {
     if (tts_resume_timer_handle_ != nullptr) {
         esp_timer_stop(tts_resume_timer_handle_);
         esp_timer_delete(tts_resume_timer_handle_);
+    }
+    if (music_finished_timer_handle_ != nullptr) {
+        esp_timer_stop(music_finished_timer_handle_);
+        esp_timer_delete(music_finished_timer_handle_);
     }
     vEventGroupDelete(event_group_);
 }
@@ -681,7 +711,14 @@ void Application::InitializeProtocol() {
     });
     
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
-        if (GetDeviceState() == kDeviceStateSpeaking || accepting_tts_audio_) {
+        if (GetDeviceState() == kDeviceStateSpeaking || accepting_tts_audio_ ||
+            accepting_music_audio_) {
+            if (accepting_music_audio_) {
+                auto frame = music_frames_received_.fetch_add(1) + 1;
+                if (frame == 1) {
+                    SendMusicStatus("playing");
+                }
+            }
             audio_service_.PushPacketToDecodeQueue(std::move(packet));
         }
     });
@@ -698,6 +735,9 @@ void Application::InitializeProtocol() {
     
     protocol_->OnAudioChannelClosed([this, &board]() {
         accepting_tts_audio_ = false;
+        accepting_music_audio_ = false;
+        music_playing_ = false;
+        music_paused_ = false;
         audio_service_.FinishPlaybackStream();
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         Schedule([this]() {
@@ -714,12 +754,85 @@ void Application::InitializeProtocol() {
     protocol_->OnIncomingJson([this, display](const cJSON* root) {
         // Parse JSON data
         auto type = cJSON_GetObjectItem(root, "type");
-        if (strcmp(type->valuestring, "tts") == 0) {
+        if (strcmp(type->valuestring, "music") == 0) {
+            auto state = cJSON_GetObjectItem(root, "state");
+            if (!cJSON_IsString(state)) {
+                ESP_LOGW(TAG, "Music message is missing state");
+                return;
+            }
+            if (strcmp(state->valuestring, "start") == 0) {
+                // A new music stream replaces any queued TTS/music audio.
+                accepting_tts_audio_ = false;
+                accepting_music_audio_ = true;
+                music_playing_ = true;
+                music_paused_ = false;
+                if (music_finished_timer_handle_ != nullptr) {
+                    esp_timer_stop(music_finished_timer_handle_);
+                }
+                {
+                    std::lock_guard<std::mutex> lock(music_status_mutex_);
+                    auto track_id = cJSON_GetObjectItem(root, "track_id");
+                    music_track_id_ = cJSON_IsString(track_id) ? track_id->valuestring : "";
+                }
+                music_frames_received_ = 0;
+                audio_service_.ResetDecoder();
+                audio_service_.PreparePlaybackStream();
+                auto title = cJSON_GetObjectItem(root, "title");
+                ESP_LOGI(TAG, "Music start: %s",
+                    cJSON_IsString(title) ? title->valuestring : "(untitled)");
+                Schedule([this]() {
+                    aborted_ = false;
+                    CancelPendingTtsResume();
+                    SetDeviceState(kDeviceStateSpeaking);
+                });
+                SendMusicStatus("started");
+            } else if (strcmp(state->valuestring, "pause") == 0) {
+                accepting_music_audio_ = false;
+                music_paused_ = true;
+                audio_service_.ResetDecoder();
+                ESP_LOGI(TAG, "Music paused");
+                SendMusicStatus("paused");
+            } else if (strcmp(state->valuestring, "resume") == 0) {
+                if (music_playing_) {
+                    accepting_music_audio_ = true;
+                    music_paused_ = false;
+                    audio_service_.PreparePlaybackStream();
+                    ESP_LOGI(TAG, "Music resumed");
+                    SendMusicStatus("playing");
+                }
+            } else if (strcmp(state->valuestring, "stop") == 0 ||
+                       strcmp(state->valuestring, "complete") == 0 ||
+                       strcmp(state->valuestring, "error") == 0) {
+                const bool stream_complete = strcmp(state->valuestring, "complete") == 0;
+                const bool stream_error = strcmp(state->valuestring, "error") == 0;
+                accepting_music_audio_ = false;
+                music_playing_ = false;
+                music_paused_ = false;
+                Schedule([this]() {
+                    audio_service_.FinishPlaybackStream();
+                    if (GetDeviceState() == kDeviceStateSpeaking) {
+                        SetDeviceState(kDeviceStateIdle);
+                    }
+                });
+                ESP_LOGI(TAG, "Music %s", state->valuestring);
+                SendMusicStatus(stream_error ? "error" :
+                                (stream_complete ? "stream_complete" : "stopped"));
+                if (stream_complete && music_finished_timer_handle_ != nullptr) {
+                    esp_timer_start_once(music_finished_timer_handle_, 100 * 1000);
+                }
+            }
+        } else if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
             if (strcmp(state->valuestring, "start") == 0) {
                 // Prepare synchronously so the immediately following startup
                 // burst cannot race the scheduled speaking state transition.
                 accepting_tts_audio_ = true;
+                // TTS has priority over music.  Drop queued music frames so
+                // the speaker never mixes the two sources.
+                accepting_music_audio_ = false;
+                music_playing_ = false;
+                music_paused_ = false;
+                audio_service_.ResetDecoder();
                 audio_service_.PreparePlaybackStream();
                 Schedule([this]() {
                     aborted_ = false;
@@ -1168,6 +1281,9 @@ void Application::Schedule(std::function<void()>&& callback) {
 void Application::AbortSpeaking(AbortReason reason) {
     ESP_LOGI(TAG, "Abort speaking");
     accepting_tts_audio_ = false;
+    accepting_music_audio_ = false;
+    music_playing_ = false;
+    music_paused_ = false;
     // An interruption must drop audio already decoded/queued for DMA. Merely
     // marking the stream finished lets that queue drain into the microphone
     // after listening starts, which produces a false 0.7 s user utterance.
@@ -1377,6 +1493,25 @@ void Application::SendMcpMessage(const std::string& payload) {
         if (protocol_) {
             protocol_->SendMcpMessage(payload);
         }
+    });
+}
+
+void Application::SendMusicStatus(const char* state) {
+    std::string track_id;
+    {
+        std::lock_guard<std::mutex> lock(music_status_mutex_);
+        track_id = music_track_id_;
+    }
+    auto frames = music_frames_received_.load();
+    Schedule([this, state = std::string(state), track_id = std::move(track_id), frames]() {
+        if (!protocol_) {
+            return;
+        }
+        std::string message = "{\"session_id\":\"" + protocol_->session_id() +
+            "\",\"type\":\"music\",\"state\":\"" + state +
+            "\",\"track_id\":\"" + track_id +
+            "\",\"frames_received\":" + std::to_string(frames) + "}";
+        protocol_->SendJson(message);
     });
 }
 

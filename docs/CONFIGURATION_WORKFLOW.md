@@ -110,6 +110,36 @@ The supplied systemd unit loads `/etc/tongtong-omni.env`. Keep that file and
 the server's `config.yaml` outside Git backups, public issue attachments, and
 terminal transcripts.
 
+### Deployment validation (required)
+
+Do not treat the mere presence of a YAML key as a valid configuration. Before
+restarting the service, verify that both model connection values are non-empty:
+
+```bash
+grep -E '^[[:space:]]*(api_key|workspace_id):' <app-dir>/config.yaml
+```
+
+The generated configuration must contain a real `workspace_id`. The API key
+should normally come from `DASHSCOPE_API_KEY` in the systemd environment file;
+never commit or paste the complete key into logs or documentation. After the
+restart, confirm the service loaded the intended environment and database:
+
+```bash
+systemctl is-active <service>
+journalctl -u <service> -n 30 --no-pager
+```
+
+For a test service, preserve its test-only settings when deploying model
+credentials: `environment: test`, the test database path, the matching test
+service unit, and the test port. Do not overwrite a test server with the
+production `backend/config.yaml`, because it can switch the service to the
+production database and make an already-bound device appear unbound.
+
+After deployment, perform one real conversation test and verify the logs in
+this order: device wake/listen messages, received PCM/VAD turn, model request
+without configuration errors, and returned TTS audio. A healthy HTTP endpoint
+alone does not prove that the model credentials were loaded.
+
 ## 4. Change checklist
 
 ### Code-only change
@@ -128,6 +158,11 @@ terminal transcripts.
 4. For a backend change: securely copy the regenerated `backend/config.yaml`
    to the server and restart the service.
 5. Never edit a tracked placeholder to make a deployment work.
+
+For test environments, first compare the target server's environment/database
+settings with the selected test port, then merge only the intended runtime
+changes (for example, model credentials). If the full generated config is
+copied, restore the test environment and test database fields before restart.
 
 运行中的后端也可通过管理页面修改“模型连接复用（分钟）”（1～120，默认
 10）。该值只控制何时重建服务商 WebSocket；重建时仍会恢复当前待命周期内的

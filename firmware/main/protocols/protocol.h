@@ -75,6 +75,8 @@ public:
     virtual void SendAbortSpeaking(AbortReason reason);
     virtual void SendEndConversation();
     virtual void SendMcpMessage(const std::string& message);
+    // Send a protocol JSON message that is already fully serialized.
+    virtual void SendJson(const std::string& message);
 
 protected:
     std::function<void(const cJSON* root)> on_incoming_json_;

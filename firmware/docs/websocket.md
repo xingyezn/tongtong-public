@@ -193,7 +193,13 @@ WebSocket 文本帧以 JSON 方式传输，以下为常见的 `"type"` 字段及
      }
      ```
 
-5. **MCP**
+5. **Music**
+   - Music reuses the same binary Opus frames and 24 kHz mono playback path as TTS, with independent control state.
+   - Control messages: `{"type":"music","state":"start"}`, `pause`, `resume`, `stop`, `complete`, or `error`.
+   - A `start` message may include `track_id`, `title`, `artist`, `start_seconds`, and `duration_seconds`.
+   - TTS has priority and clears the music playback queue when it starts.
+
+6. **MCP**
    - 推荐用于物联网控制的新一代协议。所有设备能力发现、工具调用等均通过 type: "mcp" 的消息进行，payload 内部为标准 JSON-RPC 2.0（详见 [MCP 协议文档](./mcp-protocol.md)）。
    
    - **设备端到服务器发送 result 的例子：**
@@ -260,7 +266,7 @@ WebSocket 文本帧以 JSON 方式传输，以下为常见的 `"type"` 字段及
      }
      ```
 
-6. **System**
+7. **System**
    - 系统控制命令，常用于远程升级更新。
    - 例：
      ```json

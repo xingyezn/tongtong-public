@@ -9,6 +9,7 @@ the returned preview URL without knowing which provider supplied the track.
 import json
 import logging
 import mimetypes
+import random
 import time
 from pathlib import Path
 from urllib.parse import quote
@@ -20,6 +21,13 @@ from .music_transcoder import MusicTranscoder
 log = logging.getLogger("music")
 
 MUSIC_TOOL_PREFIXES = ("server.music.",)
+MUSIC_TOOL_INSTRUCTIONS = (
+    "Backend music tools: when the user asks to play music, call "
+    "server.music.search first, then pass a returned track_id to "
+    "server.music.play. For a random song, call server.music.random. These "
+    "tools start device playback and are not only URL lookups; playback is "
+    "limited to a short preview."
+)
 
 MUSIC_SEARCH_TOOL = {
     "type": "function",
@@ -60,6 +68,20 @@ MUSIC_PLAY_TOOL = {
     },
 }
 
+MUSIC_RANDOM_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "server.music.random",
+        "description": "从后端备用音乐库随机选择一首歌曲并立即播放，默认播放不超过 30 秒。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "duration_seconds": {"type": "number", "description": "播放时长，默认 30 秒"},
+            },
+        },
+    },
+}
+
 MUSIC_LIST_TOOL = {
     "type": "function",
     "function": {
@@ -74,7 +96,7 @@ MUSIC_LIST_TOOL = {
     },
 }
 
-MUSIC_TOOLS = [MUSIC_SEARCH_TOOL, MUSIC_PLAY_TOOL, MUSIC_LIST_TOOL]
+MUSIC_TOOLS = [MUSIC_SEARCH_TOOL, MUSIC_PLAY_TOOL, MUSIC_RANDOM_TOOL, MUSIC_LIST_TOOL]
 
 
 class MusicService:
@@ -141,6 +163,16 @@ class MusicService:
         self._load()
         return next((item for item in self._tracks if item["id"] == str(track_id)), None)
 
+    def playback_source(self, track_id):
+        """Return a validated local source path for device playback."""
+        track = self._track(track_id)
+        if track is None:
+            return None, None
+        source = (self.audio_dir / Path(track["filename"]).name).resolve()
+        if self.audio_dir.resolve() not in source.parents or not source.is_file():
+            return track, None
+        return track, source
+
     @staticmethod
     def _public_track(track):
         return {key: value for key, value in track.items() if key != "filename"}
@@ -198,6 +230,29 @@ class MusicService:
                            "duration_seconds": duration,
                            "max_preview_seconds": self.max_preview_seconds,
                            "backend_only": True})
+            return result
+        if name == "server.music.random":
+            if not self._tracks:
+                return {"error": "music catalog is empty"}
+            track = random.choice(self._tracks)
+            try:
+                duration = max(1, min(
+                    self.max_preview_seconds,
+                    float(arguments.get("duration_seconds", self.max_preview_seconds))))
+            except (TypeError, ValueError):
+                return {"error": "duration_seconds must be a number"}
+            result = self._public_track(track)
+            result.update({
+                "preview_url": self._url(track, 0, duration),
+                "opus_url": self._opus_url(track),
+                "audio_format": "opus_ogg",
+                "sample_rate": 24000,
+                "channels": 1,
+                "start_seconds": 0,
+                "duration_seconds": duration,
+                "max_preview_seconds": self.max_preview_seconds,
+                "backend_only": True,
+            })
             return result
         return {"error": "unknown server tool {}".format(name)}
 

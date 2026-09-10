@@ -234,6 +234,11 @@ class Session:
         self._omni_task = None
         self._suppress_current_audio = False
         self._active_stream_state = None
+        self._music_task = None
+        self.music_state = {
+            "state": "idle", "track_id": "", "frames_received": 0,
+            "updated_at": self.connected_at,
+        }
         self._end_conversation_pending = False
         self._standby_after_response = False
         self._keepalive_task = asyncio.create_task(self._keepalive_loop())
@@ -304,6 +309,58 @@ class Session:
         if self.ws is None or self.ws.closed:
             return
         await self.ws.send_bytes(frame)
+
+    async def _stop_music(self, notify=True):
+        task = self._music_task
+        self._music_task = None
+        if task and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        if notify:
+            await self.send_json({"type": "music", "state": "stop"})
+        self.speaking = False
+
+    async def _stream_music(self, track_id, start_seconds, duration_seconds):
+        track, source = self.music_service.playback_source(track_id)
+        if track is None:
+            await self.send_json({"type": "music", "state": "error",
+                                  "error": "track not found"})
+            return
+        if source is None:
+            await self.send_json({"type": "music", "state": "error",
+                                  "error": "music source file not found"})
+            return
+        title = str(track.get("title", ""))
+        try:
+            await self.send_json({
+                "type": "music", "state": "start", "track_id": track_id,
+                "title": title, "artist": track.get("artist", ""),
+                "start_seconds": start_seconds,
+                "duration_seconds": duration_seconds,
+            })
+            self.speaking = True
+            async for opus in self.music_service.transcoder.iter_raw_opus(
+                    source, DEVICE_FRAME_MS, start_seconds, duration_seconds):
+                if self._suppress_current_audio:
+                    break
+                await self.send_audio_opus(opus)
+                await asyncio.sleep(DEVICE_FRAME_MS / 1000.0)
+            if not self._suppress_current_audio:
+                await self.send_json({"type": "music", "state": "complete",
+                                      "track_id": track_id})
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.exception("music stream failed for %s", track_id)
+            await self.send_json({"type": "music", "state": "error",
+                                  "track_id": track_id, "error": str(exc)})
+        finally:
+            if self._music_task is asyncio.current_task():
+                self._music_task = None
+            self.speaking = False
 
     async def send_hello_ack(self):
         await self.send_json({
@@ -411,6 +468,22 @@ class Session:
         elif mtype == "mcp":
             if self._mcp:
                 self._mcp.on_device_mcp(msg.get("payload", {}))
+        elif mtype == "music":
+            state = msg.get("state")
+            if isinstance(state, str) and state.strip():
+                try:
+                    frames = max(0, int(msg.get("frames_received", 0)))
+                except (TypeError, ValueError):
+                    frames = 0
+                self.music_state = {
+                    "state": state.strip()[:32],
+                    "track_id": str(msg.get("track_id", ""))[:128],
+                    "frames_received": frames,
+                    "updated_at": time.time(),
+                }
+                log.info("music status: device=%s state=%s track=%s frames=%d",
+                         self.device_id, self.music_state["state"],
+                         self.music_state["track_id"], frames)
         elif mtype == "system_stats":
             stats = msg.get("stats", {})
             if isinstance(stats, dict):
@@ -787,6 +860,7 @@ class Session:
 
         startup_burst = 0
         if not state["started"]:
+            await self._stop_music()
             await self.send_json({"type": "tts", "state": "start"})
             state["started"] = True
             state["started_at"] = time.monotonic()
@@ -887,11 +961,18 @@ class Session:
                                   ensure_ascii=False)
             if name.startswith(MUSIC_TOOL_PREFIXES):
                 result = await self.music_service.call(name, arguments)
+                if name in ("server.music.play", "server.music.random") and "error" not in result:
+                    await self._stop_music(notify=True)
+                    self._music_task = asyncio.create_task(
+                        self._stream_music(
+                            result["id"], result["start_seconds"],
+                            result["duration_seconds"]))
             else:
                 http_session = await self.omni.ensure_session()
                 result = await self.weather_time_service.call(
                     http_session, name, arguments)
-            log.info("server tool call: %s(%s)", name, arguments)
+            log.info("server tool call: device=%s %s(%s)",
+                     self.device_id, name, arguments)
             return encode_result(result)
         if not name or not self._mcp:
             return None
@@ -1049,6 +1130,7 @@ class Session:
             self._next_listen_discard_frames = VAD_POST_PLAYBACK_DISCARD_FRAMES
             if self._active_stream_state is not None:
                 self._active_stream_state["pcm"].clear()
+        await self._stop_music(notify=True)
         await self.send_json({"type": "tts", "state": "stop"})
         self.speaking = False
 
@@ -1089,6 +1171,7 @@ class Session:
                           conversation_id)
 
     async def close(self):
+        await self._stop_music(notify=False)
         keepalive = self._keepalive_task
         if keepalive and not keepalive.done():
             keepalive.cancel()

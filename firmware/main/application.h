@@ -135,6 +135,7 @@ private:
     EventGroupHandle_t event_group_ = nullptr;
     esp_timer_handle_t clock_timer_handle_ = nullptr;
     esp_timer_handle_t tts_resume_timer_handle_ = nullptr;
+    esp_timer_handle_t music_finished_timer_handle_ = nullptr;
     DeviceStateMachine state_machine_;
     ListeningMode listening_mode_ = kListeningModeAutoStop;
     AecMode aec_mode_ = kAecOff;
@@ -152,6 +153,15 @@ private:
     bool tts_has_emotion_ = false;
     std::atomic<bool> ota_confirmation_pending_{false};
     std::atomic<bool> accepting_tts_audio_{false};
+    // Music uses the same 24 kHz Opus decoder and playback queue as TTS, but
+    // has an independent control state so music can be paused/resumed without
+    // being mistaken for a completed conversational response.
+    std::atomic<bool> accepting_music_audio_{false};
+    std::atomic<bool> music_playing_{false};
+    std::atomic<bool> music_paused_{false};
+    std::mutex music_status_mutex_;
+    std::string music_track_id_;
+    std::atomic<uint32_t> music_frames_received_{0};
     bool network_connected_ = false;
     std::atomic<bool> sntp_initialized_{false};
     bool automatic_interrupt_enabled_ = true;
@@ -188,6 +198,7 @@ private:
     void HandleTtsStopped();
     void ResumeListeningAfterPlayback();
     void CancelPendingTtsResume();
+    void SendMusicStatus(const char* state);
     static const char* SelectSpeakingEmotion(const char* text);
     static bool IsSupportedSpeakingEmotion(const char* emotion);
     
