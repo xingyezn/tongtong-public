@@ -96,7 +96,7 @@ void McpServer::AddCommonTools() {
 void McpServer::AddUserOnlyTools() {
     // System tools
     AddUserOnlyTool("self.get_system_info",
-        "获取设备系统信息。",
+        "按需获取设备系统信息和当前 SRAM/PSRAM 内存占用。",
         PropertyList(),
         [this](const PropertyList& properties) -> ReturnValue {
             auto& board = Board::GetInstance();

@@ -12,7 +12,9 @@
 - `requirements.txt` — Python 依赖
 - `deploy/` — systemd unit + 一键安装脚本
 
-## REST API（默认 8090）
+## REST API（本机 127.0.0.1:8090）
+
+8090 是服务器内部服务端口，仅监听 `127.0.0.1`，不对公网或局域网提供直接访问。后端通过本机地址调用识别接口；管理员从后端的 `/admin/face/` 页面访问管理功能。不要在安全组中放行 8090，也不要将 `FACE_DETECT_HOST` 配置为 `0.0.0.0`。
 
 - `POST /api/recognize` — 上传图片并返回检测到的人脸数量、已识别数量、身份、框和置信度
   返回：`{"count", "detected_count", "recognized_count", "faces":[{"box":[x,y,w,h],"id","name","score"}], "threshold"}`
@@ -49,4 +51,4 @@ cd /opt/face-detect-service
 bash deploy/install.sh
 ```
 
-systemd：`face-detect.service`，端口 8090（百度云安全组需放行）。
+systemd：`face-detect.service`，仅监听 `127.0.0.1:8090`。无需在百度云安全组放行 8090；外部管理访问统一通过后端的 `/admin/face/` 代理。

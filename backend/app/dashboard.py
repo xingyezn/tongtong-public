@@ -54,6 +54,8 @@ class BroadcastLogHandler(logging.Handler):
         self.buf = deque(maxlen=maxlen)
         self.access_buf = deque(maxlen=max(50, maxlen // 4))
         self.periodic_buf = deque(maxlen=max(30, maxlen // 8))
+        # 高频设备内存遥测单独保存，避免挤占普通日志。
+        self.memory_stats_buf = deque(maxlen=max(100, maxlen // 4))
         self.model_debug_buf = deque(maxlen=100)
         self._sequence = 0
         self._loop = None
@@ -75,6 +77,8 @@ class BroadcastLogHandler(logging.Handler):
             entry = {"id": self._sequence, "category": category, "text": msg}
             if category == "model_debug":
                 self.model_debug_buf.append(entry)
+            elif category == "memory_stats":
+                self.memory_stats_buf.append(entry)
             elif category == "periodic":
                 self.periodic_buf.append(entry)
             elif category == "access":
@@ -95,6 +99,8 @@ class BroadcastLogHandler(logging.Handler):
             if " /api/status " in message:
                 return "periodic"
             return "access"
+        if name == "session" and message.startswith("device ") and " memory:" in message:
+            return "memory_stats"
         if name in ("ws", "session"):
             return "device"
         if name == "mcp" or name.startswith("mcp."):
@@ -113,14 +119,15 @@ class BroadcastLogHandler(logging.Handler):
         with self._lock:
             return sorted(
                 list(self.buf) + list(self.access_buf) + list(self.periodic_buf) +
-                list(self.model_debug_buf),
+                list(self.memory_stats_buf) + list(self.model_debug_buf),
                 key=lambda entry: entry["id"],
             )
 
     def events_after(self, sequence):
         with self._lock:
             entries = (list(self.buf) + list(self.access_buf) +
-                       list(self.periodic_buf) + list(self.model_debug_buf))
+                       list(self.periodic_buf) + list(self.memory_stats_buf) +
+                       list(self.model_debug_buf))
         return sorted(
             (entry for entry in entries if entry["id"] > sequence),
             key=lambda entry: entry["id"],
@@ -574,8 +581,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <label><input type="checkbox" data-log-category="system" checked onchange="renderLogs()"> 系统</label>
       <label><input type="checkbox" data-log-category="access" checked onchange="renderLogs()"> 普通请求</label>
       <label><input type="checkbox" data-log-category="periodic" onchange="renderLogs()"> 周期状态请求</label>
+      <label><input type="checkbox" data-log-category="memory_stats" onchange="renderLogs()"> 设备内存</label>
     </div>
-    <div class="hint">“模型调试”包含最近100次模型交互的提示词、工具定义和完整文本/工具回复；音频 Base64 仅记录大小以避免日志膨胀。“周期状态请求”是面板自动刷新产生的 `/api/status` 日志，默认隐藏且在服务器上独立限额保存，不会挤掉调试信息。</div>
+    <div class="hint">“模型调试”包含最近100次模型交互的提示词、工具定义和完整文本/工具回复；音频 Base64 仅记录大小以避免日志膨胀。“周期状态请求”是面板自动刷新产生的 `/api/status` 日志；“设备内存”是终端周期上报的内存统计，均默认隐藏并独立限额保存。</div>
     <div id="logs"></div>
   </div>
 
@@ -868,7 +876,7 @@ function renderLogs() {
   div.className = cls;
     const category = document.createElement("span");
     category.className = "log-category";
-    category.textContent = ({ device:"设备", mcp:"MCP", model:"模型", model_debug:"模型调试", system:"系统", access:"请求", periodic:"周期" })[event.category] || "系统";
+    category.textContent = ({ device:"设备", mcp:"MCP", model:"模型", model_debug:"模型调试", system:"系统", access:"请求", periodic:"周期", memory_stats:"设备内存" })[event.category] || "系统";
     div.prepend(category);
   box.appendChild(div);
   }
@@ -940,7 +948,7 @@ let modelToolCategoriesDevice = "";
 
 const HARDWARE_TEST_GROUPS = [
   { title: "设备控制", items: [
-    ["self.get_system_info", "获取系统信息"], ["self.reboot", "重启设备"],
+    ["self.get_system_info", "获取系统与内存信息"], ["self.reboot", "重启设备"],
     ["self.upgrade_firmware", "升级固件"], ["self.screen.get_info", "读取屏幕信息"],
     ["self.screen.snapshot", "截取屏幕"], ["self.screen.preview_image", "预览图片"],
     ["self.assets.set_download_url", "设置资源下载地址"]

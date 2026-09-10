@@ -19,7 +19,7 @@ The backend is an `aiohttp` service that connects Tongtong ESP32 devices to the 
 
 ## Server-side face recognition
 
-`face_service.py` calls the Git-tracked sibling service at `../face-detect-service/` (normally `http://127.0.0.1:8090`). The backend authenticates with the face service login session, then calls `/api/faces` or `/api/recognize`.
+`face_service.py` calls the Git-tracked sibling service at `../face-detect-service/` through `http://127.0.0.1:8090`. Port 8090 is loopback-only and is not a public API; external administration is exposed through the backend's `/admin/face/` proxy. The backend authenticates with the face service login session, then calls `/api/faces` or `/api/recognize`.
 
 Current-frame operations always invoke the firmware's `self.camera.take_photo` first. The JPEG is kept temporarily in backend memory and is never placed in the model prompt. The face service records recognition requests in its recent-request history, including result, count, timing, and a temporary image reference.
 
@@ -29,7 +29,7 @@ Configure the face service under `face_service` in the backend configuration, or
 
 - `main`: production backend `/opt/tongtong-omni-backend`, service `tongtong-omni`, port `8080`.
 - Non-`main`: use an explicitly confirmed test backend. Port `8081` is Hao Ran at `/opt/tongtong-omni-backend-test-adam`, service `tongtong-omni-test-adam`; port `8082` is Hao Xin and must not be overwritten by this workflow.
-- The face service runs separately at `/opt/face-detect-service`, port `8090`, service `face-detect.service`.
+- The face service runs separately at `/opt/face-detect-service`, service `face-detect.service`, listening only on `127.0.0.1:8090`; do not open 8090 in the cloud security group.
 
 Preserve each server's `config.yaml`, SQLite database, virtual environment, and environment file when uploading application code. Restart only the service belonging to the selected environment. Updating remote `main` requires explicit approval.
 

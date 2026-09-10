@@ -19,7 +19,7 @@
 
 ## 服务器端人脸识别
 
-`face_service.py` 调用仓库内追踪的 `../face-detect-service/` 服务，默认地址为 `http://127.0.0.1:8090`。后端先使用人脸服务登录会话，再调用 `/api/faces` 或 `/api/recognize`。
+`face_service.py` 通过 `http://127.0.0.1:8090` 调用仓库内追踪的 `../face-detect-service/` 服务。8090 仅监听本机地址，不是公网接口；外部管理员统一通过后端的 `/admin/face/` 代理访问。后端先使用人脸服务登录会话，再调用 `/api/faces` 或 `/api/recognize`。
 
 所有当前画面操作都会先调用固件的 `self.camera.take_photo`，再把新 JPEG 转发给人脸服务。图片只暂存在后端内存中，不会放入模型提示词。人脸服务会将识别请求写入最近请求记录，包含识别结果、人数、耗时和临时图片引用。
 
@@ -29,7 +29,7 @@
 
 - `main`：生产后端 `/opt/tongtong-omni-backend`，服务 `tongtong-omni`，端口 `8080`。
 - 非 `main`：必须先确认测试环境。8081 为浩然，目录 `/opt/tongtong-omni-backend-test-adam`，服务 `tongtong-omni-test-adam`；8082 为浩鑫，本流程不得覆盖。
-- 人脸服务独立运行在 `/opt/face-detect-service`，端口 `8090`，服务名为 `face-detect.service`。
+- 人脸服务独立运行在 `/opt/face-detect-service`，服务名为 `face-detect.service`，仅监听 `127.0.0.1:8090`；云服务器安全组无需放行 8090。
 
 上传代码时保留服务器原有的 `config.yaml`、SQLite 数据库、虚拟环境和环境变量文件，只重启当前选定环境的服务。更新远程 `main` 必须取得明确同意。
 

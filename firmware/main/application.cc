@@ -13,9 +13,11 @@
 #include <algorithm>
 #include <cstring>
 #include <esp_log.h>
+#include <esp_netif_sntp.h>
 #include <cJSON.h>
 #include <driver/gpio.h>
 #include <arpa/inet.h>
+#include <cstdlib>
 #include <font_awesome.h>
 
 #define TAG "Application"
@@ -332,8 +334,8 @@ void Application::Run() {
                 display->SetChatMessage("system", "对我说“你好童童”，唤醒我");
             }
         
-            // Print debug info every 10 seconds
-            if (clock_ticks_ % 10 == 0) {
+            // Print memory debug info to the serial console every 15 seconds.
+            if (clock_ticks_ % 15 == 0) {
                 SystemInfo::PrintHeapStats();
             }
         }
@@ -343,6 +345,26 @@ void Application::Run() {
 void Application::HandleNetworkConnectedEvent() {
     ESP_LOGI(TAG, "Network connected");
     network_connected_ = true;
+
+    // Start SNTP once after the network becomes usable.  The display reads
+    // wall-clock time while idle, so configure the timezone before enabling
+    // the clock updates.  SNTP continues retrying in the background if the
+    // first request cannot reach the server.
+    if (!sntp_initialized_.exchange(true)) {
+        setenv("TZ", "CST-8", 1);
+        tzset();
+        esp_sntp_config_t sntp_config =
+            ESP_NETIF_SNTP_DEFAULT_CONFIG("ntp.aliyun.com");
+        sntp_config.start = true;
+        esp_err_t sntp_err = esp_netif_sntp_init(&sntp_config);
+        if (sntp_err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to initialize SNTP: %s", esp_err_to_name(sntp_err));
+            sntp_initialized_.store(false);
+        } else {
+            ESP_LOGI(TAG, "SNTP started with server ntp.aliyun.com");
+        }
+    }
+
     protocol_reconnect_attempts_ = 0;
     next_protocol_reconnect_at_ = std::chrono::steady_clock::now();
     auto state = GetDeviceState();

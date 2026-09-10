@@ -7,7 +7,9 @@ set -euo pipefail
 IPT=/usr/sbin/iptables-legacy
 IN_CHAIN=FACE_MON_IN
 OUT_CHAIN=FACE_MON_OUT
-PORTS="8080 8081 8090 8082"
+# 8090 is the loopback-only face service and must not be treated as a public
+# service port. The public backend ports remain monitored here.
+PORTS="8080 8081 8082"
 
 ensure_chain() {
   local chain="$1"

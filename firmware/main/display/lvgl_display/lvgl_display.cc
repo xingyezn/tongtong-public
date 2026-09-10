@@ -123,6 +123,7 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
     // Update time
     if (app.GetDeviceState() == kDeviceStateIdle) {
         if (last_status_update_time_ + std::chrono::seconds(10) < std::chrono::system_clock::now()) {
+            static bool time_sync_warning_logged = false;
             // Set status to clock "HH:MM"
             time_t now = time(NULL);
             struct tm* tm = localtime(&now);
@@ -131,8 +132,12 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
                 char time_str[16];
                 strftime(time_str, sizeof(time_str), "%H:%M", tm);
                 SetStatus(time_str);
+                time_sync_warning_logged = false;
             } else {
-                ESP_LOGW(TAG, "System time is not set, tm_year: %d", tm->tm_year);
+                if (!time_sync_warning_logged) {
+                    ESP_LOGW(TAG, "System time is not set, waiting for SNTP (tm_year: %d)", tm->tm_year);
+                    time_sync_warning_logged = true;
+                }
             }
         }
     }

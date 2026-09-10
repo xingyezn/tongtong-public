@@ -91,7 +91,7 @@ PAGE = r"""<!doctype html>
     <div class="topline"><h2>检测统计</h2><span id="metrics-time" class="muted">加载中…</span></div>
     <div class="metrics">
       <div class="metric"><div class="metric-label">检测请求总数</div><div id="m-requests" class="metric-value">-</div><div id="m-requests-sub" class="metric-sub">-</div></div>
-      <div class="metric"><div class="metric-label">近 1 分钟请求</div><div id="m-rate" class="metric-value">-</div><div id="m-rate-sub" class="metric-sub">平均耗时 -</div></div>
+      <div class="metric"><div class="metric-label">近 1 分钟请求</div><div id="m-rate" class="metric-value">-</div><div id="m-rate-sub" class="metric-sub">最近10次平均耗时 -</div></div>
     </div>
     <div hidden><span id="m-cpu"></span><span id="m-load"></span><span id="m-memory"></span><span id="m-memory-sub"></span><span id="m-disk"></span><span id="m-disk-sub"></span></div>
   </section>
@@ -179,7 +179,7 @@ async function loadMetrics() {
     document.getElementById('m-requests').textContent = m.requests.total;
     document.getElementById('m-requests-sub').textContent = '成功 '+m.requests.success+' · 失败 '+m.requests.failed;
     document.getElementById('m-rate').textContent = m.requests.last_minute;
-    document.getElementById('m-rate-sub').textContent = '平均耗时 '+(m.requests.avg_ms_last_minute == null ? '-' : m.requests.avg_ms_last_minute+' ms');
+    document.getElementById('m-rate-sub').textContent = '最近10次平均耗时 '+(m.requests.avg_ms_last_10 == null ? '-' : m.requests.avg_ms_last_10+' ms');
     document.getElementById('metrics-time').textContent = '更新于 '+m.time;
   } catch(e) { document.getElementById('metrics-time').textContent='监控暂不可用'; }
 }
@@ -522,9 +522,12 @@ def metrics():
     now = time.time()
     with _history_lock:
         recent_rows = [x for x in _history if now - time.mktime(time.strptime(x["time"], "%Y-%m-%d %H:%M:%S")) <= 60]
-        avg_ms = [x["total_ms"] for x in recent_rows if x.get("total_ms") is not None]
+        recent_timed = [x["total_ms"] for x in list(_history)[:10]
+                        if x.get("total_ms") is not None]
         requests = {"total": _total_requests, "success": _successful_requests, "failed": _failed_requests,
-                    "last_minute": len(recent_rows), "avg_ms_last_minute": round(sum(avg_ms) / len(avg_ms), 2) if avg_ms else None}
+                    "last_minute": len(recent_rows),
+                    "avg_ms_last_10": round(sum(recent_timed) / len(recent_timed), 2)
+                    if recent_timed else None}
     try:
         load_1m = round(os.getloadavg()[0], 2)
     except (AttributeError, OSError):

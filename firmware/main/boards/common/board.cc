@@ -6,6 +6,7 @@
 #include "assets/lang_config.h"
 
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <esp_ota_ops.h>
 #include <esp_chip_info.h>
 #include <esp_random.h>
@@ -110,6 +111,15 @@ std::string Board::GetSystemInfoJson() {
     std::string json = R"({"version":2,"language":")" + std::string(Lang::CODE) + R"(",)";
     json += R"("flash_size":)" + std::to_string(SystemInfo::GetFlashSize()) + R"(,)";
     json += R"("minimum_free_heap_size":")" + std::to_string(SystemInfo::GetMinimumFreeHeapSize()) + R"(",)";
+    const size_t sram_total = heap_caps_get_total_size(MALLOC_CAP_INTERNAL);
+    const size_t sram_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    const size_t psram_total = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+    const size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    json += R"("memory":{)";
+    json += R"("sram_free_kb":)" + std::to_string(sram_free / 1024) + R"(,)";
+    json += R"("sram_free_pct":)" + std::to_string(sram_total ? sram_free * 100 / sram_total : 0) + R"(,)";
+    json += R"("psram_free_kb":)" + std::to_string(psram_free / 1024) + R"(,)";
+    json += R"("psram_free_pct":)" + std::to_string(psram_total ? psram_free * 100 / psram_total : 0) + R"(},)";
     json += R"("mac_address":")" + SystemInfo::GetMacAddress() + R"(",)";
     json += R"("uuid":")" + uuid_ + R"(",)";
     json += R"("chip_model_name":")" + SystemInfo::GetChipModelName() + R"(",)";

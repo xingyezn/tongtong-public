@@ -15,6 +15,15 @@ config USB_CAMERA_BOOT_PROBE
         that the USB camera has enumerated and is producing video without
         retaining an image in memory. Intended for supervised hardware tests.
 
+config ENABLE_LOCAL_FACE_DETECTION
+    bool "Enable local ESP-DL face detection"
+    default n
+    depends on ESP_VIDEO_ENABLE_USB_UVC_VIDEO_DEVICE
+    help
+        Keep the local ESP-DL camera face detection implementation available,
+        but disable it by default. Enable this only when local face detection
+        testing is required; normal face recognition uses the backend service.
+
 choice
     prompt "Flash Assets"
     default FLASH_DEFAULT_ASSETS

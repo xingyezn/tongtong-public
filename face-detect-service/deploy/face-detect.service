@@ -8,6 +8,7 @@ Type=simple
 WorkingDirectory=/opt/face-detect-service
 Environment=PYTHONUNBUFFERED=1
 Environment=OV_NUM_THREADS=2
+Environment=FACE_DETECT_HOST=127.0.0.1
 Environment=FACE_DETECT_PORT=8090
 ExecStartPre=/bin/bash /opt/face-detect-service/deploy/setup-port-monitor.sh
 ExecStart=/opt/face-detect-service/venv/bin/python app.py

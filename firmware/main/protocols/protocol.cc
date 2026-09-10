@@ -1,6 +1,7 @@
 #include "protocol.h"
 
 #include <esp_log.h>
+#include <cstdio>
 
 #define TAG "Protocol"
 

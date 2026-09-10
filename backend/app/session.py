@@ -407,6 +407,20 @@ class Session:
         elif mtype == "mcp":
             if self._mcp:
                 self._mcp.on_device_mcp(msg.get("payload", {}))
+        elif mtype == "system_stats":
+            stats = msg.get("stats", {})
+            if isinstance(stats, dict):
+                if "sram_kb" in stats or "psram_kb" in stats:
+                    log.info("device %s memory: sram=%sKB(%s%% free) psram=%sKB(%s%% free)",
+                             self.device_id, stats.get("sram_kb", "?"),
+                             stats.get("sram_pct", "?"), stats.get("psram_kb", "?"),
+                             stats.get("psram_pct", "?"))
+                else:
+                    log.info("device %s memory: internal_free=%s internal_min=%s internal_largest=%s psram_free=%s psram_min=%s psram_largest=%s",
+                             self.device_id, stats.get("internal_free", "?"),
+                             stats.get("internal_min", "?"), stats.get("internal_largest", "?"),
+                             stats.get("psram_free", "?"), stats.get("psram_min", "?"),
+                             stats.get("psram_largest", "?"))
         else:
             log.info("device msg type=%s ignored", mtype)
 

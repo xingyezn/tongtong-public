@@ -153,6 +153,7 @@ private:
     std::atomic<bool> ota_confirmation_pending_{false};
     std::atomic<bool> accepting_tts_audio_{false};
     bool network_connected_ = false;
+    std::atomic<bool> sntp_initialized_{false};
     bool automatic_interrupt_enabled_ = true;
     bool button_interrupt_enabled_ = true;
     bool double_click_end_enabled_ = true;

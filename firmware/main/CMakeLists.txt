@@ -56,9 +56,9 @@ file(GLOB BOARD_COMMON_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/boards/common/*.cc)
 list(APPEND SOURCES ${BOARD_COMMON_SOURCES})
 list(APPEND INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/boards/common)
 
-# The live local face detector is only needed for camera-capable builds. Keep
-# it out of unrelated boards so they do not require the ESP-DL model component.
-if(NOT CONFIG_ESP_VIDEO_ENABLE_USB_UVC_VIDEO_DEVICE)
+# The local detector is retained for later testing, but is disabled by default
+# because face recognition is performed by the backend service.
+if(NOT CONFIG_ENABLE_LOCAL_FACE_DETECTION)
     list(REMOVE_ITEM SOURCES
          "${CMAKE_CURRENT_SOURCE_DIR}/boards/common/camera_face_detect_local.cc")
 endif()
@@ -729,7 +729,7 @@ endif()
 
 file(GLOB COMMON_SOUNDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/common/*.ogg)
 set(MODEL_REQUIRES)
-if(CONFIG_ESP_VIDEO_ENABLE_USB_UVC_VIDEO_DEVICE)
+if(CONFIG_ESP_VIDEO_ENABLE_USB_UVC_VIDEO_DEVICE AND CONFIG_ENABLE_LOCAL_FACE_DETECTION)
     list(APPEND MODEL_REQUIRES human_face_detect)
 endif()
 

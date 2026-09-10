@@ -42,6 +42,9 @@ CONFIG_HUMAN_FACE_DETECT_MSRMNP_S8_V1=y
 # recompression before a photo is sent to the vision service.
 CONFIG_ESP_VIDEO_ENABLE_USB_UVC_VIDEO_DEVICE=y
 CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT=y
+# Local ESP-DL face detection code is retained for supervised testing only;
+# normal face recognition is handled by the backend service.
+# CONFIG_ENABLE_LOCAL_FACE_DETECTION is not set
 
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
 CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
