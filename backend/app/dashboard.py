@@ -15,6 +15,7 @@ import math
 import os
 import re
 import secrets
+import shutil
 import threading
 import time
 from collections import deque
@@ -1721,6 +1722,7 @@ class Dashboard:
         self._firmware_deployments = {}
         self._face_proxy_session = None
         self._face_proxy_login_lock = asyncio.Lock()
+        self._host_cpu_sample = None
 
     def _render_page(self, template):
         """Add a prominent warning to the non-production dashboard only."""
@@ -1880,6 +1882,7 @@ class Dashboard:
         app.router.add_get("/api/motor-settings", self.api_motor_settings_get)
         app.router.add_post("/api/motor-settings", self.api_motor_settings_set)
         app.router.add_get("/api/admin/overview", self.api_admin_overview)
+        app.router.add_get("/api/admin/metrics", self.api_admin_metrics)
         app.router.add_get("/api/admin/settings", self.api_admin_settings_get)
         app.router.add_post("/api/admin/settings", self.api_admin_settings_set)
         app.router.add_get("/api/admin/firmware", self.api_admin_firmware_list)
@@ -2117,16 +2120,7 @@ class Dashboard:
         if not user.get("is_admin"):
             raise web.HTTPForbidden(text="administrator access required")
         face_top_link = '<a class="btn" href="/admin/face/">人脸识别管理</a>'
-        page = re.sub(
-            r'<section class="card">(?:(?!</section>).)*'
-            r'id="face-service-url".*?</section>',
-            "", ADMIN_HTML, count=1, flags=re.S)
-        # The removed legacy settings card also had an initialization call.
-        page = page.replace("loadFaceServiceSettings();", "")
-        page = re.sub(
-            r'async function loadFaceServiceSettings\(\).*?'
-            r'function arrangeAdminSections',
-            "function arrangeAdminSections", page, count=1, flags=re.S)
+        page = ADMIN_HTML
         page = page.replace(
             '<a class="btn" href="/">',
             face_top_link + '<a class="btn" href="/">', 1)
@@ -2198,7 +2192,7 @@ class Dashboard:
             "#devices td:nth-child(5) .tag.offline{background:#fff0f2;color:#c04d61;}</style>"
             "<script>(function(){const bytes=n=>{if(n==null)return'-';const u=['B','KB','MB','GB','TB'];let i=0;"
             "while(n>=1024&&i<u.length-1){n/=1024;i++;}return n.toFixed(i?1:0)+' '+u[i];};"
-            "async function loadAdminMetrics(){try{const r=await fetch('/admin/face/api/metrics');if(!r.ok)throw Error();"
+            "async function loadAdminMetrics(){try{const r=await fetch('/api/admin/metrics');if(!r.ok)throw Error();"
             "const m=await r.json();document.getElementById('admin-m-cpu').textContent=m.cpu_percent==null?'采样中…':m.cpu_percent+'%';"
             "document.getElementById('admin-m-load').textContent='负载 '+(m.load_1m==null?'-':m.load_1m)+' · '+m.cpu_cores+' 核';"
             "document.getElementById('admin-m-memory').textContent=m.memory.percent+'%';"
@@ -2218,6 +2212,75 @@ class Dashboard:
         return web.Response(
             text=page, content_type="text/html", charset="utf-8",
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
+
+    @staticmethod
+    def _read_proc_cpu():
+        """Return aggregate Linux CPU counters, or None on unsupported hosts."""
+        try:
+            with open("/proc/stat", "r", encoding="ascii") as stream:
+                fields = stream.readline().split()
+            if not fields or fields[0] != "cpu":
+                return None
+            values = [int(value) for value in fields[1:]]
+            idle = values[3] + (values[4] if len(values) > 4 else 0)
+            return sum(values), idle
+        except (OSError, ValueError, IndexError):
+            return None
+
+    def _host_metrics(self):
+        """Collect metrics for the backend host without contacting face service."""
+        cpu_percent = None
+        current_cpu = self._read_proc_cpu()
+        if current_cpu is not None:
+            previous_cpu = self._host_cpu_sample
+            self._host_cpu_sample = current_cpu
+            if previous_cpu is not None:
+                total_delta = current_cpu[0] - previous_cpu[0]
+                idle_delta = current_cpu[1] - previous_cpu[1]
+                if total_delta > 0:
+                    cpu_percent = round(
+                        max(0.0, min(100.0, (total_delta - idle_delta) * 100 / total_delta)),
+                        1)
+
+        memory = None
+        try:
+            meminfo = {}
+            with open("/proc/meminfo", "r", encoding="ascii") as stream:
+                for line in stream:
+                    key, value = line.split(":", 1)
+                    meminfo[key] = int(value.split()[0]) * 1024
+            total = meminfo["MemTotal"]
+            available = meminfo.get("MemAvailable", meminfo.get("MemFree", 0))
+            used = max(0, total - available)
+            memory = {"used": used, "total": total,
+                      "percent": round(used * 100 / total, 1) if total else 0}
+        except (OSError, ValueError, KeyError, IndexError):
+            pass
+
+        disk_path = Path(__file__).resolve().parents[2]
+        disk_usage = shutil.disk_usage(disk_path)
+        disk = {
+            "used": disk_usage.used,
+            "total": disk_usage.total,
+            "percent": round(disk_usage.used * 100 / disk_usage.total, 1),
+        }
+        try:
+            load_1m = round(os.getloadavg()[0], 2)
+        except (AttributeError, OSError):
+            load_1m = None
+        return {
+            "cpu_percent": cpu_percent,
+            "load_1m": load_1m,
+            "cpu_cores": os.cpu_count() or 1,
+            "memory": memory or {"used": 0, "total": 0, "percent": 0},
+            "disk": disk,
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    async def api_admin_metrics(self, request):
+        self._require_admin(request)
+        return web.json_response(
+            self._host_metrics(), headers={"Cache-Control": "no-store"})
 
     async def api_admin_overview(self, request):
         self._require_admin(request)
