@@ -22,6 +22,7 @@ from .opus_codec import OpusCodec, resample_pcm
 from .omni_client import OmniClient
 from .face_service import FaceService
 from .mcp_bridge import is_model_tool_visible
+from .weather_time_service import SERVER_TOOLS, SERVER_TOOL_PREFIXES, WeatherTimeService, encode_result
 
 log = logging.getLogger("session")
 
@@ -199,6 +200,7 @@ class Session:
         self.conversation_ended_callback = conversation_ended_callback
         self.camera_photos = camera_photos if camera_photos is not None else {}
         self.face_service = FaceService(config)
+        self.weather_time_service = WeatherTimeService(config)
         self.session_id = uuid.uuid4().hex
         # This token only lives for the current WebSocket connection. It lets
         # the camera upload a photo without firmware storing a dashboard
@@ -594,6 +596,8 @@ class Session:
                  if self._mcp else [])
         if is_model_tool_visible("self.camera.take_photo", model_tool_categories):
             tools.extend(FACE_TOOLS)
+        if is_model_tool_visible("server.weather.get", model_tool_categories):
+            tools.extend(SERVER_TOOLS)
         tools.append(CONVERSATION_END_TOOL)
         async for evt in self.omni.chat_stream(
                 pcm, tools=tools, tool_handler=self._handle_tool_call):
@@ -872,6 +876,16 @@ class Session:
                 return json.dumps({"error": "face list is not available to the model"},
                                   ensure_ascii=False)
             return await self._handle_face_tool(name, arguments)
+        if isinstance(name, str) and name.startswith(SERVER_TOOL_PREFIXES):
+            if not is_model_tool_visible(name, self.config.get("model_tool_categories", {})):
+                log.warning("model called disabled backend tool %s; ignored", name)
+                return json.dumps({"error": "backend MCP tools are disabled for the model"},
+                                  ensure_ascii=False)
+            http_session = await self.omni.ensure_session()
+            result = await self.weather_time_service.call(
+                http_session, name, arguments)
+            log.info("server tool call: %s(%s)", name, arguments)
+            return encode_result(result)
         if not name or not self._mcp:
             return None
 

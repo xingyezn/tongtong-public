@@ -15,6 +15,7 @@ The backend is an `aiohttp` service that connects Tongtong ESP32 devices to the 
 - User accounts, administrator accounts, audit records, conversation history, usage/token statistics, and permanent memory.
 - Camera upload and latest-frame preview for supervised tests.
 - Conversational server-side face tools: register the current frame, recognize the current frame, delete by an ID explicitly provided by the user, and update metadata or replace a sample image.
+- Server-side weather and current-time tools (`server.weather.get` and `server.time.now`) for model-driven user queries.
 - The model is not given the face-list tool. Face lists remain available only to the authenticated administrator/manual test page.
 
 ## Server-side face recognition

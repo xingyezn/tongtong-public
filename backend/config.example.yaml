@@ -7,6 +7,11 @@ face_service:
   base_url: "http://127.0.0.1:8090"
   username: ""
   password: ""
+weather:
+  # IANA timezone used when the user asks for the current time without a location.
+  default_timezone: "Asia/Shanghai"
+  timeout_seconds: 12
+
 server:
   host: "0.0.0.0"
   port: 8080

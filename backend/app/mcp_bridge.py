@@ -30,6 +30,7 @@ MODEL_TOOL_CATEGORY_DEFAULTS = {
     "chassis": False,
     "camera": True,
     "gimbal_servo": False,
+    "backend": True,
 }
 
 
@@ -38,6 +39,8 @@ def model_tool_category(name):
     if not isinstance(name, str):
         return None
     lowered = name.lower()
+    if lowered.startswith(("server.weather.", "server.time.")):
+        return "backend"
     if lowered.startswith("self.chassis."):
         return "chassis"
     if lowered.startswith("self.camera."):

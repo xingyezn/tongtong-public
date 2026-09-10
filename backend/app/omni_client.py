@@ -84,6 +84,15 @@ FACE_TOOL_INSTRUCTIONS = (
     "也不得猜测 face_id。这些工具是服务器端人脸接口的实际调用，不要只根据记忆直接回答。"
 )
 
+WEATHER_TIME_TOOL_INSTRUCTIONS = (
+    "天气和时间工具规则：当用户询问天气时，必须调用 server.weather.get，"
+    "不得凭记忆猜测实时天气；调用前必须使用用户明确提供的城市或地区。"
+    "当用户询问当前日期、时间或星期时，必须调用 server.time.now，"
+    "默认使用 Asia/Shanghai，用户指定其他地区或时区时使用对应 IANA 时区。"
+    "拿到工具结果后，用简洁自然的中文回答；如果未来7天有节假日、调休、传统节日或节气，必须一并报出。"
+)
+
+
 def motor_tool_instructions(config):
     defaults = config.get("motor_defaults", {})
     speed = defaults.get("speed", 85)
@@ -118,6 +127,7 @@ DEFAULT_GLOBAL_TOOL_INSTRUCTIONS = "\n\n".join((
     motor_tool_instructions({"motor_defaults": {"speed": 85,
                                                 "duration_ms": 600}}),
     FACE_TOOL_INSTRUCTIONS,
+    WEATHER_TIME_TOOL_INSTRUCTIONS,
     EMOTION_INSTRUCTIONS,
 ))
 
@@ -126,6 +136,8 @@ GLOBAL_TOOL_RULE_CATEGORIES = {"general", "chassis", "camera", "gimbal_servo", "
 
 def default_global_tool_rules():
     return [
+        {"id": "weather-time", "name": "天气和时间工具规则", "category": "general",
+         "enabled": True, "content": WEATHER_TIME_TOOL_INSTRUCTIONS},
         {"id": "visual", "name": "实时视觉规则", "category": "camera",
          "enabled": True, "content": DEFAULT_TOOL_INSTRUCTIONS},
         {"id": "chassis", "name": "底盘运动规则", "category": "chassis",
@@ -347,6 +359,9 @@ class OmniClient:
             # before emotion output was introduced.
             if "emotion 只能使用" not in tool_instructions:
                 tool_instructions = tool_instructions.rstrip() + "\n\n" + EMOTION_INSTRUCTIONS
+        if ("server.weather.get" not in tool_instructions or
+                "server.time.now" not in tool_instructions):
+            tool_instructions = tool_instructions.rstrip() + "\n\n" + WEATHER_TIME_TOOL_INSTRUCTIONS
         tool_instructions = filter_tool_instructions_for_categories(
             tool_instructions, self.config.get("model_tool_categories", {}))
         parts = [

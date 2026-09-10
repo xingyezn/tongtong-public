@@ -26,6 +26,7 @@ import aiohttp
 from aiohttp import web
 
 from .mcp_bridge import normalize_model_tool_categories
+from .weather_time_service import SERVER_TOOLS
 
 log = logging.getLogger("dash")
 
@@ -389,7 +390,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <button class="btn" onclick="loadHardwareTests(true)">刷新测试项</button>
     </div>
     <div class="hint" id="hardware-test-status">等待设备上线…</div>
-    <div class="row" id="model-tool-category-panel" style="margin:10px 0"><span class="muted">大模型可见工具：</span><label><input id="user-model-tool-chassis" type="checkbox"> 底盘运动控制</label><label><input id="user-model-tool-camera" type="checkbox"> 摄像头</label><label><input id="user-model-tool-gimbal-servo" type="checkbox"> 舵机 / 云台</label><button class="btn" id="user-model-tool-save" onclick="saveUserModelToolCategories()">保存工具可见性</button></div>
+    <div class="row" id="model-tool-category-panel" style="margin:10px 0"><span class="muted">大模型可见工具：</span><label><input id="user-model-tool-chassis" type="checkbox"> 底盘运动控制</label><label><input id="user-model-tool-camera" type="checkbox"> 摄像头</label><label><input id="user-model-tool-gimbal-servo" type="checkbox"> 舵机 / 云台</label><label><input id="user-model-tool-backend" type="checkbox"> 后端 MCP 工具</label><button class="btn" id="user-model-tool-save" onclick="saveUserModelToolCategories()">保存工具可见性</button></div>
     <div class="hint" id="model-tool-category-status">取消勾选后，对应类别不会传给大模型，以减少上下文；手动测试仍可用。</div>
     <div id="hardware-test-groups" class="test-grid"></div>
     <div id="hardware-test-result">尚未执行测试。</div>
@@ -964,6 +965,9 @@ const HARDWARE_TEST_GROUPS = [
     ["self.gimbal.center", "云台回中"], ["self.gimbal.pan", "水平舵机"],
     ["self.gimbal.tilt", "俯仰舵机"], ["self.face_tracking.get_state", "跟随状态"]
   ]},
+  { title: "后端 MCP 工具", items: [
+    ["server.weather.get", "查询天气"], ["server.time.now", "查询时间和日期"]
+  ]},
 ];
 
 function selectedHardwareDevice() {
@@ -979,6 +983,10 @@ function showCameraPreview(deviceId) {
 }
 
 function hardwareArgs(name) {
+  if (name === "server.weather.get") {
+    const location = prompt("请输入城市或地区，例如上海");
+    return location && location.trim() ? { location: location.trim() } : null;
+  }
   if (name.indexOf("self.chassis.") === 0 && name !== "self.chassis.stop") {
     return { speed: parseInt($("test-speed").value, 10) || motorDefaults.speed,
              duration_ms: parseInt($("test-duration").value, 10) || motorDefaults.duration_ms };
@@ -1188,6 +1196,7 @@ function setUserModelToolCategories(categories) {
   $("user-model-tool-chassis").checked = c.chassis !== false;
   $("user-model-tool-camera").checked = c.camera !== false;
   $("user-model-tool-gimbal-servo").checked = c.gimbal_servo !== false;
+  $("user-model-tool-backend").checked = c.backend !== false;
 }
 
 function userModelToolCategories() {
@@ -1195,6 +1204,7 @@ function userModelToolCategories() {
     chassis: $("user-model-tool-chassis").checked,
     camera: $("user-model-tool-camera").checked,
     gimbal_servo: $("user-model-tool-gimbal-servo").checked,
+    backend: $("user-model-tool-backend").checked,
   };
 }
 
@@ -3555,6 +3565,14 @@ class Dashboard:
                 "description": tool.get("description", ""),
                 "input_schema": tool.get("inputSchema", {"type": "object", "properties": {}}),
             })
+        for tool in SERVER_TOOLS:
+            function = tool.get("function", {})
+            result.append({
+                "name": function.get("name", ""),
+                "description": function.get("description", ""),
+                "input_schema": function.get(
+                    "parameters", {"type": "object", "properties": {}}),
+            })
         return result
 
     def _get_test_session(self, device_id):
@@ -3693,6 +3711,18 @@ class Dashboard:
         testable_names = {tool["name"] for tool in self._testable_tools(session)}
         if name not in testable_names:
             return web.json_response({"error": "tool is not available for supervised testing"}, status=403)
+
+        if name.startswith(("server.weather.", "server.time.")):
+            result = await session._handle_tool_call({
+                "name": name,
+                "arguments": arguments,
+            })
+            try:
+                result = json.loads(result)
+            except (TypeError, ValueError):
+                pass
+            return web.json_response({"device_id": device_id, "name": name,
+                                      "result": result})
 
         if name == "self.screen.snapshot":
             ws_url = session.config.get("server", {}).get("public_ws_url", "")
