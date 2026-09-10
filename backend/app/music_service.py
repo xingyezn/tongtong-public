@@ -163,6 +163,22 @@ class MusicService:
         self._load()
         return next((item for item in self._tracks if item["id"] == str(track_id)), None)
 
+    def _random_segment(self):
+        """Choose one song first, then one segment from that song.
+
+        Fragment counts are not necessarily equal between songs. Grouping by
+        the explicit song_id/album keeps random song selection fair instead of
+        weighting songs with more fragments more heavily.
+        """
+        groups = {}
+        for track in self._tracks:
+            group_id = (track.get("song_id") or track.get("album") or
+                        track.get("title") or track.get("id"))
+            groups.setdefault(str(group_id), []).append(track)
+        if not groups:
+            return None
+        return random.choice(random.choice(list(groups.values())))
+
     def playback_source(self, track_id):
         """Return a validated local source path for device playback."""
         track = self._track(track_id)
@@ -234,7 +250,7 @@ class MusicService:
         if name == "server.music.random":
             if not self._tracks:
                 return {"error": "music catalog is empty"}
-            track = random.choice(self._tracks)
+            track = self._random_segment()
             try:
                 duration = max(1, min(
                     self.max_preview_seconds,
