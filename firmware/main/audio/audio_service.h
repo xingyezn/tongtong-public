@@ -37,7 +37,7 @@
 
 #define OPUS_FRAME_DURATION_MS 60
 #define MAX_ENCODE_TASKS_IN_QUEUE 2
-#define TTS_PLAYBACK_PREBUFFER_MS 240
+#define TTS_PLAYBACK_PREBUFFER_MS 1200
 #define TTS_PLAYBACK_PREBUFFER_FRAMES (TTS_PLAYBACK_PREBUFFER_MS / OPUS_FRAME_DURATION_MS)
 #define MAX_PLAYBACK_TASKS_IN_QUEUE (TTS_PLAYBACK_PREBUFFER_FRAMES + 2)
 #define MAX_DECODE_PACKETS_IN_QUEUE (2400 / OPUS_FRAME_DURATION_MS)
@@ -163,6 +163,8 @@ private:
     esp_timer_handle_t audio_power_timer_ = nullptr;
     std::chrono::steady_clock::time_point last_input_time_;
     std::chrono::steady_clock::time_point last_output_time_;
+    int64_t last_audio_diag_us_ = 0;
+    int64_t last_playback_empty_log_us_ = 0;
 
     void AudioInputTask();
     void AudioOutputTask();

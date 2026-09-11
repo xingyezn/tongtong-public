@@ -1,4 +1,5 @@
 #include "audio_service.h"
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <cstring>
 
@@ -283,7 +284,14 @@ void AudioService::AudioOutputTask() {
             esp_timer_start_periodic(audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
             codec_->EnableOutput(true);
         }
+        const int64_t output_start_us = esp_timer_get_time();
         codec_->OutputData(task->pcm);
+
+        const int64_t output_duration_us = esp_timer_get_time() - output_start_us;
+        if (output_duration_us > static_cast<int64_t>(OPUS_FRAME_DURATION_MS) * 2000) {
+            ESP_LOGW(TAG, "Audio output slow: duration=%lld ms, pcm_samples=%u",
+                     output_duration_us / 1000, static_cast<unsigned>(task->pcm.size()));
+        }
 
         /* Update the last output time */
         last_output_time_ = std::chrono::steady_clock::now();
@@ -291,6 +299,17 @@ void AudioService::AudioOutputTask() {
 
         lock.lock();
         output_active_ = false;
+        if (audio_playback_queue_.empty() && !playback_stream_ended_) {
+            const int64_t now_us = esp_timer_get_time();
+            if (now_us - last_playback_empty_log_us_ > 1000000) {
+                ESP_LOGW(TAG, "Audio playback queue drained: decode=%u playback=%u internal_free=%u largest=%u",
+                         static_cast<unsigned>(audio_decode_queue_.size()),
+                         static_cast<unsigned>(audio_playback_queue_.size()),
+                         static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                         static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
+                last_playback_empty_log_us_ = now_us;
+            }
+        }
         audio_queue_cv_.notify_all();
 
 #if CONFIG_USE_SERVER_AEC
@@ -329,6 +348,7 @@ void AudioService::OpusCodecTask() {
             task->timestamp = packet->timestamp;
 
             SetDecodeSampleRate(packet->sample_rate, packet->frame_duration);
+            const int64_t decode_start_us = esp_timer_get_time();
             if (opus_decoder_->Decode(std::move(packet->payload), task->pcm)) {
                 // Resample if the sample rate is different
                 if (opus_decoder_->sample_rate() != codec_->output_sample_rate()) {
@@ -340,6 +360,13 @@ void AudioService::OpusCodecTask() {
 
                 lock.lock();
                 audio_playback_queue_.push_back(std::move(task));
+                const int64_t decode_duration_us = esp_timer_get_time() - decode_start_us;
+                if (decode_duration_us > static_cast<int64_t>(OPUS_FRAME_DURATION_MS) * 1000) {
+                    ESP_LOGW(TAG, "Opus decode slow: duration=%lld ms, decode_queue=%u playback_queue=%u",
+                             decode_duration_us / 1000,
+                             static_cast<unsigned>(audio_decode_queue_.size()),
+                             static_cast<unsigned>(audio_playback_queue_.size()));
+                }
                 decoding_active_ = false;
                 audio_queue_cv_.notify_all();
             } else {
@@ -435,6 +462,17 @@ bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> pa
         }
     }
     audio_decode_queue_.push_back(std::move(packet));
+    const int64_t now_us = esp_timer_get_time();
+    if (now_us - last_audio_diag_us_ > 1000000) {
+        ESP_LOGI(TAG, "Audio queues: decode=%u playback=%u prebuffer=%u internal_free=%u largest=%u psram_free=%u",
+                 static_cast<unsigned>(audio_decode_queue_.size()),
+                 static_cast<unsigned>(audio_playback_queue_.size()),
+                 static_cast<unsigned>(playback_prebuffer_frames_),
+                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                 static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+        last_audio_diag_us_ = now_us;
+    }
     audio_queue_cv_.notify_all();
     return true;
 }

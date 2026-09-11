@@ -381,10 +381,6 @@ void Esp32Camera::SetExplainUrl(const std::string& url, const std::string& token
 }
 
 bool Esp32Camera::Capture() {
-    if (encoder_thread_.joinable()) {
-        encoder_thread_.join();
-    }
-
     if (!streaming_on_ || video_fd_ < 0) {
         return false;
     }
@@ -956,35 +952,13 @@ std::string Esp32Camera::Explain(const std::string& question) {
         throw std::runtime_error("Image explain URL or token is not set");
     }
 
-    // 创建局部的 JPEG 队列, 40 entries is about to store 512 * 40 = 20480 bytes of JPEG data
-    QueueHandle_t jpeg_queue = xQueueCreate(40, sizeof(JpegChunk));
-    if (jpeg_queue == nullptr) {
-        ESP_LOGE(TAG, "Failed to create JPEG queue");
-        throw std::runtime_error("Failed to create JPEG queue");
-    }
-
     if (frame_.format != V4L2_PIX_FMT_JPEG) {
-        vQueueDelete(jpeg_queue);
         throw std::runtime_error("Cloud image upload requires a JPEG camera frame");
     }
 
     // The UVC camera already provides a standards-compliant JPEG frame. Keep
     // it in PSRAM and upload it directly; no RGB conversion or software JPEG
     // encoding is needed.
-    encoder_thread_ = std::thread([this, jpeg_queue]() {
-        JpegChunk chunk = {.data = nullptr, .len = frame_.len};
-        chunk.data = (uint8_t*)heap_caps_aligned_alloc(16, frame_.len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (chunk.data != nullptr) {
-            memcpy(chunk.data, frame_.data, frame_.len);
-            xQueueSend(jpeg_queue, &chunk, portMAX_DELAY);
-        } else {
-            ESP_LOGE(TAG, "Failed to allocate %zu bytes for JPEG frame", frame_.len);
-        }
-
-        JpegChunk terminator = {.data = nullptr, .len = 0};
-        xQueueSend(jpeg_queue, &terminator, portMAX_DELAY);
-    });
-
     auto network = Board::GetInstance().GetNetwork();
     auto http = network->CreateHttp(3);
     // 构造multipart/form-data请求体
@@ -1000,17 +974,6 @@ std::string Esp32Camera::Explain(const std::string& question) {
     http->SetHeader("Transfer-Encoding", "chunked");
     if (!http->Open("POST", explain_url_)) {
         ESP_LOGE(TAG, "Failed to connect to explain URL");
-        // Clear the queue
-        encoder_thread_.join();
-        JpegChunk chunk;
-        while (xQueueReceive(jpeg_queue, &chunk, portMAX_DELAY) == pdPASS) {
-            if (chunk.data != nullptr) {
-                heap_caps_free(chunk.data);
-            } else {
-                break;
-            }
-        }
-        vQueueDelete(jpeg_queue);
         throw std::runtime_error("Failed to connect to explain URL");
     }
 
@@ -1035,29 +998,26 @@ std::string Esp32Camera::Explain(const std::string& question) {
 
     // 第三块：JPEG数据
     size_t total_sent = 0;
-    bool saw_terminator = false;
-    while (true) {
-        JpegChunk chunk;
-        if (xQueueReceive(jpeg_queue, &chunk, portMAX_DELAY) != pdPASS) {
-            ESP_LOGE(TAG, "Failed to receive JPEG chunk");
+    bool upload_ok = true;
+    constexpr size_t kUploadChunkSize = 4096;
+    for (size_t offset = 0; offset < frame_.len; offset += kUploadChunkSize) {
+        size_t chunk_len = MIN(kUploadChunkSize, frame_.len - offset);
+        // HttpClient returns the number of bytes sent on the wire. With
+        // chunked transfer encoding this includes the chunk framing, so it
+        // is intentionally larger than chunk_len for the Wi-Fi client.
+        int written = http->Write((const char*)frame_.data + offset, chunk_len);
+        if (written <= 0) {
+            ESP_LOGE(TAG, "Failed to upload JPEG chunk at offset=%zu, len=%zu", offset, chunk_len);
+            upload_ok = false;
             break;
         }
-        if (chunk.data == nullptr) {
-            saw_terminator = true;
-            break;  // The last chunk
-        }
-        http->Write((const char*)chunk.data, chunk.len);
-        total_sent += chunk.len;
-        heap_caps_free(chunk.data);
+        total_sent += chunk_len;
+        taskYIELD();
     }
-    // Wait for the encoder thread to finish
-    encoder_thread_.join();
-    // 清理队列
-    vQueueDelete(jpeg_queue);
-
-    if (!saw_terminator || total_sent == 0) {
-        ESP_LOGE(TAG, "JPEG encoder failed or produced empty output");
-        throw std::runtime_error("Failed to encode image to JPEG");
+    if (!upload_ok || total_sent != frame_.len) {
+        http->Close();
+        ESP_LOGE(TAG, "JPEG upload failed or incomplete: sent=%zu expected=%zu", total_sent, frame_.len);
+        throw std::runtime_error("Failed to upload image");
     }
 
     {

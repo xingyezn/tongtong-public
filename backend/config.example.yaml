@@ -38,9 +38,9 @@ audio:
   opus_frame_ms: 60
   omni_input_format: "wav"
   omni_output_format: "wav"
-  # Keep 0.9 s of model audio before device playback to prevent stream jitter.
+  # Keep 1.2 s of model audio before device playback to prevent stream jitter.
   # Valid range: 240-1500 ms.  Lower only on a stable LAN after testing.
-  tts_startup_buffer_ms: 900
+  tts_startup_buffer_ms: 1200
 
 devices:
   enabled: false

@@ -8,8 +8,6 @@
 #include <vector>
 
 #include <freertos/FreeRTOS.h>
-#include <freertos/queue.h>
-
 #include "camera.h"
 #include "esp_video_init.h"
 #include "linux/videodev2.h"
@@ -17,11 +15,6 @@
 // Keep the camera format type available without pulling in the software JPEG
 // conversion header, which is disabled for the JPEG passthrough build.
 typedef uint32_t v4l2_pix_fmt_t;
-
-struct JpegChunk {
-    uint8_t* data;
-    size_t len;
-};
 
 class Esp32Camera : public Camera {
 private:
@@ -43,7 +36,6 @@ private:
     std::vector<MmapBuffer> mmap_buffers_;
     std::string explain_url_;
     std::string explain_token_;
-    std::thread encoder_thread_;
 
 public:
     Esp32Camera(const esp_video_init_config_t& config);

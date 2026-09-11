@@ -115,6 +115,22 @@ if (-not (Select-String -Path $uvcDriver -SimpleMatch "#define UVC_DEVICE_FRAME_
     }
 }
 
+# Keep both the USB UVC frame pool and the esp_video V4L2 mmap buffer bounded
+# by the tested 480x320 JPEG capacity. Component Manager may restore either
+# assignment independently, so repair them idempotently on every build.
+$uvcContent = Get-Content -LiteralPath $uvcDriver -Raw
+$uvcFrameSizeLine = ".frame_size = UVC_DEVICE_FRAME_SIZE,"
+if (-not $uvcContent.Contains($uvcFrameSizeLine)) {
+    $uvcContent = $uvcContent.Replace(".frame_size = 0,", $uvcFrameSizeLine)
+}
+$v4l2BufInfoLine = "CAPTURE_VIDEO_SET_BUF_INFO(video, UVC_DEVICE_FRAME_SIZE, UVC_DEVICE_FRAME_COUNT, FRAME_MEM_CAPS);"
+   $uvcContent = $uvcContent.Replace("CAPTURE_VIDEO_SET_BUF_INFO(video, uvc_buf_info.dwMaxVideoFrameSize, 4, FRAME_MEM_CAPS);", $v4l2BufInfoLine)
+if (-not $uvcContent.Contains($uvcFrameSizeLine) -or -not $uvcContent.Contains($v4l2BufInfoLine)) {
+    throw "Cannot apply the ESP Video UVC 512KB frame-size patch; inspect $uvcDriver."
+}
+[System.IO.File]::WriteAllText($uvcDriver, $uvcContent, (New-Object System.Text.UTF8Encoding($false)))
+Write-Output "Applied UVC 512KB frame-size patch."
+
 # ESP-SR and ESP-DL on ESP32-S3 currently share conflicting conv2d symbols in
 # the registry libdl_lib.a. Use the tested replacement from the repository.
 $espSrLib = Join-Path $firmware "managed_components\espressif__esp-sr\lib\esp32s3\libdl_lib.a"

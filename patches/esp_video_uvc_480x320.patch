@@ -23,5 +23,3 @@ diff --git a/firmware/managed_components/espressif__esp_video/src/device/esp_vid
          },
          .advanced = {
              .number_of_frame_buffers = UVC_DEVICE_FRAME_COUNT,
--            .frame_size = 0,
-+            .frame_size = UVC_DEVICE_FRAME_SIZE,

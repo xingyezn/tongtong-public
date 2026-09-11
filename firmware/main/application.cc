@@ -726,7 +726,13 @@ void Application::InitializeProtocol() {
                     SendMusicStatus("playing");
                 }
             }
-            audio_service_.PushPacketToDecodeQueue(std::move(packet));
+            // The server may burst buffered TTS frames over WebSocket.  Do
+            // not drop audio when the compressed decode queue is full: wait
+            // for the decoder to make room so TCP backpressure preserves the
+            // remainder of long responses.
+            if (!audio_service_.PushPacketToDecodeQueue(std::move(packet), true)) {
+                ESP_LOGW(TAG, "Dropping incoming audio packet after queue wait");
+            }
         }
     });
     

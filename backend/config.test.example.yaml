@@ -39,7 +39,7 @@ audio:
   omni_input_format: "wav"
   omni_output_format: "wav"
   # Public test service: trade a little initial latency for uninterrupted TTS.
-  tts_startup_buffer_ms: 900
+  tts_startup_buffer_ms: 1200
 
 devices:
   enabled: false
