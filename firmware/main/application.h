@@ -159,6 +159,7 @@ private:
     std::atomic<bool> accepting_music_audio_{false};
     std::atomic<bool> music_playing_{false};
     std::atomic<bool> music_paused_{false};
+    bool music_resume_listening_ = false;
     std::mutex music_status_mutex_;
     std::string music_track_id_;
     std::atomic<uint32_t> music_frames_received_{0};

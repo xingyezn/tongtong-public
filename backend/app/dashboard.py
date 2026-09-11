@@ -1692,8 +1692,8 @@ function applyEnvironmentPreset(){const key=document.getElementById('environment
 function closeEnvironmentDialog(){document.getElementById('environment-modal').style.display='none';environmentDialogDevice=''}
 function confirmEnvironmentDialog(){const key=document.getElementById('environment-preset').value;const preset=environmentPresets[key];const url=document.getElementById('environment-ota-url').value.trim();if(!url){toast('请输入 OTA 地址',true);return}if(!confirm('设备将保存新地址并立即重启，确认继续？'))return;const result={device_id:environmentDialogDevice,environment:preset?preset.environment:'test',ota_url:url,reboot:true};closeEnvironmentDialog();post('/api/admin/devices/switch-environment',result).catch(e=>toast(e.message,true))}
 function switchEnvironment(id){environmentDialogDevice=id;updateEnvironmentOptions();const select=document.getElementById('environment-preset');select.value=select.querySelector('option:not(:disabled)')?.value||'custom';applyEnvironmentPreset();document.getElementById('environment-modal').style.display='grid'}
-async function loadFaceServiceSettings(){try{const s=await api("/api/admin/settings");const f=s.face_service||{};document.getElementById("face-service-url").value=f.base_url||"";document.getElementById("face-service-user").value=f.username||"";document.getElementById("face-service-password").value=f.password||""}catch(e){toast(e.message,true)}}
-async function saveFaceServiceSettings(){try{await api("/api/admin/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({face_service:{base_url:document.getElementById("face-service-url").value,username:document.getElementById("face-service-user").value,password:document.getElementById("face-service-password").value}})});toast("人脸服务配置已保存并应用")}catch(e){toast(e.message,true)}}
+async function loadFaceServiceSettings(){try{const s=await api("/api/admin/settings");const f=s.face_service||{};document.getElementById("face-service-url").value=f.base_url||"";document.getElementById("face-service-user").value=f.username||"";const password=document.getElementById("face-service-password");password.value="";password.placeholder=f.password_set?"已配置（留空则保持不变）":"请输入登录密码"}catch(e){toast(e.message,true)}}
+async function saveFaceServiceSettings(){try{await api("/api/admin/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({face_service:{base_url:document.getElementById("face-service-url").value,username:document.getElementById("face-service-user").value,password:document.getElementById("face-service-password").value}})});document.getElementById("face-service-password").value="";await loadFaceServiceSettings();toast("人脸服务配置已保存并应用")}catch(e){toast(e.message,true)}}
 function arrangeAdminSections(){const cards=[...document.querySelectorAll('main > section.card')];const face=cards.find(x=>x.querySelector('h2')?.textContent.includes('服务器端人脸识别服务'));const fw=cards.find(x=>x.querySelector('h2')?.textContent.includes('固件版本库'));if(face&&fw)fw.after(face)}
 function renderFirmware(){const devices=data.devices||[];document.getElementById('firmware-releases').innerHTML=(firmware.releases||[]).map(r=>{const opts='<option value="">选择在线设备</option>'+devices.filter(d=>d.online&&d.is_active).map(d=>`<option value="${esc(d.device_id)}">${esc(d.name||d.device_id)}</option>`).join('');const jobs=(firmware.deployments||[]).filter(j=>j.release_id===r.id);const j=jobs[jobs.length-1];const pct=j?Number(j.progress||0):0;const logs=j?(j.logs||[]).slice(-5).map(x=>new Date(x.time*1000).toLocaleTimeString()+' '+x.message).join('\\n'):'';const description=esc(r.description||'—');return `<tr><td>${r.id}</td><td><b>${esc(r.version)}</b></td><td><span id="fw-desc-text-${r.id}" ondblclick="editFirmwareDescription(${r.id})" title="双击编辑固件描述" style="display:inline-block;min-width:220px;max-width:320px;white-space:pre-wrap;cursor:text">${description}</span><div id="fw-desc-editor-${r.id}" style="display:none"><input id="fw-desc-${r.id}" value="${esc(r.description||'')}" style="min-width:220px"><br><button onclick="updateFirmwareDescription(${r.id})">保存</button> <button onclick="cancelFirmwareDescription(${r.id})">取消</button></div></td><td>${(Number(r.size_bytes)/1024/1024).toFixed(2)} MiB</td><td style="max-width:150px;word-break:break-all;font-size:11px"><code>${esc(r.sha256)}</code></td><td>${new Date(r.created_at*1000).toLocaleString()}</td><td><select id="fw-device-${r.id}">${opts}</select></td><td><button onclick="deployFirmware(${r.id})">下发</button></td><td>${j?`<progress max="100" value="${pct}"></progress> ${pct}%<br><small>${esc(j.message)}</small><pre style="max-width:360px;white-space:pre-wrap;font-size:11px">${esc(logs)}</pre><button onclick="clearFirmwareLog('${j.id}')">清除日志</button>`:'—'}</td><td><a class="btn" href="/api/admin/firmware/${r.id}/download">下载</a> <button class="danger" onclick="deleteFirmware(${r.id})">删除</button></td></tr>`}).join('')||'<tr><td colspan="10">暂无固件版本</td></tr>'}
 function editFirmwareDescription(id){const text=document.getElementById('fw-desc-text-'+id),editor=document.getElementById('fw-desc-editor-'+id),input=document.getElementById('fw-desc-'+id);if(!text||!editor||!input)return;text.style.display='none';editor.style.display='block';input.focus();input.select()}
@@ -2380,11 +2380,17 @@ class Dashboard:
         self._require_admin(request)
         from .omni_client import (DEFAULT_GLOBAL_TOOL_INSTRUCTIONS,
                                   normalize_global_tool_rules)
-        # Face-service credentials are server-internal and must never be sent
+        # The face-service password is server-internal and must never be sent
         # to the browser. The management page uses the main backend session.
         face_service = {
             "base_url": self.config.get("face_service", {}).get(
                 "base_url", "http://127.0.0.1:8090"),
+            "username": self.config.get("face_service", {}).get(
+                "username", ""),
+            # Never send the credential itself to the browser.  The UI uses
+            # this flag to keep the password field write-only across reloads.
+            "password_set": bool(self.config.get("face_service", {}).get(
+                "password", "")),
         }
         tool_instructions = self.account_store.get_global_setting(
             "tool_instructions") or ""
@@ -2497,7 +2503,12 @@ class Dashboard:
                     raise ValueError("invalid face service settings")
                 base_url = str(face_data.get("base_url", "")).strip().rstrip("/")
                 username = str(face_data.get("username", "")).strip()
-                password = str(face_data.get("password", ""))
+                submitted_password = str(face_data.get("password", ""))
+                # The password is intentionally not returned by GET.  A blank
+                # password on update therefore means "keep the current one",
+                # not "clear it".
+                password = submitted_password or str(
+                    self.config.get("face_service", {}).get("password", ""))
                 if (not base_url.startswith(("http://", "https://")) or
                         len(base_url) > 300 or not username or len(username) > 100 or
                         not password or len(password) > 200):
@@ -2530,7 +2541,14 @@ class Dashboard:
         return web.json_response({
             "tool_instructions": tool_instructions,
             "tool_rules": rules,
-            "face_service": dict(self.config.get("face_service", {})),
+            "face_service": {
+                "base_url": self.config.get("face_service", {}).get(
+                    "base_url", "http://127.0.0.1:8090"),
+                "username": self.config.get("face_service", {}).get(
+                    "username", ""),
+                "password_set": bool(self.config.get("face_service", {}).get(
+                    "password", "")),
+            },
             "motor_defaults": {"speed": motor_speed,
                                "duration_ms": motor_duration,
                                "swap_wheels": motor_swap_wheels},

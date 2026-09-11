@@ -235,6 +235,8 @@ class Session:
         self._suppress_current_audio = False
         self._active_stream_state = None
         self._music_task = None
+        self._pending_music_request = None
+        self._in_omni_turn = False
         self.music_state = {
             "state": "idle", "track_id": "", "frames_received": 0,
             "updated_at": self.connected_at,
@@ -323,7 +325,16 @@ class Session:
             await self.send_json({"type": "music", "state": "stop"})
         self.speaking = False
 
-    async def _stream_music(self, track_id, start_seconds, duration_seconds):
+    async def _start_music_request(self, request, continue_listening=False):
+        """Start music after any current TTS response has fully drained."""
+        await self._stop_music(notify=True)
+        self._music_task = asyncio.create_task(
+            self._stream_music(
+                request["track_id"], request["start_seconds"],
+                request["duration_seconds"], continue_listening))
+
+    async def _stream_music(self, track_id, start_seconds, duration_seconds,
+                            continue_listening=False):
         track, source = self.music_service.playback_source(track_id)
         if track is None:
             await self.send_json({"type": "music", "state": "error",
@@ -340,6 +351,7 @@ class Session:
                 "title": title, "artist": track.get("artist", ""),
                 "start_seconds": start_seconds,
                 "duration_seconds": duration_seconds,
+                "continue_listening": bool(continue_listening),
             })
             self.speaking = True
             async for opus in self.music_service.transcoder.iter_raw_opus(
@@ -621,6 +633,7 @@ class Session:
         except Exception:
             log.exception("omni turn failed")
         finally:
+            self._in_omni_turn = False
             self.omni_busy = False
             self._active_stream_state = None
             if self._end_conversation_pending:
@@ -635,6 +648,8 @@ class Session:
     async def _run_omni_turn(self, pcm: bytes):
         self._suppress_current_audio = False
         self._standby_after_response = False
+        self._pending_music_request = None
+        self._in_omni_turn = True
         # 无百炼 Key 时走回环模式，验证完整链路（说话→上行→下行→播放）
         if not self.omni.api_key:
             await self._echo_mode(pcm)
@@ -760,6 +775,12 @@ class Session:
             except Exception:
                 log.exception("failed to persist conversation turn for %s", self.device_id)
         await self._finish_omni_audio(stream_state)
+        pending_music = self._pending_music_request
+        self._pending_music_request = None
+        self._in_omni_turn = False
+        if pending_music is not None:
+            await self._start_music_request(
+                pending_music, continue_listening=True)
         if self._standby_after_response:
             await self._enter_standby()
         log.info("omni turn done, streamed=%s", stream_state["started"])
@@ -962,11 +983,18 @@ class Session:
             if name.startswith(MUSIC_TOOL_PREFIXES):
                 result = await self.music_service.call(name, arguments)
                 if name in ("server.music.play", "server.music.random") and "error" not in result:
-                    await self._stop_music(notify=True)
-                    self._music_task = asyncio.create_task(
-                        self._stream_music(
-                            result["id"], result["start_seconds"],
-                            result["duration_seconds"]))
+                    request = {
+                        "track_id": result["id"],
+                        "start_seconds": result["start_seconds"],
+                        "duration_seconds": result["duration_seconds"],
+                    }
+                    if self._in_omni_turn:
+                        # Do not compete with the response TTS. Start music
+                        # after the complete TTS stream has drained.
+                        self._pending_music_request = request
+                    else:
+                        # Dashboard/manual tests have no Omni turn to wait for.
+                        await self._start_music_request(request)
             else:
                 http_session = await self.omni.ensure_session()
                 result = await self.weather_time_service.call(

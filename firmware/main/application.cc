@@ -128,6 +128,13 @@ Application::Application() {
                     return;
                 }
                 app->SendMusicStatus("finished");
+                if (app->music_resume_listening_) {
+                    app->music_resume_listening_ = false;
+                    if (app->GetDeviceState() == kDeviceStateSpeaking) {
+                        ESP_LOGI(TAG, "Music playback drained; resuming automatic listening");
+                        app->SetListeningMode(kListeningModeAutoStop);
+                    }
+                }
             });
         },
         .arg = this,
@@ -738,6 +745,7 @@ void Application::InitializeProtocol() {
         accepting_music_audio_ = false;
         music_playing_ = false;
         music_paused_ = false;
+        music_resume_listening_ = false;
         audio_service_.FinishPlaybackStream();
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         Schedule([this]() {
@@ -766,6 +774,8 @@ void Application::InitializeProtocol() {
                 accepting_music_audio_ = true;
                 music_playing_ = true;
                 music_paused_ = false;
+                auto continue_listening = cJSON_GetObjectItem(root, "continue_listening");
+                music_resume_listening_ = cJSON_IsTrue(continue_listening);
                 if (music_finished_timer_handle_ != nullptr) {
                     esp_timer_stop(music_finished_timer_handle_);
                 }
@@ -805,12 +815,17 @@ void Application::InitializeProtocol() {
                        strcmp(state->valuestring, "error") == 0) {
                 const bool stream_complete = strcmp(state->valuestring, "complete") == 0;
                 const bool stream_error = strcmp(state->valuestring, "error") == 0;
+                const bool resume_listening = stream_complete && music_resume_listening_;
                 accepting_music_audio_ = false;
                 music_playing_ = false;
                 music_paused_ = false;
-                Schedule([this]() {
+                if (!resume_listening) {
+                    music_resume_listening_ = false;
+                }
+                Schedule([this, resume_listening]() {
                     audio_service_.FinishPlaybackStream();
-                    if (GetDeviceState() == kDeviceStateSpeaking) {
+                    if (GetDeviceState() == kDeviceStateSpeaking &&
+                        !resume_listening) {
                         SetDeviceState(kDeviceStateIdle);
                     }
                 });
@@ -832,6 +847,7 @@ void Application::InitializeProtocol() {
                 accepting_music_audio_ = false;
                 music_playing_ = false;
                 music_paused_ = false;
+                music_resume_listening_ = false;
                 audio_service_.ResetDecoder();
                 audio_service_.PreparePlaybackStream();
                 Schedule([this]() {
@@ -1284,6 +1300,7 @@ void Application::AbortSpeaking(AbortReason reason) {
     accepting_music_audio_ = false;
     music_playing_ = false;
     music_paused_ = false;
+    music_resume_listening_ = false;
     // An interruption must drop audio already decoded/queued for DMA. Merely
     // marking the stream finished lets that queue drain into the microphone
     // after listening starts, which produces a false 0.7 s user utterance.
