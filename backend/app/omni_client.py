@@ -111,16 +111,15 @@ def motor_tool_instructions(config):
 
 
 EMOTION_INSTRUCTIONS = (
-    "表情输出规则：每次助手回复都必须选择一个与助手本轮回复语义匹配的表情，"
-    "并在回复末尾附加机器可解析的 JSON 字段，格式必须严格为 "
-    "{\\\"emotion\\\":\\\"happy\\\"}。"
-    '实际输出示例：{"emotion":"happy"}。'
+    "表情输出规则：每次助手回复都应根据本轮实际回答的语义选择一个匹配的表情，"
+    "但不要在回复文本中输出表情名称、JSON 或任何机器控制字段；表情由后端独立处理，"
+    "不得让用户听到或看到内部控制信息。"
     "emotion 只能使用 neutral、happy、laughing、funny、sad、angry、"
     "crying、loving、embarrassed、surprised、shocked、thinking、winking、"
     "cool、relaxed、delicious、kissy、confident 之一。"
     "表情必须根据助手本轮实际回答选择，不得依据用户语音转写中的情绪字段，"
     "也不得复用上一轮表情；普通问候和积极回答使用 happy，疑问或思考使用 thinking，"
-    "明确的错误、遗憾或安慰场景才使用 sad。不要把 JSON 字段读给用户。"
+    "明确的错误、遗憾或安慰场景才使用 sad。"
 )
 
 DEFAULT_GLOBAL_TOOL_INSTRUCTIONS = "\n\n".join((
@@ -195,6 +194,11 @@ def normalize_global_tool_rules(value, legacy=""):
                 "content": content,
             })
         if normalized:
+            for rule in normalized:
+                if (rule.get("id") == "emotion" and
+                        ("附加机器可解析" in rule.get("content", "") or
+                         "{\\\"emotion\\\":" in rule.get("content", ""))):
+                    rule["content"] = EMOTION_INSTRUCTIONS
             # Older persisted rule lists were created before assistant
             # emotion output was introduced.  Keep their custom rules, but
             # migrate the missing built-in emotion rule so it reaches the
