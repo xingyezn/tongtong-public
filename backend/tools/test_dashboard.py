@@ -109,7 +109,8 @@ async def main():
                 "realtime_url": "wss://dashscope.example", "output_sample_rate": 24000,
             },
             "devices": {"enabled": False},
-            "vad": {"silence_duration_ms": 600, "energy_threshold": 600},
+            "vad": {"silence_duration_ms": 600, "energy_threshold": 600,
+                    "tts_startup_buffer_ms": 1200},
             "dashboard": {"session_ttl": 86400, "registration_enabled": True},
         }
         session = FakeSession({
@@ -182,14 +183,18 @@ async def main():
             r = await client.post("http://127.0.0.1:8099/api/vad", headers=headers,
                                   json={"device_id": first["device_id"],
                                         "silence_duration_ms": 350,
-                                        "energy_threshold": 250})
+                                        "energy_threshold": 250,
+                                        "tts_startup_buffer_ms": 1200})
             assert r.status == 200 and session.config["vad"]["silence_duration_ms"] == 350
 
             categories_url = ("http://127.0.0.1:8099/api/model-tool-categories?device_id=" +
                               first["device_id"])
             r = await client.get(categories_url, headers=headers)
             categories = await r.json()
-            assert r.status == 200 and all(categories["model_tool_categories"].values())
+            assert r.status == 200 and categories["model_tool_categories"] == {
+                "chassis": False, "camera": True,
+                "gimbal_servo": False, "backend": True,
+            }
             r = await client.post("http://127.0.0.1:8099/api/model-tool-categories",
                                   headers=headers, json={
                                       "device_id": first["device_id"],
@@ -200,7 +205,7 @@ async def main():
             categories = await r.json()
             assert r.status == 200 and categories["model_tool_categories"] == {
                 "chassis": False, "camera": True,
-                "gimbal_servo": False,
+                "gimbal_servo": False, "backend": True,
             }
             assert session.config["model_tool_categories"] == categories["model_tool_categories"]
 
@@ -293,8 +298,11 @@ async def main():
             r = await client.get(
                 "http://127.0.0.1:8099/api/test/tools?device_id=" + first["device_id"],
                 headers=headers)
-            assert [tool["name"] for tool in (await r.json())["tools"]] == [
-                "self.chassis.go_forward"]
+            tool_names = [tool["name"] for tool in (await r.json())["tools"]]
+            assert tool_names == [
+                "self.chassis.go_forward", "server.weather.get", "server.time.now",
+                "server.music.search", "server.music.play", "server.music.random",
+                "server.music.list"]
             r = await client.post("http://127.0.0.1:8099/api/test/mcp", headers=headers,
                                   json={"device_id": first["device_id"],
                                         "name": "self.chassis.go_forward",

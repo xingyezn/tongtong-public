@@ -82,10 +82,10 @@ class ImmediateMcp:
         }]
         self._next_id = 10
 
-    def make_omni_tools(self):
+    def make_omni_tools(self, motor_defaults=None, model_tool_categories=None):
         bridge = McpBridge(lambda _value: None)
         bridge.tools = self.tools
-        return bridge.make_omni_tools()
+        return bridge.make_omni_tools(motor_defaults, model_tool_categories)
 
     def make_tools_call(self, name, arguments, call_id):
         self._next_id += 1
@@ -258,7 +258,7 @@ async def test_realtime_tool_event_loop():
     websocket = FakeRealtimeWebSocket()
     client = OmniClient(config)
     effective_instructions = client.effective_instructions()
-    assert "必须每次重新调用对应的摄像头/人脸检测工具" in effective_instructions
+    assert "必须优先调用云端工具 server.face.recognize_current" in effective_instructions
     assert "不得使用、推测或复用历史对话中的图片" in effective_instructions
     assert client.conversation_timeout == 600.0
     config["dashscope"]["conversation_timeout_minutes"] = 2
@@ -367,7 +367,8 @@ async def test_playback_prebuffer():
         "audio_b64": base64.b64encode(frame).decode(),
         "sample_rate": 24000,
     }, state)
-    assert [m.get("state") for m in ws.text_messages] == ["start"]
+    assert [m.get("state") for m in ws.text_messages
+            if m.get("type") == "tts"] == ["start"]
     assert len(ws.binary_messages) == 4
 
 
@@ -403,6 +404,7 @@ async def test_interrupt_mutes_audio_but_preserves_complete_text():
     assert len(ws.binary_messages) == audio_count_at_interrupt
     assert persisted == [(
         "interrupt-device", "请把刚才的话说完", "前半句，后半句。",
+        None, "happy", "local",
     )]
     assert any(
         message.get("type") == "tts" and message.get("state") == "stop"
@@ -443,7 +445,8 @@ async def test_model_farewell_enters_standby_after_text_is_saved():
     await session._run_omni_turn(b"\x00\x00" * 1600)
 
     assert events == [
-        ("record", ("farewell-device", "你可以退下了", "好的，需要时再叫我。")),
+        ("record", ("farewell-device", "你可以退下了", "好的，需要时再叫我。",
+                     None, "happy", "local")),
         ("end", "farewell-device"),
     ]
     assert omni.reset_count == 1
@@ -502,7 +505,9 @@ async def main():
     assistant_updates = [m.get("text") for m in ws.text_messages
                          if m.get("type") == "tts" and m.get("state") == "sentence_start"]
     assert assistant_updates == ["已打开"]
-    assert persisted == [("test-device", "请打开灯", "已打开")]
+    assert persisted == [(
+        "test-device", "请打开灯", "已打开", None, "happy", "local",
+    )]
     assert len(ws.binary_messages) == 1
     assert ws.binary_messages[0].endswith(b"fake-opus")
     assert not session.speaking
