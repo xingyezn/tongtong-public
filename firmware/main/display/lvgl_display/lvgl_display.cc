@@ -11,7 +11,9 @@
 #include "audio_codec.h"
 #include "settings.h"
 #include "assets/lang_config.h"
+#if CONFIG_LV_USE_SNAPSHOT
 #include "jpg/image_to_jpeg.h"
+#endif
 
 #define TAG "Display"
 
@@ -220,8 +222,8 @@ void LvglDisplay::SetPowerSaveMode(bool on) {
     }
 }
 
-bool LvglDisplay::SnapshotToJpeg(std::string& jpeg_data, int quality) {
 #if CONFIG_LV_USE_SNAPSHOT
+bool LvglDisplay::SnapshotToJpeg(std::string& jpeg_data, int quality) {
     DisplayLockGuard lock(this);
 
     lv_obj_t* screen = lv_screen_active();
@@ -256,8 +258,5 @@ bool LvglDisplay::SnapshotToJpeg(std::string& jpeg_data, int quality) {
 
     lv_draw_buf_destroy(draw_buffer);
     return ret;
-#else
-    ESP_LOGE(TAG, "LV_USE_SNAPSHOT is not enabled");
-    return false;
-#endif
 }
+#endif

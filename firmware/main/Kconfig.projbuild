@@ -741,7 +741,7 @@ menu "Camera Configuration"
 
     config XIAOZHI_CAMERA_ALLOW_JPEG_INPUT
         bool "Allow JPEG Input"
-        default n
+        default y
         help
             Allow JPEG Input format for the camera.
 

@@ -32,8 +32,6 @@ set(SOURCES "audio/audio_codec.cc"
             "display/lvgl_display/lvgl_image.cc"
             "display/lvgl_display/gif/lvgl_gif.cc"
             "display/lvgl_display/gif/gifdec.c"
-            "display/lvgl_display/jpg/image_to_jpeg.cpp"
-            "display/lvgl_display/jpg/jpeg_to_image.c"
             "protocols/protocol.cc"
             "protocols/mqtt_protocol.cc"
             "protocols/websocket_protocol.cc"
@@ -61,6 +59,18 @@ list(APPEND INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/boards/common)
 if(NOT CONFIG_ENABLE_LOCAL_FACE_DETECTION)
     list(REMOVE_ITEM SOURCES
          "${CMAKE_CURRENT_SOURCE_DIR}/boards/common/camera_face_detect_local.cc")
+endif()
+
+# The Tongtong UVC camera provides MJPEG frames. When local face detection
+# and screen snapshots are disabled, upload those JPEG frames directly and
+# do not compile the software JPEG codec.
+if(CONFIG_LV_USE_SNAPSHOT OR CONFIG_ENABLE_LOCAL_FACE_DETECTION OR
+   NOT CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT)
+    list(APPEND SOURCES "display/lvgl_display/jpg/image_to_jpeg.cpp")
+endif()
+
+if(NOT CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT)
+    list(APPEND SOURCES "display/lvgl_display/jpg/jpeg_to_image.c")
 endif()
 
 idf_build_get_property(build_components BUILD_COMPONENTS)

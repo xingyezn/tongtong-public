@@ -16,9 +16,6 @@
 #include "board.h"
 #include "display.h"
 #include "esp32_camera.h"
-#include "esp_jpeg_common.h"
-#include "jpg/image_to_jpeg.h"
-#include "jpg/jpeg_to_image.h"
 #include "lvgl_display.h"
 #include "mcp_server.h"
 #include "system_info.h"
@@ -862,33 +859,6 @@ bool Esp32Camera::Capture() {
                 lvgl_image_size = frame_.len;  // fallthrough 时兼顾 YUYV 与 RGB565
                 break;
 
-#ifdef CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT
-            case V4L2_PIX_FMT_JPEG: {
-                uint8_t* out_data = nullptr;  // out data is allocated by jpeg_to_image
-                size_t out_len = 0;
-                size_t out_width = 0;
-                size_t out_height = 0;
-                size_t out_stride = 0;
-
-                esp_err_t ret =
-                    jpeg_to_image(frame_.data, frame_.len, &out_data, &out_len, &out_width, &out_height, &out_stride);
-                if (ret != ESP_OK) {
-                    ESP_LOGE(TAG, "Failed to decode JPEG image: %d (%s)", (int)ret, esp_err_to_name(ret));
-                    if (out_data) {
-                        heap_caps_free(out_data);
-                        out_data = nullptr;
-                    }
-                    return false;
-                }
-
-                data = out_data;
-                w = out_width;
-                h = out_height;
-                lvgl_image_size = out_len;
-                stride = out_stride;
-                break;
-            }
-#endif
             default:
                 ESP_LOGE(TAG, "unsupported frame format: 0x%08lx", frame_.format);
                 return false;
@@ -993,36 +963,26 @@ std::string Esp32Camera::Explain(const std::string& question) {
         throw std::runtime_error("Failed to create JPEG queue");
     }
 
-    // We spawn a thread to encode the image to JPEG using optimized encoder (cost about 500ms and 8KB SRAM)
-    encoder_thread_ = std::thread([this, jpeg_queue]() {
-        uint16_t w = frame_.width ? frame_.width : 320;
-        uint16_t h = frame_.height ? frame_.height : 240;
-        v4l2_pix_fmt_t enc_fmt = frame_.format;
-        bool ok = image_to_jpeg_cb(
-            frame_.data, frame_.len, w, h, enc_fmt, 80,
-            [](void* arg, size_t index, const void* data, size_t len) -> size_t {
-                auto jpeg_queue = static_cast<QueueHandle_t>(arg);
-                JpegChunk chunk = {.data = nullptr, .len = len};
-                if (index == 0 && data != nullptr && len > 0) {
-                    chunk.data = (uint8_t*)heap_caps_aligned_alloc(16, len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-                    if (chunk.data == nullptr) {
-                        ESP_LOGE(TAG, "Failed to allocate %zu bytes for JPEG chunk", len);
-                        chunk.len = 0;
-                    } else {
-                        memcpy(chunk.data, data, len);
-                    }
-                } else {
-                    chunk.len = 0;  // Sentinel or error
-                }
-                xQueueSend(jpeg_queue, &chunk, portMAX_DELAY);
-                return len;
-            },
-            jpeg_queue);
+    if (frame_.format != V4L2_PIX_FMT_JPEG) {
+        vQueueDelete(jpeg_queue);
+        throw std::runtime_error("Cloud image upload requires a JPEG camera frame");
+    }
 
-        if (!ok) {
-            JpegChunk chunk = {.data = nullptr, .len = 0};
+    // The UVC camera already provides a standards-compliant JPEG frame. Keep
+    // it in PSRAM and upload it directly; no RGB conversion or software JPEG
+    // encoding is needed.
+    encoder_thread_ = std::thread([this, jpeg_queue]() {
+        JpegChunk chunk = {.data = nullptr, .len = frame_.len};
+        chunk.data = (uint8_t*)heap_caps_aligned_alloc(16, frame_.len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (chunk.data != nullptr) {
+            memcpy(chunk.data, frame_.data, frame_.len);
             xQueueSend(jpeg_queue, &chunk, portMAX_DELAY);
+        } else {
+            ESP_LOGE(TAG, "Failed to allocate %zu bytes for JPEG frame", frame_.len);
         }
+
+        JpegChunk terminator = {.data = nullptr, .len = 0};
+        xQueueSend(jpeg_queue, &terminator, portMAX_DELAY);
     });
 
     auto network = Board::GetInstance().GetNetwork();

@@ -142,7 +142,7 @@ dependencies:
       type: service
     version: 0.5.3
   espressif/dl_fft:
-    component_hash: a955ca29581de2177ddf25759273bd83f082b3c805e735fe6ee105858643989b
+    component_hash: 3e8f7d34e04bfa6333f289a6d126745bebe0cee9311b81a6a5d106047f63ef65
     dependencies:
     - name: idf
       require: private
@@ -150,7 +150,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com
       type: service
-    version: 0.6.0
+    version: 0.7.0
   espressif/esp-dl:
     component_hash: 996c9d5ae81ebbb38d3e70314cccdae6e2ae0908842fad3512cff60db734635c
     dependencies:
@@ -524,7 +524,7 @@ dependencies:
     component_hash: e6af208a875abd0ecfc0213d3751a11b504b463ebde6930f24096047925fa5c1
     dependencies: []
     source:
-      registry_url: https://components.espressif.com/
+      registry_url: https://components.espressif.com
       type: service
     targets:
     - esp32
@@ -820,7 +820,6 @@ direct_dependencies:
 - espressif/esp_lcd_touch_st7123
 - espressif/esp_lvgl_port
 - espressif/esp_mmap_assets
-- espressif/esp_new_jpeg
 - espressif/esp_video
 - espressif/human_face_detect
 - espressif/knob
@@ -834,6 +833,6 @@ direct_dependencies:
 - waveshare/esp_lcd_sh8601
 - waveshare/esp_lcd_touch_cst9217
 - wvirgil123/sscma_client
-manifest_hash: d382dfa395ec48af2777b139e93bc36b6bd05e219fe7d61be278e98dc03f4b33
+manifest_hash: 34ec4a82bef68a8d93c3acbc8ba6aeb53a564d7655a14bc3d1de415870c01fd2
 target: esp32s3
 version: 2.0.0
