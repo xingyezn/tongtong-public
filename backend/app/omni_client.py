@@ -195,6 +195,23 @@ def normalize_global_tool_rules(value, legacy=""):
                 "content": content,
             })
         if normalized:
+            # Older persisted rule lists were created before assistant
+            # emotion output was introduced.  Keep their custom rules, but
+            # migrate the missing built-in emotion rule so it reaches the
+            # model and is also visible in the admin rule editor.
+            has_emotion_rule = any(
+                rule.get("id") == "emotion" or
+                "emotion 只能使用" in rule.get("content", "")
+                for rule in normalized
+            )
+            if not has_emotion_rule:
+                normalized.append({
+                    "id": "emotion",
+                    "name": "表情输出规则",
+                    "category": "general",
+                    "enabled": True,
+                    "content": EMOTION_INSTRUCTIONS,
+                })
             return normalized
     if legacy and legacy.strip():
         rules = []

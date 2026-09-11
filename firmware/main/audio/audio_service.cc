@@ -1,4 +1,5 @@
 #include "audio_service.h"
+#include <algorithm>
 #include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <cstring>
@@ -685,19 +686,37 @@ bool AudioService::IsIdle() {
 }
 
 void AudioService::ResetDecoder() {
-    PreparePlaybackStream(0);
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    opus_decoder_->ResetState();
+    timestamp_queue_.clear();
+    audio_decode_queue_.clear();
+    audio_playback_queue_.clear();
+    playback_prebuffer_frames_ = 0;
+    playback_stream_ended_ = false;
+    audio_queue_cv_.notify_all();
 }
 
-void AudioService::PreparePlaybackStream(size_t prebuffer_frames) {
+void AudioService::PreparePlaybackStream() {
     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
     opus_decoder_->ResetState();
     timestamp_queue_.clear();
     audio_decode_queue_.clear();
     audio_playback_queue_.clear();
     audio_testing_queue_.clear();
-    playback_prebuffer_frames_ = prebuffer_frames;
+    playback_prebuffer_frames_ = configured_prebuffer_frames_;
     playback_stream_ended_ = false;
     audio_queue_cv_.notify_all();
+}
+
+void AudioService::SetPlaybackPrebufferMs(int buffer_ms) {
+    buffer_ms = std::max(TTS_PLAYBACK_PREBUFFER_MIN_MS,
+                         std::min(TTS_PLAYBACK_PREBUFFER_MAX_MS, buffer_ms));
+    const size_t frames = static_cast<size_t>(
+        (buffer_ms + OPUS_FRAME_DURATION_MS - 1) / OPUS_FRAME_DURATION_MS);
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    configured_prebuffer_frames_ = frames;
+    ESP_LOGI(TAG, "TTS startup buffer configured: %d ms (%u frames)",
+             buffer_ms, static_cast<unsigned>(frames));
 }
 
 void AudioService::FinishPlaybackStream() {

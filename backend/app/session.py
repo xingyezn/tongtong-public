@@ -393,6 +393,7 @@ class Session:
             "automatic_interrupt": bool(features.get("automatic_interrupt", True)),
             "button_interrupt": bool(features.get("button_interrupt", True)),
             "double_click_end": bool(features.get("double_click_end", True)),
+            "tts_startup_buffer_ms": self._tts_startup_prebuffer_frames() * DEVICE_FRAME_MS,
         })
 
     async def _keepalive_loop(self):

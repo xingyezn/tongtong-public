@@ -930,6 +930,10 @@ void Application::InitializeProtocol() {
                     if (cJSON_IsBool(double_click_end)) {
                         double_click_end_enabled_ = cJSON_IsTrue(double_click_end);
                     }
+                    auto tts_startup_buffer_ms = cJSON_GetObjectItem(root, "tts_startup_buffer_ms");
+                    if (cJSON_IsNumber(tts_startup_buffer_ms)) {
+                        audio_service_.SetPlaybackPrebufferMs(tts_startup_buffer_ms->valueint);
+                    }
                     ESP_LOGI(TAG, "Conversation config: auto=%d button=%d double_end=%d",
                         automatic_interrupt_enabled_, button_interrupt_enabled_,
                         double_click_end_enabled_);

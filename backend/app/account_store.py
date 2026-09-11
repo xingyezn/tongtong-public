@@ -19,7 +19,9 @@ MODEL_SETTING_KEYS = {
     "model", "language", "voice", "instructions", "conversation_timeout_minutes",
     "model_tool_categories",
 }
-VAD_SETTING_KEYS = {"silence_duration_ms", "energy_threshold"}
+VAD_SETTING_KEYS = {
+    "silence_duration_ms", "energy_threshold", "tts_startup_buffer_ms",
+}
 INTERRUPTION_SETTING_KEYS = {
     "automatic_interrupt", "button_interrupt", "double_click_end",
 }

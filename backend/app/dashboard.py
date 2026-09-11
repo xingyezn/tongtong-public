@@ -413,6 +413,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <label class="muted" style="min-width:130px">语音能量阈值</label>
       <input type="number" id="vad-threshold" min="1" max="30000" step="10" value="100" style="flex:1;max-width:160px;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4">
     </div>
+    <div class="row" style="margin-bottom:10px">
+      <label class="muted" style="min-width:130px">播放前缓冲(ms)</label>
+      <input type="number" id="tts-buffer" min="240" max="1500" step="60" value="1200" style="flex:1;max-width:160px;padding:6px 8px;background:#0f1420;border:1px solid #2a3550;border-radius:6px;color:#dbe4f4">
+    </div>
     <div class="row">
       <button class="btn" onclick="saveVad()">保存 VAD 配置</button>
       <span class="muted" id="vad-status"></span>
@@ -420,6 +424,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="hint">
       <b>静音结束时长</b>：说话停止后等这么久才触发对话（越小反应越快，可能误触发）。<br>
       <b>能量阈值</b>：高于此算"说话"，低于算"静音"（环境吵则调高）。<br>
+      <b>播放前缓冲</b>：大模型语音开始播放前，先在设备端缓存的音频时长；越大越不容易卡顿，但首字响应会变慢。范围 240~1500ms。<br>
       修改即时生效，无需重启。
     </div>
   </div>
@@ -910,13 +915,15 @@ async function loadVad() {
     const d = await r.json();
     $("vad-silence").value = d.silence_duration_ms;
     $("vad-threshold").value = d.energy_threshold;
+    $("tts-buffer").value = d.tts_startup_buffer_ms ?? 1200;
   } catch (e) {}
 }
 async function saveVad() {
   if (!activeDeviceId) return showToast("请先绑定并选择设备", "err");
   const silence = parseInt($("vad-silence").value, 10);
   const threshold = parseFloat($("vad-threshold").value);
-  if (isNaN(silence) || isNaN(threshold)) {
+  const ttsBuffer = parseInt($("tts-buffer").value, 10);
+  if (isNaN(silence) || isNaN(threshold) || isNaN(ttsBuffer)) {
     $("vad-status").textContent = "请输入数字";
     $("vad-status").style.color = "var(--bad)";
     return;
@@ -931,7 +938,12 @@ async function saveVad() {
     $("vad-status").style.color = "var(--bad)";
     return;
   }
-  const body = { device_id: activeDeviceId, silence_duration_ms: silence, energy_threshold: threshold };
+  if (ttsBuffer < 240 || ttsBuffer > 1500) {
+    $("vad-status").textContent = "播放前缓冲需在 240~1500ms";
+    $("vad-status").style.color = "var(--bad)";
+    return;
+  }
+  const body = { device_id: activeDeviceId, silence_duration_ms: silence, energy_threshold: threshold, tts_startup_buffer_ms: ttsBuffer };
   try {
     const r = await fetch("/api/vad", {
       method: "POST",
@@ -939,7 +951,7 @@ async function saveVad() {
       body: JSON.stringify(body),
     });
     const d = await r.json();
-    $("vad-status").textContent = "已保存: 静音 " + d.silence_duration_ms + "ms, 阈值 " + d.energy_threshold;
+    $("vad-status").textContent = "已保存: 静音 " + d.silence_duration_ms + "ms, 阈值 " + d.energy_threshold + ", 播放前缓冲 " + d.tts_startup_buffer_ms + "ms";
     $("vad-status").style.color = "var(--ok)";
   } catch (e) {
     $("vad-status").textContent = "保存失败";
@@ -3148,6 +3160,8 @@ class Dashboard:
         return {
             "silence_duration_ms": settings.get("silence_duration_ms", 900),
             "energy_threshold": settings.get("energy_threshold", 120.0),
+            "tts_startup_buffer_ms": max(240, min(1500, int(
+                settings.get("tts_startup_buffer_ms", 1200)))),
         }
 
     def _refresh_active_device_config(self, device_id):
@@ -3157,7 +3171,10 @@ class Dashboard:
         model = self._effective_model_settings(device_id)
         model.pop("api_key_configured", None)
         session.config.setdefault("dashscope", {}).update(model)
-        session.config.setdefault("vad", {}).update(self._effective_vad_settings(device_id))
+        vad = self._effective_vad_settings(device_id)
+        session.config.setdefault("vad", {}).update(vad)
+        session.config.setdefault("audio", {})["tts_startup_buffer_ms"] = vad[
+            "tts_startup_buffer_ms"]
         session.config["motor_defaults"] = {
             "speed": self._global_int_setting("motor_default_speed", 85, 0, 100),
             "duration_ms": self._global_int_setting(
@@ -3515,11 +3532,20 @@ class Dashboard:
             vad = {
                 "silence_duration_ms": max(200, min(6000, int(data["silence_duration_ms"]))),
                 "energy_threshold": max(1, min(30000, float(data["energy_threshold"]))),
+                "tts_startup_buffer_ms": max(240, min(1500, int(
+                    data["tts_startup_buffer_ms"]))),
             }
         except (KeyError, TypeError, ValueError):
             return web.json_response({"error": "invalid VAD settings"}, status=400)
         self.account_store.set_vad_settings(user["id"], device_id, vad)
         self._refresh_active_device_config(device_id)
+        session = self.sessions.get(device_id)
+        if session:
+            await session.send_json({
+                "type": "system",
+                "command": "conversation_config",
+                "tts_startup_buffer_ms": vad["tts_startup_buffer_ms"],
+            })
         log.info("VAD 配置更新: user=%s device=%s settings=%s",
                  user["username"], device_id, vad)
         return web.json_response(vad)
