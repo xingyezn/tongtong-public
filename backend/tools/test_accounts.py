@@ -52,9 +52,26 @@ def main():
             store._db.execute(
                 "UPDATE chat_sessions SET last_message_at=? WHERE id=?",
                 (time.time() - 7200, chats[0]["id"]))
+        photo_bytes = b"\xff\xd8chat-photo-test\xff\xd9"
+        photo = store.record_chat_photo(
+            dev["device_id"], photo_bytes, "你看到了什么？")
+        assert photo and photo["size_bytes"] == len(photo_bytes)
         second_turn = store.record_turn(
-            dev["device_id"], "still there", "yes", timeout_minutes=1)
+            dev["device_id"], "still there", "yes", timeout_minutes=1,
+            photo_ids=[photo["id"]])
         assert second_turn["conversation_id"] == chats[0]["id"]
+        messages_with_photo = store.get_chat_messages(
+            alice["id"], chats[0]["id"])["messages"]
+        attached = messages_with_photo[-1]["photos"]
+        assert len(attached) == 1
+        assert attached[0]["question"] == "你看到了什么？"
+        assert attached[0]["description"] == "yes"
+        assert store.get_chat_photo(alice["id"], photo["id"])["image"] == photo_bytes
+        try:
+            store.get_chat_photo(bob["id"], photo["id"])
+            raise AssertionError("cross-user photo access was accepted")
+        except PermissionError:
+            pass
         memory = store.upsert_memory(
             alice["id"], "偏好", "喜欢的颜色", "蓝色")
         assert store.memory_prompt(alice["id"]) == "- 喜欢的颜色：蓝色"

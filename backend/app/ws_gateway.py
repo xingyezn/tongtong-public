@@ -167,12 +167,13 @@ class WsGateway:
         turn_recorder = None
         if self.account_store:
             def turn_recorder(did, user_text, assistant_text, usage=None,
-                              emotion=None, emotion_source=None):
-                self.account_store.record_turn(
+                              emotion=None, emotion_source=None,
+                              photo_ids=None):
+                return self.account_store.record_turn(
                     did, user_text, assistant_text,
                     device_config.get("dashscope", {}).get(
                         "conversation_timeout_minutes", 10), usage, emotion,
-                    emotion_source)
+                    emotion_source, photo_ids)
         session = Session(
             ws, device_config, self.omni, device_id,
             conversation_memory=self._conversation_memory(device_id),
